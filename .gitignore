@@ -1,9 +1,69 @@
-# Build output
+# --- Build directories ---
 build/
-cmake-build-*/
-compile_commands.json
+build-*/
+out/
+cmake-build-*/          # CLion
+_deps/                  # CMake FetchContent downloads
 
-# Personal documents — never belongs in a repo that will be published
-*.pdf
-*Resume*
-*CV*
+# --- CMake generated ---
+CMakeCache.txt
+CMakeFiles/
+CMakeUserPresets.json   # personal presets; CMakePresets.json IS tracked
+cmake_install.cmake
+CTestTestfile.cmake
+Testing/
+install_manifest.txt
+*.cmake.in.tmp
+
+# --- Compiled output ---
+*.o
+*.obj
+*.a
+*.lib
+*.so
+*.so.*
+*.dylib
+*.dll
+*.exe
+*.pdb
+
+# --- Tooling ---
+compile_commands.json   # generated; regenerate rather than commit
+.cache/                 # clangd index
+*.gcda
+*.gcno
+*.gcov
+coverage/
+*.profraw
+*.profdata
+
+# --- Fuzzing (Layer 1 BER decoder, per the staged plan) ---
+# Corpora are deliberately NOT ignored: a curated seed corpus and any
+# crash-reproducing input belong in the repo. Only transient output here.
+fuzz/*/crash-*
+fuzz/*/leak-*
+fuzz/*/timeout-*
+fuzz/**/fuzz-*.log
+
+# --- Secrets and local test material ---
+# SNMPv3 passphrases must never be committed. Example configs with
+# obviously-fake credentials are fine; anything named *.local. is not.
+*.local.json
+*.local.yaml
+*.local.conf
+*.pem
+*.key
+!examples/*.json
+
+# --- Packet captures from interop debugging ---
+# Often contain real device addresses and community strings.
+*.pcap
+*.pcapng
+
+# --- Editor / OS ---
+.vscode/
+!.vscode/extensions.json
+.idea/
+*.swp
+*~
+.DS_Store

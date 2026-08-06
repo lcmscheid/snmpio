@@ -53,8 +53,8 @@ from gosnmp or async-snmp needs an attribution comment at the site *and* a `NOTI
 
 ### Issue tracker
 
-GitHub Issues via the `gh` CLI — but **this repo has no remote yet**, so `gh` will fail until one
-exists. See `docs/agents/issue-tracker.md`.
+GitHub Issues via the `gh` CLI, on [`lcmscheid/snmpio`](https://github.com/lcmscheid/snmpio).
+See `docs/agents/issue-tracker.md`.
 
 ### Triage labels
 

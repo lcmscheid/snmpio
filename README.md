@@ -134,6 +134,11 @@ No MIB parsing, in this stage or any later one. GET, SET and WALK operate on num
 nothing in RFC 3411/3412/3414/3416/3417 requires MIB knowledge. If symbolic names are ever wanted
 they belong in a separate optional target consuming pre-compiled MIB data.
 
+## Contributing
+
+Issues and specs live in [GitHub Issues](https://github.com/lcmscheid/snmpio/issues). Triage uses
+five labels — `needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`.
+
 ## License
 
 Apache-2.0 — see [`LICENSE`](LICENSE) and [`NOTICE`](NOTICE), and ADR-0007 for why. Same licence as

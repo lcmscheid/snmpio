@@ -17,15 +17,17 @@ add_library(snmpio_fuzzed STATIC
   ${CMAKE_SOURCE_DIR}/src/Error.cpp
   ${CMAKE_SOURCE_DIR}/src/Oid.cpp
   ${CMAKE_SOURCE_DIR}/src/Pdu.cpp
+  ${CMAKE_SOURCE_DIR}/src/Usm.cpp
+  ${CMAKE_SOURCE_DIR}/src/V3Message.cpp
   ${CMAKE_SOURCE_DIR}/src/Value.cpp)
 target_include_directories(snmpio_fuzzed PUBLIC ${CMAKE_SOURCE_DIR}/include)
-target_link_libraries(snmpio_fuzzed PUBLIC snmpio_fuzz_options)
+target_link_libraries(snmpio_fuzzed PUBLIC snmpio_fuzz_options PRIVATE OpenSSL::Crypto)
 target_compile_features(snmpio_fuzzed PUBLIC cxx_std_20)
 if(SNMP_USE_BOOST_ASIO)
   target_compile_definitions(snmpio_fuzzed PUBLIC SNMPIO_USE_BOOST_ASIO=1)
 endif()
 
-foreach(target FuzzBerValue FuzzBerVarbindList FuzzOidText FuzzV2cMessage)
+foreach(target FuzzBerValue FuzzBerVarbindList FuzzOidText FuzzV2cMessage FuzzV3Message)
   add_executable(${target} ${target}.cpp)
   target_link_libraries(${target} PRIVATE snmpio_fuzzed)
 endforeach()

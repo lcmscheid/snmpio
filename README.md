@@ -8,14 +8,16 @@ that shaped it are in [`docs/adr/`](docs/adr).
 
 ## Status
 
-**Stage 1 of 6.** SNMPv2c works end to end over UDP: GET, GETNEXT, GETBULK, SET and Walk.
+**Stage 2 of 6.** SNMPv2c works end to end over UDP: GET, GETNEXT, GETBULK, SET and Walk. The
+SNMPv3 message and its USM authentication are implemented and tested, but not yet wired to the
+Client — sending one needs engine discovery, which is stage 3.
 
 | Stage | Deliverable | State |
 |---|---|---|
 | 0 | CMake skeleton, OID/value types, BER encode/decode + fuzz targets | **done** |
 | 1 | v2c GET / GETNEXT / GETBULK / SET and Walk over Asio UDP | **done** |
-| 2 | v3 message framing, USM auth (MD5, SHA-1, SHA-2), password-to-key, key localization | next |
-| 3 | Async engine discovery, time sync, Report handling | |
+| 2 | v3 message framing, USM auth (MD5, SHA-1, SHA-2), password-to-key, key localization | **done** |
+| 3 | Async engine discovery, time sync, Report handling | next |
 | 4 | Privacy: AES-128, then AES-192/256 under both key extensions, DES behind an opt-in | |
 | 5 | Interop matrix vs the Simulator, `snmpd`, and real vendor gear | |
 | 6 | Docs, cancellation semantics, error taxonomy, packaging | |
@@ -28,11 +30,15 @@ cmake --build --preset default
 ctest --preset default
 ```
 
-Requires a C++20 compiler with coroutine support, CMake 3.24+, and either Boost.Asio 1.77 or
-newer (the default) or standalone Asio 1.21 or newer. The version floor is per-operation
-cancellation, which the Walk's `total`/`terminal` split is built on. CMake enforces it for
-Boost and for standalone Asio found via its config package; the bare-include-directory fallback
-has no version to check.
+Requires a C++20 compiler with coroutine support, CMake 3.24+, OpenSSL 3.0 or newer, and either
+Boost.Asio 1.77 or newer (the default) or standalone Asio 1.21 or newer. The Asio floor is
+per-operation cancellation, which the Walk's `total`/`terminal` split is built on. CMake enforces
+it for Boost and for standalone Asio found via its config package; the bare-include-directory
+fallback has no version to check.
+
+OpenSSL supplies the hashes and HMACs USM needs (ADR-0001). It is required rather than optional:
+SNMPv3 is the reason this library exists, and a build with USM silently missing would be a trap.
+
 To avoid the Boost dependency, use the `standalone` preset — standalone Asio is `asio` on Arch and
 `libasio-dev` on Debian/Ubuntu.
 
@@ -110,7 +116,7 @@ mkdir -p .fuzz-work
 The first directory is where libFuzzer writes what it finds; `fuzz/corpus` is passed read-only so
 the curated seeds stay curated.
 
-Four targets, each asserting a round-trip identity rather than merely "does not crash":
+Five targets, each asserting a round-trip identity rather than merely "does not crash":
 
 - `FuzzBerValue` — anything the value decoder accepts must re-encode and decode back identically.
 - `FuzzBerVarbindList` — the same, over the nesting path: scope entry, length patching, and the
@@ -118,6 +124,32 @@ Four targets, each asserting a round-trip identity rather than merely "does not 
 - `FuzzOidText` — the dotted-decimal parser, which is where untrusted *text* enters the OID type.
 - `FuzzV2cMessage` — the whole datagram: framing, version, community and the PDU inside them. This
   is the surface a hostile Agent actually reaches.
+- `FuzzV3Message` — the v3 datagram, and `verifyAuth` over whatever it decodes to. The digest's
+  offset is derived from attacker-controlled length fields and is then used to index the datagram,
+  which is exactly the shape of bug a fuzzer under ASan finds and review does not.
+
+## What stage 2 contains
+
+- `snmpio::AuthProtocol` / `snmpio::SecurityLevel` / `snmpio::Credentials` — the USM user, the
+  level they authenticate at, and the protocol behind it. MD5 and SHA-1 are present on purpose
+  (ADR-0005). Security Level is valued as its `msgFlags` bits, the way `PduType` is valued as its
+  BER tag.
+- `snmpio::passwordToKey` / `snmpio::localizeKey` — RFC 3414 appendix A.2's megabyte expansion, and
+  the hash that binds the resulting Master Key to one Engine. Both are checked against the RFC's
+  own MD5 and SHA-1 vectors. Neither caches: a cache without an owner is a leak, and stage 3 owns
+  the per-(Credentials, engineID) one.
+- `snmpio::V3Header` / `snmpio::UsmParameters` / `snmpio::ScopedPdu` — RFC 3412's message framing,
+  RFC 3414's security parameters inside their OCTET STRING, and the PDU with the context it is
+  interpreted in.
+- `encodeV3Message` / `verifyAuth` — the digest computed over the finished message with its own
+  field blanked, and checked in constant time on the way back. Each layer is encoded into its own
+  buffer and then wrapped, so that a sequence length widening past 127 Octets cannot silently move
+  the digest; the long-user-name test is the one that fails if that changes.
+
+Not yet here: privacy (stage 4), so `authPriv` is refused rather than downgraded, and an incoming
+`encryptedPDU` decodes to `Errc::UnsupportedSecurityLevel`. Timeliness — boots, time and the
+150-second Time Window — is stage 3's, because it needs the cached engine state that discovery
+produces.
 
 ## What stage 1 contains
 
@@ -143,9 +175,9 @@ Cancellation is split as the ADR requires: `total` stops at a batch boundary and
 `Errc::WalkIncomplete` alongside what was already delivered, `terminal` drops everything with
 `operation_aborted`.
 
-Not yet here, and deliberately: SNMPv3 in any form, Report routing (stage 3), and hostname
-resolution — a `Target` is built from an `asio::ip::udp::endpoint`, so resolving is the caller's
-choice of resolver rather than a policy this library picks.
+Not yet here, and deliberately: SNMPv3 on the Client's own API, Report routing (stage 3), and
+hostname resolution — a `Target` is built from an `asio::ip::udp::endpoint`, so resolving is the
+caller's choice of resolver rather than a policy this library picks.
 
 ## What stage 0 contains
 

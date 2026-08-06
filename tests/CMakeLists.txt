@@ -18,6 +18,8 @@ add_executable(snmpio_tests
   TestError.cpp
   TestOid.cpp
   TestPdu.cpp
+  TestUsm.cpp
+  TestV3Message.cpp
   TestValue.cpp)
 
 target_link_libraries(snmpio_tests PRIVATE snmpio snmpio_warnings GTest::gtest GTest::gtest_main)

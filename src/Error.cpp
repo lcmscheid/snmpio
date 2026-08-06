@@ -74,6 +74,20 @@ class SnmpioCategory final : public net::ErrorCategory {
         return "Agent returned a non-increasing object identifier during a Walk";
       case Errc::WalkIncomplete:
         return "Walk stopped before the end of the Subtree";
+      case Errc::UnsupportedAuthProtocol:
+        return "authentication protocol is unavailable or unset";
+      case Errc::UnsupportedSecurityLevel:
+        return "security level is not one this build can produce";
+      case Errc::UnsupportedSecurityModel:
+        return "message security model is not USM";
+      case Errc::BadMessageFlags:
+        return "message flags are not a single Octet, or claim privacy without authentication";
+      case Errc::EmptyPassword:
+        return "authentication password is empty";
+      case Errc::CryptoFailure:
+        return "cryptographic operation failed";
+      case Errc::AuthFailed:
+        return "message authentication digest did not match";
     }
     return "unknown snmpio error " + std::to_string(ev);
   }

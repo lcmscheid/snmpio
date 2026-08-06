@@ -1,8 +1,9 @@
 # snmpio
 
 An async C++20 SNMPv2c/SNMPv3 command generator built directly on Asio. Manager side only, no
-net-snmp dependency. Currently at **stage 0 of 6** — the BER codec and value types exist; nothing
-talks to a network yet. `README.md` has the stage table.
+net-snmp dependency. Currently at **stage 2 of 6** — v2c works end to end over UDP, and the v3
+message plus USM authentication exist but are not yet wired to the Client. `README.md` has the
+stage table.
 
 ## Read before changing anything
 
@@ -43,11 +44,15 @@ rejects. `pip install clang-format==22.1.8 clang-tidy==22.1.8` if your distro sh
 disabled check carries its reason in the file; add yours the same way rather than silently
 widening the list. `tests/` and `fuzz/` have an overlay for test idioms.
 
+**Crypto** — OpenSSL EVP, never our own (ADR-0001). Key derivation is pinned to RFC 3414's own
+MD5 and SHA-1 vectors; the SHA-2 rows have no published vectors and were generated from an
+independent implementation, so they pin against drift rather than against being wrong.
+
 **Codec posture** — lenient where leniency is unambiguous (redundant integer sign padding,
 non-minimal long-form lengths), strict where it is not (indefinite length, high-tag-number form,
 sub-identifier overflow). Changing which side something falls on is an ADR-sized decision.
 
-**Tests** — 79 of them, and the defensive paths are the point. A decoder change that keeps them all
+**Tests** — 128 of them, and the defensive paths are the point. A decoder change that keeps them all
 green has probably not been tested; the misbehaving-agent cases are why ADR-0006 exists.
 
 **Licence** — Apache-2.0. No per-file copyright headers, deliberately (ADR-0007). Anything ported

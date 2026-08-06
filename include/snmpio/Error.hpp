@@ -6,8 +6,8 @@
 namespace snmpio {
 
 // The library's own faults. Stage 0 filled in the codec half -- "these bytes are not a
-// well-formed SNMP encoding" -- and stage 1 added the transport and protocol half. USM errors
-// arrive with stage 2.
+// well-formed SNMP encoding" -- stage 1 added the transport and protocol half, and stage 2 the
+// security one.
 //
 // An Agent's own error-status is deliberately *not* here: it is a distinct enumeration with
 // numbering fixed by RFC 3416, and it lives in its own category as snmpio::ErrorStatus.
@@ -51,6 +51,18 @@ enum class Errc {
   ClientStopped,     // the Client stopped while the request was outstanding
   NonIncreasingOid,  // a Walk Response repeated or went backwards (ADR-0004)
   WalkIncomplete,    // a Walk stopped early: cancelled, or the batch handler asked it to
+
+  // Security (USM). A rejection the Agent reports is not here: that arrives as a Report PDU and
+  // is handled internally (stage 3), not surfaced as one of our faults.
+  UnsupportedAuthProtocol,   // an auth operation asked for with AuthProtocol::None, or one the
+                             // local OpenSSL will not provide
+  UnsupportedSecurityLevel,  // a Security Level this build cannot produce -- authPriv until
+                             // privacy lands in stage 4
+  UnsupportedSecurityModel,  // msgSecurityModel names something other than USM
+  BadMessageFlags,           // msgFlags was not one Octet, or claimed privacy without auth
+  EmptyPassword,             // password-to-key on an empty password, which it cannot expand
+  CryptoFailure,             // OpenSSL refused an operation that should not have been refusable
+  AuthFailed,                // the message's digest is not the one its key produces
 };
 
 const net::ErrorCategory& errorCategory() noexcept;

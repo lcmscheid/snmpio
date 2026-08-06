@@ -88,6 +88,10 @@ endif()
 
 find_package(Threads REQUIRED)
 
+# ADR-0001: the crypto is OpenSSL EVP's, not ours. Required rather than optional -- SNMPv3 is the
+# reason this library exists, and a build with USM silently missing would be a trap.
+find_package(OpenSSL 3.0 REQUIRED)
+
 # ---------------------------------------------------------------------------
 # The library
 # ---------------------------------------------------------------------------
@@ -98,6 +102,8 @@ add_library(snmpio
   src/Error.cpp
   src/Oid.cpp
   src/Pdu.cpp
+  src/Usm.cpp
+  src/V3Message.cpp
   src/Value.cpp)
 add_library(snmpio::snmpio ALIAS snmpio)
 
@@ -107,6 +113,9 @@ target_include_directories(snmpio
     $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
 
 target_link_libraries(snmpio PUBLIC ${SNMPIO_ASIO_TARGET} Threads::Threads)
+# Private: no public header names an OpenSSL type. Consumers still need the package found, which
+# is why snmpioConfig.cmake finds it -- a static archive carries its private links to the linker.
+target_link_libraries(snmpio PRIVATE OpenSSL::Crypto)
 if(SNMPIO_ASIO_INCLUDE_DIRS)
   target_include_directories(snmpio SYSTEM PUBLIC
     $<BUILD_INTERFACE:${SNMPIO_ASIO_INCLUDE_DIRS}>)

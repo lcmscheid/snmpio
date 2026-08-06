@@ -32,7 +32,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y ninja-build libgtest-dev
+          sudo apt-get install -y ninja-build libgtest-dev libssl-dev
           if [ "${{ matrix.asio }}" = "boost" ]; then
             sudo apt-get install -y libboost-system-dev
           else
@@ -63,7 +63,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y ninja-build clang libasio-dev
+          sudo apt-get install -y ninja-build clang libasio-dev libssl-dev
 
       - name: Build fuzzers
         run: |
@@ -78,7 +78,8 @@ jobs:
       - name: Fuzz
         run: |
           mkdir -p .fuzz-work
-          for target in FuzzBerValue FuzzBerVarbindList FuzzOidText FuzzV2cMessage; do
+          for target in FuzzBerValue FuzzBerVarbindList FuzzOidText FuzzV2cMessage \
+                        FuzzV3Message; do
             ./build-fuzz/fuzz/$target .fuzz-work fuzz/corpus \
               -max_total_time=60 -print_final_stats=1
           done
@@ -115,7 +116,7 @@ jobs:
       - name: Install build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y ninja-build libasio-dev libgtest-dev
+          sudo apt-get install -y ninja-build libasio-dev libgtest-dev libssl-dev
 
       - name: Report tool versions
         run: |

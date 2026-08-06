@@ -125,9 +125,10 @@ ctest --preset default -R Interop --output-on-failure
 `SNMPIO_INTEROP_TARGET` is the Target the Agent answers at, as `address`, `address:port` or
 `[v6]:port`. `SNMPIO_INTEROP_V3_PASSWORD` is the password every v3 interop user carries, and
 gates the v3 tests: the Agent has to be running the configuration
-[`tests/interop/snmpd-conf.sh`](tests/interop/snmpd-conf.sh) prints, and a switch on the bench is
-not, so an unset variable skips rather than fails. One value configures the Agent and drives the
-suite, which is why it is not written down twice.
+[`tests/interop/snmpd-conf.sh`](tests/interop/snmpd-conf.sh) or
+[`tests/interop/fault-agent-auth.sh`](tests/interop/fault-agent-auth.sh) prints, and a switch on
+the bench is not, so an unset variable skips rather than fails. One value configures the Agent and
+drives the suite, which is why it is not written down twice.
 
 An address, not a hostname. A `Target` is built from an endpoint so that choosing a resolver stays
 the caller's business (stage 1), and the harness is a caller like any other — so a hostname is
@@ -135,7 +136,22 @@ rejected outright rather than quietly resolved. A variable that is set but unusa
 suite; only an unset one skips it, since a typo that skipped would report green for an Agent it
 never reached.
 
-An `snmpd` on a spare port is the whole of what CI runs against, and it is two commands here:
+Two more variables say what the Agent at that Target can do, and each gates the tests that would
+otherwise be asserting on the Agent rather than on this library. Both are set by whoever starts the
+Agent, because nothing on the wire announces either:
+
+| Variable | Set it when the Agent |
+|---|---|
+| `SNMPIO_INTEROP_V3_KEY_EXTENSIONS` | serves the `privsha1aes192`/`256`(`c`) users — AES-192/256 under both schemes |
+| `SNMPIO_INTEROP_V3_USM_REPORTS` | answers a bad digest with a usmStats Report, which RFC 3414 leaves optional |
+
+CI runs both Agents, one job each, and between them they cover every v3 case above. Neither gate is
+a Security Level being negotiated: the Simulator **infers** the level from which protocols a user
+carries, while this library **requires** it explicitly, and that divergence is deliberate on both
+sides — a Client that silently downgraded `authPriv` would have a security hole, where a test Agent
+that accepts what arrives is merely convenient (ADR-0006).
+
+An `snmpd` on a spare port is two commands:
 
 ```sh
 mkdir -p /tmp/snmp-persist
@@ -143,17 +159,33 @@ tests/interop/snmpd-conf.sh > /tmp/snmpd.conf
 snmpd -f -Lo -C -c /tmp/snmpd.conf --persistentDir=/tmp/snmp-persist udp:127.0.0.1:16161
 ```
 
-The v3 users are a convention that script and the tests share — `noauth`, `auth<hash>` per
-authentication protocol, and `priv<hash><cipher>` per pair — because they are ours to create. The
-matrix is everything `snmpd` speaks: MD5, SHA-1 and the four SHA-2 hashes, each of them alone at
-`authNoPriv` and again over DES and AES-128 at `authPriv`. AES-192/256 under either Key Extension
-are not in `snmpd` at all, which is what the Simulator is for (ADR-0006).
+The [Simulator](https://github.com/lcmscheid/snmp-fault-agent) is one. `latest` is the tag to run
+here; CI names the same image by digest, so a push to the Simulator's own repo cannot change what a
+commit was tested against between two runs of it:
+
+```sh
+tests/interop/fault-agent-auth.sh > /tmp/auth.json
+docker run --rm -p 127.0.0.1:16161:1161/udp -p 127.0.0.1:8080:8080 \
+  -v /tmp/auth.json:/etc/snmpfault/auth.json:ro ghcr.io/lcmscheid/snmp-fault-agent:latest
+```
+
+The v3 users are a convention those two scripts and the tests share — `noauth`, `auth<hash>` per
+authentication protocol, and `priv<hash><cipher>` per pair — because they are ours to create; the
+Simulator's own example configuration names them otherwise, which is why ours is mounted over it.
+The matrix is everything `snmpd` speaks: MD5, SHA-1 and the four SHA-2 hashes, each of them alone
+at `authNoPriv` and again over DES and AES-128 at `authPriv`. AES-192/256 under either Key
+Extension are not in `snmpd` at all — net-snmp needs a build flag for them that Debian does not
+carry — so those four are the Simulator's, paired with SHA-1 on purpose: both schemes derive
+`localizedKey || extension` and truncate to the cipher's key length, so an auth hash already as
+long as the key discards the extension and Blumenthal and Reeder come out byte-identical
+(ADR-0006).
 
 What the suite proves: a v2c GET of `sysDescr.0`, which it prints because no two Agents say the
-same thing; the eighteen v3 pairs above; that Engine Discovery costs the extra round trips exactly
-once, counted off the wire by a relay between Client and Agent, since the API deliberately never
-surfaces it; and that a wrong password comes back as the Report the Engine sent rather than as a
-timeout. The Simulator at a pinned digest and the misbehaviour cases are the rest of stage 5.
+same thing; the eighteen v3 pairs above and the four Key Extension ones; that Engine Discovery
+costs the extra round trips exactly once, counted off the wire by a relay between Client and Agent,
+since the API deliberately never surfaces it; and that a wrong password comes back as the Report
+the Engine sent rather than as a timeout. Telling the Simulator to misbehave is the rest of
+stage 5.
 
 ## Fuzzing
 

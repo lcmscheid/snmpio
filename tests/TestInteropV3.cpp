@@ -43,8 +43,15 @@ struct PrivRow {
 constexpr std::array<PrivRow, 2> privProtocols{
     {{PrivProtocol::Des, "des"}, {PrivProtocol::Aes128, "aes"}}};
 
+// What the Simulator adds, and the reason it is in CI at all (ADR-0006).
+constexpr std::array<PrivRow, 4> keyExtensionProtocols{{{PrivProtocol::Aes192, "aes192"},
+                                                        {PrivProtocol::Aes256, "aes256"},
+                                                        {PrivProtocol::Aes192C, "aes192c"},
+                                                        {PrivProtocol::Aes256C, "aes256c"}}};
+
 // What the tests that want one pair rather than the whole matrix reach for. Named rather than
 // indexed off the tables above, so that reordering those cannot silently retarget a test.
+constexpr AuthRow sha1Row{AuthProtocol::Sha1, "sha1"};
 constexpr AuthRow sha256Row{AuthProtocol::Sha256, "sha256"};
 constexpr PrivRow aes128Row{PrivProtocol::Aes128, "aes"};
 
@@ -129,6 +136,26 @@ TEST_F(InteropV3, CoversTheAuthAndPrivacyMatrix) {
       expectSysDescr(get(m_target, privCredentials(auth, priv, m_password)),
                      std::string("authPriv/") + auth.name + "/" + priv.name);
     }
+  }
+}
+
+// Both Key Extension schemes, against the one Agent in CI that speaks either. Blumenthal and
+// Reeder are mutually incompatible, so a Client that guessed instead of choosing fails half of
+// these -- which is the whole point of running them on every commit rather than at pre-release
+// against a borrowed switch (ADR-0006).
+//
+// SHA-1 for all four, and not arbitrarily: both schemes derive `localizedKey || extension` and
+// truncate to the cipher's key length, so an auth hash already as long as the key discards the
+// extension and the two schemes come out byte-identical. SHA-1's 20 bytes are shorter than both 24
+// and 32, so the extension is actually reached; pairing with SHA-256 would pass without either
+// scheme being implemented at all.
+TEST_F(InteropV3, CoversBothKeyExtensions) {
+  if (!envVar("SNMPIO_INTEROP_V3_KEY_EXTENSIONS")) {
+    GTEST_SKIP() << "needs SNMPIO_INTEROP_V3_KEY_EXTENSIONS and an Agent serving AES-192/256";
+  }
+  for (const auto& priv : keyExtensionProtocols) {
+    expectSysDescr(get(m_target, privCredentials(sha1Row, priv, m_password)),
+                   std::string("authPriv/sha1/") + priv.name);
   }
 }
 
@@ -252,7 +279,15 @@ TEST_F(InteropV3, DiscoveryCostsExtraRoundTripsOnlyOnce) {
 // A wrong password must arrive as the Report the Engine sends -- usmStatsWrongDigests, which this
 // library spells AuthFailed because that is what it means. A timeout here would mean the Report
 // was dropped, and "wrong password" would be indistinguishable from "unplugged".
+//
+// Gated, because an Agent that answers a bad digest with silence is not thereby broken: RFC 3414
+// §3.2 (5) lets it choose, and the Simulator does -- the library GoSNMPServer it is built on sends
+// no usmStats Report at all, so against it this asserts on an Agent's choice rather than on this
+// Client.
 TEST_F(InteropV3, SurfacesAWrongPasswordAsAReport) {
+  if (!envVar("SNMPIO_INTEROP_V3_USM_REPORTS")) {
+    GTEST_SKIP() << "needs SNMPIO_INTEROP_V3_USM_REPORTS and an Agent that sends usmStats Reports";
+  }
   const auto wrong = get(m_target, authCredentials(sha256Row, m_password + "-and-then-some"));
   EXPECT_EQ(wrong.ec, make_error_code(Errc::AuthFailed))
       << "got " << wrong.ec.category().name() << ": " << wrong.ec.message();

@@ -95,27 +95,45 @@ jobs:
             timeout-*
           if-no-files-found: ignore
 
-  # The one job that sends a real datagram to an Agent nobody here wrote. Everything else in this
-  # workflow talks to the Scripted Agent, which shares our own reading of the protocol -- so a
-  # misreading of RFC 3416 would pass every other job in this file.
+  # The only jobs that send a real datagram to an Agent nobody here wrote. Everything else in this
+  # workflow talks to the Scripted Agent, which shares our own reading of the protocol, so a
+  # misreading of RFC 3416 would pass every other job here. Two Agents that disagree with us are
+  # better evidence than one: `snmpd` unprivileged on a high port, and our own Simulator, which is
+  # the only Agent in CI that speaks AES-192/256 under either Key Extension scheme (ADR-0006) --
+  # net-snmp needs a build flag for them that Debian does not carry.
   #
-  # `snmpd` unprivileged on a high port, not a container: this is the v2c smoke test, and stage 5's
-  # remaining tickets are what bring the Simulator image and the v3 matrix.
+  # Telling the Simulator to misbehave is stage 5's remaining ticket; this runs it compliant.
   interop:
-    name: interop (snmpd)
+    name: interop (${{ matrix.agent }})
     runs-on: ubuntu-24.04
+    # The capability flags say what each Agent is, not what it should be, since nothing on the wire
+    # announces either. Empty reads as unset (tests/InteropTarget.hpp), so each Agent is asked only
+    # what it can answer: `snmpd` answers a bad digest with the usmStats Report RFC 3414 leaves
+    # optional and speaks no AES-192/256; the Simulator is the other way round.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - agent: snmpd
+            apt: snmpd
+            usmReports: '1'
+          - agent: simulator
+            apt: ''
+            keyExtensions: '1'
     # One value configures the Agent and drives the suite, so the two cannot drift. It is not a
-    # secret: it authorizes a loopback `snmpd` this job starts and kills.
+    # secret: it authorizes a loopback Agent this job starts and kills.
     env:
       SNMPIO_INTEROP_TARGET: 127.0.0.1:16161
       SNMPIO_INTEROP_V3_PASSWORD: snmpio-interop-ci
+      SNMPIO_INTEROP_V3_USM_REPORTS: ${{ matrix.usmReports }}
+      SNMPIO_INTEROP_V3_KEY_EXTENSIONS: ${{ matrix.keyExtensions }}
     steps:
       - uses: actions/checkout@v5
 
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y ninja-build libboost-system-dev libgtest-dev libssl-dev snmpd
+          sudo apt-get install -y ninja-build libboost-system-dev libgtest-dev libssl-dev ${{ matrix.apt }}
 
       - name: Build
         run: |
@@ -123,6 +141,7 @@ jobs:
           cmake --build build
 
       - name: Start snmpd
+        if: matrix.agent == 'snmpd'
         run: |
           mkdir -p "$RUNNER_TEMP/snmp-persist"
           tests/interop/snmpd-conf.sh > "$RUNNER_TEMP/snmpd.conf"
@@ -133,6 +152,31 @@ jobs:
           timeout 10 bash -c 'until ss -lun | grep -q 127.0.0.1:16161; do sleep 0.5; done' \
             || { cat "$RUNNER_TEMP/snmpd.log"; exit 1; }
 
+      # The image carries its own example configuration, whose users are named for the Simulator's
+      # purposes. Ours is mounted over it so the suite's `auth<hash>` / `priv<hash><cipher>`
+      # convention holds against both Agents and there is no second table saying the same thing.
+      #
+      # The image is pinned to a digest rather than to `latest`, so a push to the Simulator's own
+      # repo cannot change what this library was tested against between two runs of the same
+      # commit. Moving the pin is a commit here, which is where a Simulator change that breaks us
+      # becomes visible. `docker buildx imagetools inspect
+      # ghcr.io/lcmscheid/snmp-fault-agent:latest` prints the current one.
+      - name: Start the Simulator
+        if: matrix.agent == 'simulator'
+        env:
+          SIMULATOR_IMAGE: ghcr.io/lcmscheid/snmp-fault-agent@sha256:f66982cf07e3290d3a9e054e60539a2d82810648f11fd94e48cf5ee8eb89a158
+        run: |
+          tests/interop/fault-agent-auth.sh > "$RUNNER_TEMP/auth.json"
+          docker run -d --name simulator \
+            -p 127.0.0.1:16161:1161/udp -p 127.0.0.1:8080:8080 \
+            -v "$RUNNER_TEMP/auth.json:/etc/snmpfault/auth.json:ro" \
+            "$SIMULATOR_IMAGE"
+          # The web UI and the SNMP socket come up in the same process, and the UI answers over
+          # TCP -- so a connection to it is the readiness check, where the published UDP port is
+          # listening from the moment Docker forwards it whether the Agent is there or not.
+          timeout 30 bash -c 'until curl -fsS -o /dev/null http://127.0.0.1:8080/; do sleep 0.5; done' \
+            || { docker logs simulator; exit 1; }
+
       # -R Interop is the live half only; the harness's own parsing tests are named Harness*, so a
       # green run here means Responses actually came back. These tests skip when their environment
       # is missing, which here is the `env:` block above -- delete that and this job goes green
@@ -140,9 +184,10 @@ jobs:
       - name: Interop
         run: ctest --test-dir build -R Interop --output-on-failure --no-tests=error
 
-      - name: snmpd log
+      - name: Agent log
         if: failure()
-        run: cat "$RUNNER_TEMP/snmpd.log"
+        run: |
+          [ '${{ matrix.agent }}' = snmpd ] && cat "$RUNNER_TEMP/snmpd.log" || docker logs simulator
 
   style:
     name: clang-format + clang-tidy

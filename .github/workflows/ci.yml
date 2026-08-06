@@ -124,11 +124,8 @@ jobs:
           /usr/sbin/snmpd -f -Lo -C -c "$RUNNER_TEMP/snmpd.conf" udp:127.0.0.1:16161 \
             > "$RUNNER_TEMP/snmpd.log" 2>&1 &
           # The socket is what the suite needs, not the process -- so wait for the socket.
-          for _ in $(seq 20); do
-            ss -lun | grep -q 127.0.0.1:16161 && exit 0
-            sleep 0.5
-          done
-          echo "snmpd never bound 127.0.0.1:16161"; cat "$RUNNER_TEMP/snmpd.log"; exit 1
+          timeout 10 bash -c 'until ss -lun | grep -q 127.0.0.1:16161; do sleep 0.5; done' \
+            || { cat "$RUNNER_TEMP/snmpd.log"; exit 1; }
 
       # -R Interop is the live half only; the harness's own parsing tests are named Harness*, so a
       # green run here means a Response actually came back.

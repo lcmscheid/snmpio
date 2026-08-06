@@ -118,10 +118,8 @@ so a run filtered to `Interop` that reports all green really did reach an Agent.
 SNMPIO_INTEROP_TARGET=127.0.0.1:16161 ctest --preset default -R Interop --output-on-failure
 ```
 
-| Variable | Default | Meaning |
-|---|---|---|
-| `SNMPIO_INTEROP_TARGET` | unset — suite skips | The Target the Agent answers at, as `address`, `address:port` or `[v6]:port` |
-| `SNMPIO_INTEROP_COMMUNITY` | `public` | The v2c Community |
+`SNMPIO_INTEROP_TARGET` is the Target the Agent answers at, as `address`, `address:port` or
+`[v6]:port`. Unset, the suite skips.
 
 An address, not a hostname. A `Target` is built from an endpoint so that choosing a resolver stays
 the caller's business (stage 1), and the harness is a caller like any other — so a hostname is

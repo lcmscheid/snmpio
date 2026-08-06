@@ -1,0 +1,116 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ADR-0002: both Asio flavours are built on every commit -- Boost.Asio is the default, but the
+  # untested one rots, and because the choice appears in every public signature it cannot be
+  # repaired later without a break.
+  build:
+    name: ${{ matrix.compiler }} / ${{ matrix.asio }}${{ matrix.sanitize && ' / asan+ubsan' || '' }}
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        compiler: [gcc, clang]
+        asio: [boost, standalone]
+        sanitize: [false]
+        include:
+          - compiler: clang
+            asio: boost
+            sanitize: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build libgtest-dev
+          if [ "${{ matrix.asio }}" = "boost" ]; then
+            sudo apt-get install -y libboost-system-dev
+          else
+            sudo apt-get install -y libasio-dev
+          fi
+
+      - name: Configure
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=${{ matrix.sanitize && 'Debug' || 'RelWithDebInfo' }} \
+            -DCMAKE_CXX_COMPILER=${{ matrix.compiler == 'gcc' && 'g++' || 'clang++' }} \
+            -DSNMP_USE_BOOST_ASIO=${{ matrix.asio == 'boost' && 'ON' || 'OFF' }} \
+            -DSNMPIO_SANITIZE=${{ matrix.sanitize && 'ON' || 'OFF' }} \
+            -DSNMPIO_WERROR=ON
+
+      - name: Build
+        run: cmake --build build
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
+  fuzz:
+    name: fuzz (smoke)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build clang libasio-dev
+
+      - name: Build fuzzers
+        run: |
+          cmake -S . -B build-fuzz -G Ninja \
+            -DCMAKE_CXX_COMPILER=clang++ \
+            -DSNMPIO_BUILD_TESTS=OFF \
+            -DSNMPIO_BUILD_FUZZERS=ON
+          cmake --build build-fuzz
+
+      # A short run per commit, so a regression that the seed corpus already covers is caught
+      # immediately. Long campaigns belong in a scheduled job, not on the PR path.
+      - name: Fuzz
+        run: |
+          mkdir -p .fuzz-work
+          for target in FuzzBerValue FuzzBerVarbindList FuzzOidText; do
+            ./build-fuzz/fuzz/$target .fuzz-work fuzz/corpus \
+              -max_total_time=60 -print_final_stats=1
+          done
+
+      - name: Upload crashes
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-crashes
+          path: |
+            crash-*
+            leak-*
+            timeout-*
+          if-no-files-found: ignore
+
+  style:
+    name: clang-format + clang-tidy
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build clang-format clang-tidy libasio-dev libgtest-dev
+
+      - name: Format
+        run: |
+          find include src tests fuzz -name '*.hpp' -o -name '*.cpp' \
+            | xargs clang-format --dry-run --Werror
+
+      # Static analysis, plus the naming convention the formatter cannot check. tests/ and fuzz/
+      # carry their own overlay relaxing the checks that only make sense for library code.
+      - name: clang-tidy
+        run: |
+          cmake -S . -B build -G Ninja
+          clang-tidy -p build src/*.cpp tests/*.cpp fuzz/*.cpp

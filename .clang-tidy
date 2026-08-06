@@ -1,0 +1,106 @@
+# Static analysis and naming for snmpio.
+#
+# Naming convention (clang-format only reflows code, it cannot check names):
+#
+#   types and files        UpperCamelCase
+#   functions, variables   lowerCamelCase
+#   private members        m_lowerCamelCase
+#   namespaces             lower_case
+#
+# Every disabled check below is disabled for a stated reason. A check turned off because it was
+# noisy on one line is a check that will not catch the real defect later, so the default is on.
+
+Checks: >
+  bugprone-*,
+  cert-*,
+  clang-analyzer-*,
+  concurrency-*,
+  cppcoreguidelines-*,
+  misc-*,
+  modernize-*,
+  performance-*,
+  portability-*,
+  readability-*,
+
+  -bugprone-easily-swappable-parameters,
+  -cppcoreguidelines-avoid-magic-numbers,
+  -readability-magic-numbers,
+  -cppcoreguidelines-pro-bounds-avoid-unchecked-container-access,
+  -cppcoreguidelines-pro-bounds-constant-array-index,
+  -cppcoreguidelines-pro-bounds-pointer-arithmetic,
+  -cppcoreguidelines-pro-bounds-array-to-pointer-decay,
+  -cppcoreguidelines-pro-type-reinterpret-cast,
+  -misc-include-cleaner,
+  -modernize-use-trailing-return-type,
+  -modernize-return-braced-init-list,
+  -performance-enum-size,
+  -readability-braces-around-statements,
+  -readability-identifier-length,
+  -readability-use-concise-preprocessor-directives,
+
+# Why each of those is off:
+#
+#   bugprone-easily-swappable-parameters
+#       Fires on (TagType, std::size_t) style signatures throughout the codec. The tag and the
+#       length are not confusable in practice and the suggested fix is a wrapper type per
+#       parameter.
+#   *-magic-numbers
+#       This is a wire-format codec. 0x80, 0x7F, 40 and 128 are the specification's numbers, not
+#       unexplained constants, and they are already named where naming helps (see ber/Tag.hpp).
+#   cppcoreguidelines-pro-bounds-*
+#       Indexed access over a byte span is the entire job here. The bounds that matter are the
+#       ones Reader::Scope enforces, and those are checked by construction and by test.
+#   cppcoreguidelines-pro-type-reinterpret-cast
+#       The only way to view a char/uint8_t buffer as std::byte at an API boundary.
+#   misc-include-cleaner
+#       Wants every transitively-used declaration included directly, including implementation
+#       details of libstdc++. Revisit if it ever gets a stable notion of a public header.
+#   modernize-use-trailing-return-type, modernize-return-braced-init-list
+#       Pure style, and not this codebase's style.
+#   performance-enum-size
+#       Errc is stored in an error_code as an int; shrinking the enum saves nothing real.
+#   readability-braces-around-statements
+#       Single-line guard clauses (`if (m_ec) return;`) are deliberate and dense on purpose.
+#   readability-identifier-length
+#       Rejects `v`, `t`, `b`, `o` in two-line functions where a longer name is worse.
+#   readability-use-concise-preprocessor-directives
+#       Suggests #elifdef, which is C++23. This library is C++20.
+
+WarningsAsErrors: '*'
+HeaderFilterRegex: 'include/snmpio/.*\.hpp$'
+
+CheckOptions:
+  # Dispatch over ~12 wire tags scores high on cognitive complexity without being hard to read.
+  # The threshold is raised, not disabled, so a genuinely tangled function still trips it.
+  readability-function-cognitive-complexity.Threshold: 35
+  readability-function-cognitive-complexity.IgnoreMacros: true
+
+  # POD value types are all-public by design; they are data, not encapsulated state.
+  misc-non-private-member-variables-in-classes.IgnoreClassesWithAllMemberVariablesBeingPublic: true
+
+  readability-identifier-naming.NamespaceCase: lower_case
+
+  readability-identifier-naming.ClassCase: CamelCase
+  readability-identifier-naming.StructCase: CamelCase
+  readability-identifier-naming.EnumCase: CamelCase
+  readability-identifier-naming.EnumConstantCase: CamelCase
+  readability-identifier-naming.TypeAliasCase: CamelCase
+  readability-identifier-naming.TypedefCase: CamelCase
+  readability-identifier-naming.TemplateParameterCase: CamelCase
+
+  readability-identifier-naming.FunctionCase: camelBack
+  readability-identifier-naming.MethodCase: camelBack
+  readability-identifier-naming.VariableCase: camelBack
+  readability-identifier-naming.ParameterCase: camelBack
+  readability-identifier-naming.ConstantCase: camelBack
+  readability-identifier-naming.ConstexprVariableCase: camelBack
+  readability-identifier-naming.StaticConstantCase: camelBack
+
+  # m_ marks encapsulated state; a POD read as vb.m_name is only noise.
+  readability-identifier-naming.PrivateMemberCase: camelBack
+  readability-identifier-naming.PrivateMemberPrefix: 'm_'
+  readability-identifier-naming.ProtectedMemberCase: camelBack
+  readability-identifier-naming.ProtectedMemberPrefix: 'm_'
+  readability-identifier-naming.PublicMemberCase: camelBack
+
+  readability-identifier-naming.MacroDefinitionCase: UPPER_CASE

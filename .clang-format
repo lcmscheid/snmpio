@@ -1,0 +1,10 @@
+---
+Language: Cpp
+BasedOnStyle: Google
+ColumnLimit: 100
+IndentWidth: 2
+AccessModifierOffset: -1
+DerivePointerAlignment: false
+PointerAlignment: Left
+IncludeBlocks: Preserve
+AllowShortFunctionsOnASingleLine: Inline

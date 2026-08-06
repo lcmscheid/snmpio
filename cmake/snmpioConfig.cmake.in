@@ -1,0 +1,16 @@
+@PACKAGE_INIT@
+
+include(CMakeFindDependencyMacro)
+
+set(SNMPIO_USE_BOOST_ASIO @SNMP_USE_BOOST_ASIO@)
+
+if(SNMPIO_USE_BOOST_ASIO)
+  find_dependency(Boost 1.74 CONFIG OPTIONAL_COMPONENTS system)
+else()
+  find_dependency(asio CONFIG)
+endif()
+find_dependency(Threads)
+
+include("${CMAKE_CURRENT_LIST_DIR}/snmpioTargets.cmake")
+
+check_required_components(snmpio)

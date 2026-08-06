@@ -44,6 +44,7 @@ fuzz/*/crash-*
 fuzz/*/leak-*
 fuzz/*/timeout-*
 fuzz/**/fuzz-*.log
+.fuzz-work/             # libFuzzer's writable output dir; seeds live in fuzz/corpus
 
 # --- Secrets and local test material ---
 # SNMPv3 passphrases must never be committed. Example configs with
@@ -67,3 +68,18 @@ fuzz/**/fuzz-*.log
 *.swp
 *~
 .DS_Store
+
+# --- AI coding-agent harness ---
+# Shared project instruction (CLAUDE.md / AGENTS.md) and shared settings are tracked
+# deliberately: they are onboarding docs for agents, the same way CONTRIBUTING.md is for
+# people. What must not be tracked is anything personal, machine-specific, or holding
+# credentials.
+.claude/settings.local.json
+.claude/*.local.json
+.claude/projects/        # session transcripts; may contain anything that was pasted in
+.claude/shell-snapshots/
+.claude/todos/
+.claude/statsig/
+.mcp.local.json          # MCP server config with tokens; .mcp.json may be tracked if clean
+.aider*
+.cursorignore

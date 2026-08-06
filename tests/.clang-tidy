@@ -1,0 +1,24 @@
+# Inherits the project configuration and relaxes what is specific to test code.
+InheritParentConfig: true
+
+Checks: >
+  -cppcoreguidelines-avoid-do-while,
+  -cppcoreguidelines-macro-usage,
+  -bugprone-unchecked-optional-access,
+  -readability-function-cognitive-complexity,
+  -misc-use-anonymous-namespace,
+  -modernize-use-designated-initializers,
+
+# Why:
+#
+#   cppcoreguidelines-avoid-do-while, cppcoreguidelines-macro-usage
+#       GoogleTest's assertion macros are do-while wrappers, and EXPECT_DECODE_FAILS has to be a
+#       macro to report the caller's line number.
+#   bugprone-unchecked-optional-access
+#       `*Oid::parse("1.3.6.1")` on a literal is deliberate: if the literal is wrong the test
+#       should fail loudly, and an ASSERT on every fixture would bury the actual assertion.
+#   readability-function-cognitive-complexity
+#       A table-driven test body is long by design and reads top to bottom.
+#   modernize-use-designated-initializers
+#       Fixture rows like `{bytes({0x02, 0x01, 0x00}), 0}` are a table. Naming both fields on
+#       every row triples their width and hides the pattern the table exists to show.

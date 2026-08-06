@@ -1,0 +1,84 @@
+{
+  "version": 3,
+  "cmakeMinimumRequired": { "major": 3, "minor": 24, "patch": 0 },
+  "configurePresets": [
+    {
+      "name": "base",
+      "hidden": true,
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "SNMPIO_WERROR": "ON"
+      }
+    },
+    {
+      "name": "default",
+      "inherits": "base",
+      "displayName": "Boost.Asio",
+      "description": "The library's default (ADR-0002).",
+      "cacheVariables": { "SNMP_USE_BOOST_ASIO": "ON" }
+    },
+    {
+      "name": "standalone",
+      "inherits": "base",
+      "displayName": "Standalone Asio",
+      "description": "ADR-0002's other half, for consumers avoiding Boost. Arch: pacman -S asio.",
+      "cacheVariables": { "SNMP_USE_BOOST_ASIO": "OFF" }
+    },
+    {
+      "name": "debug",
+      "inherits": "default",
+      "displayName": "Debug",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug" }
+    },
+    {
+      "name": "asan",
+      "inherits": "default",
+      "displayName": "ASan + UBSan",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "SNMPIO_SANITIZE": "ON"
+      }
+    },
+    {
+      "name": "tidy",
+      "inherits": "default",
+      "displayName": "clang-tidy in the build",
+      "cacheVariables": {
+        "CMAKE_CXX_COMPILER": "clang++",
+        "SNMPIO_CLANG_TIDY": "ON"
+      }
+    },
+    {
+      "name": "fuzz",
+      "inherits": "default",
+      "displayName": "Fuzzers (Clang only)",
+      "cacheVariables": {
+        "CMAKE_CXX_COMPILER": "clang++",
+        "SNMPIO_BUILD_TESTS": "OFF",
+        "SNMPIO_BUILD_FUZZERS": "ON"
+      }
+    }
+  ],
+  "buildPresets": [
+    { "name": "default", "configurePreset": "default" },
+    { "name": "standalone", "configurePreset": "standalone" },
+    { "name": "debug", "configurePreset": "debug" },
+    { "name": "asan", "configurePreset": "asan" },
+    { "name": "tidy", "configurePreset": "tidy" },
+    { "name": "fuzz", "configurePreset": "fuzz" }
+  ],
+  "testPresets": [
+    {
+      "name": "base",
+      "hidden": true,
+      "output": { "outputOnFailure": true },
+      "execution": { "noTestsAction": "error" }
+    },
+    { "name": "default", "inherits": "base", "configurePreset": "default" },
+    { "name": "standalone", "inherits": "base", "configurePreset": "standalone" },
+    { "name": "debug", "inherits": "base", "configurePreset": "debug" },
+    { "name": "asan", "inherits": "base", "configurePreset": "asan" }
+  ]
+}

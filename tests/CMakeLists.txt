@@ -14,8 +14,10 @@ add_executable(snmpio_tests
   TestBerReader.cpp
   TestBerRoundtrip.cpp
   TestBerWriter.cpp
+  TestClient.cpp
   TestError.cpp
   TestOid.cpp
+  TestPdu.cpp
   TestValue.cpp)
 
 target_link_libraries(snmpio_tests PRIVATE snmpio snmpio_warnings GTest::gtest GTest::gtest_main)

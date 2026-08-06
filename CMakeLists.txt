@@ -49,10 +49,10 @@ endif()
 if(SNMP_USE_BOOST_ASIO)
   # Boost.System has been header-only since 1.69 and some distributions no longer ship a
   # boost_system component at all, so ask for the component and fall back to Boost::headers.
-  find_package(Boost 1.74 QUIET CONFIG OPTIONAL_COMPONENTS system)
+  find_package(Boost 1.77 QUIET CONFIG OPTIONAL_COMPONENTS system)
   if(NOT Boost_FOUND)
     message(FATAL_ERROR
-      "Boost.Asio was not found (need Boost >= 1.74).\n"
+      "Boost.Asio was not found (need Boost >= 1.77, for per-operation cancellation).\n"
       "  Install it       -- Arch: pacman -S boost | Debian/Ubuntu: apt install libboost-dev\n"
       "  Or use standalone -- cmake --preset standalone  (equivalently -DSNMP_USE_BOOST_ASIO=OFF)\n"
       "The two are not interchangeable after the fact: the choice appears in every public "
@@ -64,7 +64,10 @@ if(SNMP_USE_BOOST_ASIO)
     set(SNMPIO_ASIO_TARGET Boost::headers)
   endif()
 else()
-  find_package(asio QUIET CONFIG)
+  # 1.21 is where per-operation cancellation arrived, which the Walk's total/terminal split needs.
+  # Only the CONFIG path can be checked; the include-directory fallback below is a bare header
+  # tree with no version to read.
+  find_package(asio 1.21 QUIET CONFIG)
   if(asio_FOUND)
     set(SNMPIO_ASIO_TARGET asio::asio)
   else()
@@ -91,8 +94,10 @@ find_package(Threads REQUIRED)
 add_library(snmpio
   src/BerReader.cpp
   src/BerWriter.cpp
+  src/Client.cpp
   src/Error.cpp
   src/Oid.cpp
+  src/Pdu.cpp
   src/Value.cpp)
 add_library(snmpio::snmpio ALIAS snmpio)
 

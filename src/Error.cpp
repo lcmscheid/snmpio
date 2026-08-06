@@ -60,6 +60,20 @@ class SnmpioCategory final : public net::ErrorCategory {
         return "object identifier string is malformed";
       case Errc::UnknownValueTag:
         return "unrecognised Varbind Value tag";
+      case Errc::BadVersion:
+        return "SNMP message version is not one this library speaks";
+      case Errc::UnexpectedPduType:
+        return "PDU is not of a type valid in this position";
+      case Errc::MissingVarbind:
+        return "Response carried no Varbind where one was required";
+      case Errc::Timeout:
+        return "no Response from the Target within the timeout";
+      case Errc::ClientStopped:
+        return "the Client stopped with the request outstanding";
+      case Errc::NonIncreasingOid:
+        return "Agent returned a non-increasing object identifier during a Walk";
+      case Errc::WalkIncomplete:
+        return "Walk stopped before the end of the Subtree";
     }
     return "unknown snmpio error " + std::to_string(ev);
   }

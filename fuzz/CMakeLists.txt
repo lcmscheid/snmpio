@@ -16,6 +16,7 @@ add_library(snmpio_fuzzed STATIC
   ${CMAKE_SOURCE_DIR}/src/BerWriter.cpp
   ${CMAKE_SOURCE_DIR}/src/Error.cpp
   ${CMAKE_SOURCE_DIR}/src/Oid.cpp
+  ${CMAKE_SOURCE_DIR}/src/Pdu.cpp
   ${CMAKE_SOURCE_DIR}/src/Value.cpp)
 target_include_directories(snmpio_fuzzed PUBLIC ${CMAKE_SOURCE_DIR}/include)
 target_link_libraries(snmpio_fuzzed PUBLIC snmpio_fuzz_options)
@@ -24,7 +25,7 @@ if(SNMP_USE_BOOST_ASIO)
   target_compile_definitions(snmpio_fuzzed PUBLIC SNMPIO_USE_BOOST_ASIO=1)
 endif()
 
-foreach(target FuzzBerValue FuzzBerVarbindList FuzzOidText)
+foreach(target FuzzBerValue FuzzBerVarbindList FuzzOidText FuzzV2cMessage)
   add_executable(${target} ${target}.cpp)
   target_link_libraries(${target} PRIVATE snmpio_fuzzed)
 endforeach()

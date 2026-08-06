@@ -78,7 +78,7 @@ jobs:
       - name: Fuzz
         run: |
           mkdir -p .fuzz-work
-          for target in FuzzBerValue FuzzBerVarbindList FuzzOidText; do
+          for target in FuzzBerValue FuzzBerVarbindList FuzzOidText FuzzV2cMessage; do
             ./build-fuzz/fuzz/$target .fuzz-work fuzz/corpus \
               -max_total_time=60 -print_final_stats=1
           done

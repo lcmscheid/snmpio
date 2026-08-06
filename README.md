@@ -8,13 +8,13 @@ that shaped it are in [`docs/adr/`](docs/adr).
 
 ## Status
 
-**Stage 0 of 6.** The BER codec and the value types are in place; nothing talks to a network yet.
+**Stage 1 of 6.** SNMPv2c works end to end over UDP: GET, GETNEXT, GETBULK, SET and Walk.
 
 | Stage | Deliverable | State |
 |---|---|---|
 | 0 | CMake skeleton, OID/value types, BER encode/decode + fuzz targets | **done** |
-| 1 | v2c GET / GETNEXT / GETBULK / SET / WALK over Asio UDP | next |
-| 2 | v3 message framing, USM auth (MD5, SHA-1, SHA-2), password-to-key, key localization | |
+| 1 | v2c GET / GETNEXT / GETBULK / SET and Walk over Asio UDP | **done** |
+| 2 | v3 message framing, USM auth (MD5, SHA-1, SHA-2), password-to-key, key localization | next |
 | 3 | Async engine discovery, time sync, Report handling | |
 | 4 | Privacy: AES-128, then AES-192/256 under both key extensions, DES behind an opt-in | |
 | 5 | Interop matrix vs the Simulator, `snmpd`, and real vendor gear | |
@@ -28,7 +28,11 @@ cmake --build --preset default
 ctest --preset default
 ```
 
-Requires a C++20 compiler, CMake 3.24+, and either Boost.Asio (the default) or standalone Asio.
+Requires a C++20 compiler with coroutine support, CMake 3.24+, and either Boost.Asio 1.77 or
+newer (the default) or standalone Asio 1.21 or newer. The version floor is per-operation
+cancellation, which the Walk's `total`/`terminal` split is built on. CMake enforces it for
+Boost and for standalone Asio found via its config package; the bare-include-directory fallback
+has no version to check.
 To avoid the Boost dependency, use the `standalone` preset — standalone Asio is `asio` on Arch and
 `libasio-dev` on Debian/Ubuntu.
 
@@ -100,18 +104,48 @@ the fixed PRNG seed in the round-trip sweep, which exists precisely to be reprod
 cmake --preset fuzz
 cmake --build --preset fuzz
 mkdir -p .fuzz-work
-./build/fuzz/fuzz/FuzzBerValue .fuzz-work fuzz/corpus
+./build/fuzz/fuzz/FuzzV2cMessage .fuzz-work fuzz/corpus
 ```
 
 The first directory is where libFuzzer writes what it finds; `fuzz/corpus` is passed read-only so
 the curated seeds stay curated.
 
-Three targets, each asserting a round-trip identity rather than merely "does not crash":
+Four targets, each asserting a round-trip identity rather than merely "does not crash":
 
 - `FuzzBerValue` — anything the value decoder accepts must re-encode and decode back identically.
 - `FuzzBerVarbindList` — the same, over the nesting path: scope entry, length patching, and the
   trailing-data checks a flat value never reaches.
 - `FuzzOidText` — the dotted-decimal parser, which is where untrusted *text* enters the OID type.
+- `FuzzV2cMessage` — the whole datagram: framing, version, community and the PDU inside them. This
+  is the surface a hostile Agent actually reaches.
+
+## What stage 1 contains
+
+- `snmpio::Client` — the Command Generator. It owns the sockets, the outstanding-request table and
+  the strand everything internal runs on; there is no session type (ADR-0003). `asyncGet`,
+  `asyncGetNext`, `asyncGetBulk`, `asyncSet`, `asyncWalk` and `asyncWalkCollect` all take an Asio
+  completion token and report failure as an `error_code`.
+- `snmpio::Target` / `snmpio::Community` — a transport endpoint with its timeout and retry count,
+  and the string that authorizes a v2c request. Neither knows about the other.
+- `snmpio::Pdu` / `snmpio::PduType` — the RFC 3416 PDUs, plus the SNMPv2c message framing around
+  them. GETBULK's non-repeaters and max-repetitions are the error-status and error-index slots,
+  named by accessors rather than duplicated into a second struct.
+- `snmpio::ErrorStatus` — the Agent's own error-status, in a category of its own so that its
+  numbering stays the RFC's. A `tooBig` from an Agent is never confused with one of our faults.
+
+Three failure channels reach a completion handler, and they stay distinguishable: the system
+category for socket faults, `snmpio` for timeouts and malformed Responses, `snmp-agent` for an
+error-status the Agent returned.
+
+Walks stream by default and collect on request (ADR-0004). Both reject a non-increasing OID, both
+stop at the Subtree boundary, and both degrade `max-repetitions` when an Agent answers `tooBig`.
+Cancellation is split as the ADR requires: `total` stops at a batch boundary and reports
+`Errc::WalkIncomplete` alongside what was already delivered, `terminal` drops everything with
+`operation_aborted`.
+
+Not yet here, and deliberately: SNMPv3 in any form, Report routing (stage 3), and hostname
+resolution — a `Target` is built from an `asio::ip::udp::endpoint`, so resolving is the caller's
+choice of resolver rather than a policy this library picks.
 
 ## What stage 0 contains
 

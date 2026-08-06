@@ -112,3 +112,10 @@ in that it can be told to **misbehave** — returning `tooBig`, non-increasing O
 or malformed messages — which is the only way to reach the client's defensive paths, since no correct
 Agent will ever produce them.
 _Avoid_: mock, fake agent, test server
+
+**Scripted Agent**:
+The in-process command responder the unit tests build a Target on, whose every Response is written
+by the test that needs it. Distinct from the Simulator: same purpose — reaching the paths a correct
+Agent never produces — but it lives in `tests/`, speaks only what one test scripts, and is never an
+interop target. Naming it separately keeps *Simulator* meaning the one published container.
+_Avoid_: mock, stub agent, test double

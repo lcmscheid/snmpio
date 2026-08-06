@@ -44,7 +44,9 @@ fuzz/*/crash-*
 fuzz/*/leak-*
 fuzz/*/timeout-*
 fuzz/**/fuzz-*.log
-.fuzz-work/             # libFuzzer's writable output dir; seeds live in fuzz/corpus
+# libFuzzer's writable output dir; seeds live in fuzz/corpus. (A trailing comment on a
+# pattern line is part of the pattern, not a comment, so this one has to sit above.)
+.fuzz-work/
 
 # --- Secrets and local test material ---
 # SNMPv3 passphrases must never be committed. Example configs with

@@ -5,8 +5,12 @@
 
 namespace snmpio {
 
-// Stage 0 error taxonomy: everything here is a codec-level fault, i.e. "these bytes are not a
-// well-formed SNMP encoding". Transport, timeout and USM errors arrive in later stages.
+// The library's own faults. Stage 0 filled in the codec half -- "these bytes are not a
+// well-formed SNMP encoding" -- and stage 1 added the transport and protocol half. USM errors
+// arrive with stage 2.
+//
+// An Agent's own error-status is deliberately *not* here: it is a distinct enumeration with
+// numbering fixed by RFC 3416, and it lives in its own category as snmpio::ErrorStatus.
 enum class Errc {
   Ok = 0,
 
@@ -36,6 +40,17 @@ enum class Errc {
 
   // Values.
   UnknownValueTag,  // tag is not one this library recognises as a Varbind Value
+
+  // Messages and PDUs.
+  BadVersion,         // message version field is not one this library speaks
+  UnexpectedPduType,  // a PDU tag where none belongs, or a request PDU arriving as a Response
+  MissingVarbind,     // Response carried no Varbind where the operation required one
+
+  // Transport and operations.
+  Timeout,           // no Response inside the Target's timeout, after every retry
+  ClientStopped,     // the Client stopped while the request was outstanding
+  NonIncreasingOid,  // a Walk Response repeated or went backwards (ADR-0004)
+  WalkIncomplete,    // a Walk stopped early: cancelled, or the batch handler asked it to
 };
 
 const net::ErrorCategory& errorCategory() noexcept;

@@ -26,6 +26,23 @@ enum class AuthProtocol : std::uint8_t {
   Sha512,  // usmHMAC384SHA512AuthProtocol
 };
 
+// The User-based Security Model's privacy protocols: RFC 3414's DES, RFC 3826's AES-128, and the
+// AES-192/256 pair the Blumenthal and Reeder drafts each extend a short Localized Key for.
+//
+// ADR-0005: DES is here for the same reason MD5 is. The `C` suffix is Reeder, spelled the way
+// net-snmp, gosnmp and the Simulator all spell it. There is no enumerator for "AES-192, extension
+// unspecified": the two extensions are mutually incompatible and never inferred (CONTEXT.md), so
+// the choice is made where the protocol is named or not at all.
+enum class PrivProtocol : std::uint8_t {
+  None,
+  Des,      // usmDESPrivProtocol
+  Aes128,   // usmAesCfb128Protocol
+  Aes192,   // Blumenthal key extension
+  Aes256,   // Blumenthal key extension
+  Aes192C,  // Reeder key extension
+  Aes256C,  // Reeder key extension
+};
+
 // Whether a message is authenticated, and whether it is additionally encrypted.
 //
 // Valued as the msgFlags bits of RFC 3412 section 6.4 so that encoding is a cast -- the same
@@ -52,7 +69,11 @@ enum class SecurityLevel : std::uint8_t {
 // RFC 7860 section 4.2 sets its own width per hash, and the widths are not the hash's own.
 [[nodiscard]] std::size_t authParamsSize(AuthProtocol p) noexcept;
 
-// The user, the level they authenticate at, and the secret behind it.
+// Octets of key material the cipher takes. DES's 16 is 8 of key and 8 of pre-IV (RFC 3414
+// section 8.1.1.1), which is why it is not the 8 the cipher itself uses.
+[[nodiscard]] std::size_t privKeySize(PrivProtocol p) noexcept;
+
+// The user, the level they authenticate at, and the secrets behind it.
 //
 // Independent of Target by construction (CONTEXT.md): the same Credentials may be used against
 // many Targets. What binds a key to one Engine is localizeKey(), not this type.
@@ -61,6 +82,10 @@ struct Credentials {
   SecurityLevel level = SecurityLevel::NoAuthNoPriv;
   AuthProtocol authProtocol = AuthProtocol::None;
   std::string authPassword;
+  PrivProtocol privProtocol = PrivProtocol::None;
+  // USM derives the privacy key with the *authentication* protocol's hash, so there is no second
+  // protocol to name here -- only a second secret.
+  std::string privPassword;
 };
 
 // RFC 3414 appendix A.2: the password repeated to exactly one megabyte and hashed once. The
@@ -73,11 +98,41 @@ struct Credentials {
 [[nodiscard]] Octets localizeKey(AuthProtocol p, std::span<const std::byte> masterKey,
                                  std::span<const std::byte> engineId, net::ErrorCode& ec);
 
-// passwordToKey followed by localizeKey. This is the expensive pair stage 3 will cache per
+// passwordToKey followed by localizeKey. This is the expensive pair the Client caches per
 // (Credentials, engineID); it is deliberately not cached here, because a cache without an owner
 // is a leak.
 [[nodiscard]] Octets localizedAuthKey(const Credentials& creds, std::span<const std::byte> engineId,
                                       net::ErrorCode& ec);
+
+// The privacy key for one Engine: password-to-key and localizeKey over the privacy password, both
+// under creds.authProtocol's hash, extended if the protocol needs more key material than that hash
+// produces, and truncated to privKeySize(creds.privProtocol).
+//
+// The extension is the whole of the Blumenthal/Reeder difference. Blumenthal appends the hash of
+// the key so far; Reeder appends the key so far run back through password-to-key and localized
+// again -- a second megabyte, which is why this is cached by its caller and not called twice.
+[[nodiscard]] Octets localizedPrivKey(const Credentials& creds, std::span<const std::byte> engineId,
+                                      net::ErrorCode& ec);
+
+// Encrypts a ScopedPDU and writes the msgPrivacyParameters it chose into `privParams`. The salt is
+// this library's to pick -- RFC 3826 section 3.1.2.1 asks only that it never repeat for one key --
+// so it is not an argument.
+//
+// `boots` and `time` are the Authoritative Engine's, and travel in the message: AES puts them in
+// the IV, DES uses the boots half in the salt, and both sides therefore derive the same IV from
+// what the message already carries.
+[[nodiscard]] Octets privEncrypt(PrivProtocol p, std::span<const std::byte> privKey,
+                                 std::int32_t boots, std::int32_t time,
+                                 std::span<const std::byte> plaintext, Octets& privParams,
+                                 net::ErrorCode& ec);
+
+// The inverse. The plaintext keeps whatever padding DES needed: RFC 3414 section 8.1.1.2 leaves
+// the pad Octets unspecified, so there is nothing here that could strip them -- the BER decoder
+// stops at the end of the ScopedPDU's own SEQUENCE and never looks at them.
+[[nodiscard]] Octets privDecrypt(PrivProtocol p, std::span<const std::byte> privKey,
+                                 std::int32_t boots, std::int32_t time,
+                                 std::span<const std::byte> privParams,
+                                 std::span<const std::byte> ciphertext, net::ErrorCode& ec);
 
 // HMAC over a whole message, truncated to authParamsSize(p). The caller is responsible for having
 // zeroed msgAuthenticationParameters first: RFC 3414 section 6.3.1 hashes the message with the

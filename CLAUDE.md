@@ -1,9 +1,9 @@
 # snmpio
 
 An async C++20 SNMPv2c/SNMPv3 command generator built directly on Asio. Manager side only, no
-net-snmp dependency. Currently at **stage 3 of 6** — v2c and v3 both work end to end over UDP at
-`noAuthNoPriv` and `authNoPriv`, discovery and Reports included. Privacy is stage 4. `README.md`
-has the stage table.
+net-snmp dependency. Currently at **stage 4 of 6** — v2c and v3 both work end to end over UDP at
+all three Security Levels, discovery, Reports and privacy included. Interop is stage 5.
+`README.md` has the stage table.
 
 ## Read before changing anything
 
@@ -46,13 +46,15 @@ widening the list. `tests/` and `fuzz/` have an overlay for test idioms.
 
 **Crypto** — OpenSSL EVP, never our own (ADR-0001). Key derivation is pinned to RFC 3414's own
 MD5 and SHA-1 vectors; the SHA-2 rows have no published vectors and were generated from an
-independent implementation, so they pin against drift rather than against being wrong.
+independent implementation, so they pin against drift rather than against being wrong. The privacy
+key rows are the same arrangement, generated from gosnmp — no RFC publishes AES-192/256 key
+extension vectors, because neither extension is in an RFC.
 
 **Codec posture** — lenient where leniency is unambiguous (redundant integer sign padding,
 non-minimal long-form lengths), strict where it is not (indefinite length, high-tag-number form,
 sub-identifier overflow). Changing which side something falls on is an ADR-sized decision.
 
-**Tests** — 151 of them, and the defensive paths are the point. A decoder change that keeps them all
+**Tests** — 172 of them, and the defensive paths are the point. A decoder change that keeps them all
 green has probably not been tested; the misbehaving-agent cases are why ADR-0006 exists.
 
 **Licence** — Apache-2.0. No per-file copyright headers, deliberately (ADR-0007). Anything ported

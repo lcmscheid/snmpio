@@ -7,7 +7,7 @@ namespace snmpio {
 
 // The library's own faults. Stage 0 filled in the codec half -- "these bytes are not a
 // well-formed SNMP encoding" -- stage 1 added the transport and protocol half, and stage 2 the
-// security one.
+// security one. Stage 4 added privacy's.
 //
 // An Agent's own error-status is deliberately *not* here: it is a distinct enumeration with
 // numbering fixed by RFC 3416, and it lives in its own category as snmpio::ErrorStatus.
@@ -54,15 +54,18 @@ enum class Errc {
 
   // Security (USM). A rejection the Agent reports is not here: that arrives as a Report PDU and
   // is handled internally (stage 3), not surfaced as one of our faults.
-  UnsupportedAuthProtocol,   // an auth operation asked for with AuthProtocol::None, or one the
-                             // local OpenSSL will not provide
-  UnsupportedSecurityLevel,  // a Security Level this build cannot produce -- authPriv until
-                             // privacy lands in stage 4
-  UnsupportedSecurityModel,  // msgSecurityModel names something other than USM
-  BadMessageFlags,           // msgFlags was not one Octet, or claimed privacy without auth
-  EmptyPassword,             // password-to-key on an empty password, which it cannot expand
-  CryptoFailure,             // OpenSSL refused an operation that should not have been refusable
-  AuthFailed,                // the message's digest is not the one its key produces
+  UnsupportedAuthProtocol,    // an auth operation asked for with AuthProtocol::None, or one the
+                              // local OpenSSL will not provide
+  UnsupportedSecurityLevel,   // a Security Level this build cannot produce
+  UnsupportedPrivProtocol,    // authPriv asked for with PrivProtocol::None
+  LegacyProviderUnavailable,  // DES needs OpenSSL's legacy provider, and it would not load
+  UnsupportedSecurityModel,   // msgSecurityModel names something other than USM
+  BadMessageFlags,            // msgFlags was not one Octet, or claimed privacy without auth
+  EmptyPassword,              // password-to-key on an empty password, which it cannot expand
+  CryptoFailure,              // OpenSSL refused an operation that should not have been refusable
+  AuthFailed,                 // the message's digest is not the one its key produces
+  DecryptionFailed,           // an encryptedPDU this key does not open, or does not open into a
+                              // ScopedPDU
 
   // usmStats Reports the Authoritative Engine sent back (RFC 3414 section 5). Two of the six are
   // not here on purpose: usmStatsWrongDigests arrives as AuthFailed and

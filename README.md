@@ -8,9 +8,10 @@ that shaped it are in [`docs/adr/`](docs/adr).
 
 ## Status
 
-**Stage 3 of 6.** SNMPv2c and SNMPv3 both work end to end over UDP: GET, GETNEXT, GETBULK, SET and
-Walk, at `noAuthNoPriv` and `authNoPriv`. Engine Discovery, time synchronisation and Report routing
-happen underneath and are never surfaced. Privacy is stage 4, so `authPriv` is refused.
+**Stage 4 of 6.** SNMPv2c and SNMPv3 both work end to end over UDP: GET, GETNEXT, GETBULK, SET and
+Walk, at all three Security Levels. Engine Discovery, time synchronisation and Report routing happen
+underneath and are never surfaced. `authPriv` speaks DES, AES-128, and AES-192/256 under both the
+Blumenthal and the Reeder key extension.
 
 | Stage | Deliverable | State |
 |---|---|---|
@@ -18,8 +19,8 @@ happen underneath and are never surfaced. Privacy is stage 4, so `authPriv` is r
 | 1 | v2c GET / GETNEXT / GETBULK / SET and Walk over Asio UDP | **done** |
 | 2 | v3 message framing, USM auth (MD5, SHA-1, SHA-2), password-to-key, key localization | **done** |
 | 3 | Async engine discovery, time sync, Report handling | **done** |
-| 4 | Privacy: AES-128, then AES-192/256 under both key extensions, DES behind an opt-in | next |
-| 5 | Interop matrix vs the Simulator, `snmpd`, and real vendor gear | |
+| 4 | Privacy: AES-128, then AES-192/256 under both key extensions, DES behind the legacy provider | **done** |
+| 5 | Interop matrix vs the Simulator, `snmpd`, and real vendor gear | next |
 | 6 | Docs, cancellation semantics, error taxonomy, packaging | |
 
 ## Building
@@ -124,9 +125,45 @@ Five targets, each asserting a round-trip identity rather than merely "does not 
 - `FuzzOidText` — the dotted-decimal parser, which is where untrusted *text* enters the OID type.
 - `FuzzV2cMessage` — the whole datagram: framing, version, community and the PDU inside them. This
   is the surface a hostile Agent actually reaches.
-- `FuzzV3Message` — the v3 datagram, and `verifyAuth` over whatever it decodes to. The digest's
-  offset is derived from attacker-controlled length fields and is then used to index the datagram,
-  which is exactly the shape of bug a fuzzer under ASan finds and review does not.
+- `FuzzV3Message` — the v3 datagram, `verifyAuth` over whatever it decodes to, and `decryptScopedPdu`
+  over an encryptedPDU. The digest's offset is derived from attacker-controlled length fields and is
+  then used to index the datagram, which is exactly the shape of bug a fuzzer under ASan finds and
+  review does not; decryption then hands a buffer of noise to the BER decoder, which is the same
+  shape one layer down.
+
+## What stage 4 contains
+
+- `snmpio::PrivProtocol` and two more `Credentials` fields — the privacy protocol and its own
+  secret. There is no second hash to name: USM derives the privacy key with the *authentication*
+  protocol's hash. `authPriv` with no privacy protocol fails with `Errc::UnsupportedPrivProtocol`
+  rather than being sent in the clear.
+- **DES-CBC** (RFC 3414 section 8) and **AES-CFB128** at 128, 192 and 256 bits (RFC 3826 and the
+  Blumenthal draft). ADR-0005 is why DES is here at all; it lives in OpenSSL 3.x's legacy provider,
+  which is loaded lazily on first use, so a build without it loses *that operation* and not the
+  library.
+- **Both key extensions**, because the Localized Key is shorter than an AES-192/256 key whenever
+  the hash is. `Aes192`/`Aes256` are Blumenthal — append the hash of the key so far — and
+  `Aes192C`/`Aes256C` are Reeder, which runs the key back through password-to-key and localizes it
+  again. They are separate enumerators rather than a protocol plus a flag, so "AES-192, extension
+  unspecified" is a state that cannot be written down (CONTEXT.md: never inferred, never guessed).
+- **Encryption inside the message layer**, not beside it: `encodeV3Message` encrypts the ScopedPDU
+  and writes the salt it chose into msgPrivacyParameters, then computes the digest over the
+  finished message — so authentication covers the ciphertext, and the two are done in the order
+  RFC 3414 section 3.2 checks them in.
+- `decodeV3Message` stops at the ciphertext and `decryptScopedPdu` opens it, because the key is a
+  property of the *request this answers* and finding that request needs the `msgID` the decode
+  produced. A reply that will not decrypt is dropped exactly like one whose digest is wrong: the
+  request stays outstanding and its retransmission timer keeps running.
+- The privacy key is cached beside the authentication one, on (engineID, hash, secret, privacy
+  protocol). The protocol is part of the cache key because it decides how far the derivation is
+  extended — and under Reeder that extension is a second megabyte hash.
+
+"DES behind an opt-in", as the stage was first written, is the legacy provider rather than a build
+flag: ADR-0005 rules a build flag out, so the opt-in is naming `PrivProtocol::Des` on an OpenSSL
+that has the provider. Nothing else changes shape for it.
+
+Not in stage 4: 3DES, which ADR-0005 names alongside DES and no stage yet carries -- an open gap
+against that ADR rather than a decision against it -- and IDEA, which ADR-0005 excludes outright.
 
 ## What stage 3 contains
 
@@ -185,9 +222,9 @@ requires: a message that cannot be opened must still be attributable to the requ
   buffer and then wrapped, so that a sequence length widening past 127 Octets cannot silently move
   the digest; the long-user-name test is the one that fails if that changes.
 
-Not in stage 2: privacy (stage 4), so `authPriv` is refused rather than downgraded and an incoming
-`encryptedPDU` decodes to `Errc::UnsupportedSecurityLevel`; and timeliness, which needs the cached
-engine state discovery produces and so arrived with stage 3.
+Not in stage 2: privacy, which arrived with stage 4 and put the encryption either side of the
+digest in `encodeV3Message` and `decryptScopedPdu`; and timeliness, which needs the cached engine
+state discovery produces and so arrived with stage 3.
 
 ## What stage 1 contains
 

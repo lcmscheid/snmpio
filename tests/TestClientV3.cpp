@@ -1,6 +1,8 @@
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <optional>
+#include <span>
 #include <vector>
 
 #include <snmpio/Client.hpp>
@@ -18,7 +20,11 @@ const Oid sysUpTime{1, 3, 6, 1, 2, 1, 1, 3, 0};
 
 Credentials credentials(AuthProtocol protocol = AuthProtocol::Sha256,
                         SecurityLevel level = SecurityLevel::AuthNoPriv) {
-  return Credentials{"bert", level, protocol, "maplesyrup"};
+  return Credentials{"bert", level, protocol, "maplesyrup", PrivProtocol::None, ""};
+}
+
+Credentials privCredentials(PrivProtocol priv, AuthProtocol protocol = AuthProtocol::Sha256) {
+  return Credentials{"bert", SecurityLevel::AuthPriv, protocol, "maplesyrup", priv, "privatepass"};
 }
 
 // The data plane every well-behaved case here uses: echo the requested OIDs back with a value.
@@ -358,7 +364,7 @@ TEST(ClientV3, SurfacesAnAgentErrorStatusInTheAgentCategory) {
   EXPECT_EQ(f.response.errorIndex, 1);
 }
 
-TEST(ClientV3, RefusesAuthPrivBeforeItCanProvideIt) {
+TEST(ClientV3, RefusesAuthPrivWithoutAPrivacyProtocol) {
   Fixture f;
   ScriptedV3Agent agent(f.io, credentials(), echoAnswer);
   f.agent = &agent;
@@ -367,7 +373,7 @@ TEST(ClientV3, RefusesAuthPrivBeforeItCanProvideIt) {
   f.client.asyncGet(targetFor(agent), creds, {sysDescr}, f.requestToken());
   f.run();
 
-  EXPECT_EQ(f.ec, make_error_code(Errc::UnsupportedSecurityLevel));
+  EXPECT_EQ(f.ec, make_error_code(Errc::UnsupportedPrivProtocol));
   EXPECT_EQ(agent.requestsSeen(), 0) << "a message claiming privacy reached the network";
 }
 
@@ -529,6 +535,110 @@ TEST(ClientV3Walk, CollectsTheWholeSubtreeAcrossSeveralRounds) {
 
   EXPECT_FALSE(f.ec) << f.ec.message();
   EXPECT_EQ(f.collected.size(), 3U);
+}
+
+// ---------------------------------------------------------------------------
+// Privacy
+// ---------------------------------------------------------------------------
+
+// Every privacy protocol against a compliant Agent, discovery included. The Blumenthal and Reeder
+// pairs are here together because the two extensions are mutually incompatible (ADR-0005): a
+// Command Generator that derived one where the Agent derived the other would fail exactly here.
+TEST(ClientV3, AuthPrivRoundTripsUnderEveryPrivacyProtocol) {
+  for (auto priv : {PrivProtocol::Des, PrivProtocol::Aes128, PrivProtocol::Aes192,
+                    PrivProtocol::Aes256, PrivProtocol::Aes192C, PrivProtocol::Aes256C}) {
+    Fixture f;
+    ScriptedV3Agent agent(f.io, privCredentials(priv), echoAnswer);
+    f.agent = &agent;
+
+    f.client.asyncGet(targetFor(agent), privCredentials(priv), {sysDescr}, f.requestToken());
+    f.run();
+
+    EXPECT_FALSE(f.ec) << "privacy protocol " << static_cast<int>(priv) << ": " << f.ec.message();
+    ASSERT_EQ(f.response.varbinds.size(), 1U);
+    EXPECT_EQ(f.response.varbinds[0].name, sysDescr);
+  }
+}
+
+// The ScopedPDU is what privacy hides, so nothing above the wire may recognise the OID that went
+// out. Read off the datagram rather than inferred from the flags.
+TEST(ClientV3, AuthPrivPutsNothingReadableOnTheWire) {
+  Fixture f;
+  ScriptedV3Agent agent(f.io, privCredentials(PrivProtocol::Aes128), echoAnswer);
+  f.agent = &agent;
+  std::vector<Octets> seen;
+  agent.setOnDatagram(
+      [&seen](std::span<const std::byte> d) { seen.emplace_back(d.begin(), d.end()); });
+
+  f.client.asyncGet(targetFor(agent), privCredentials(PrivProtocol::Aes128), {sysDescr},
+                    f.requestToken());
+  f.run();
+
+  ASSERT_FALSE(f.ec) << f.ec.message();
+  // 1.3.6.1.2.1.1.1.0 encoded: the request's own OID, which must appear in no datagram.
+  const Octets encodedOid{std::byte{0x2b}, std::byte{0x06}, std::byte{0x01}, std::byte{0x02},
+                          std::byte{0x01}, std::byte{0x01}, std::byte{0x01}, std::byte{0x00}};
+  for (const auto& datagram : seen) {
+    EXPECT_EQ(std::ranges::search(datagram, encodedOid).begin(), datagram.end())
+        << "a ScopedPDU went out in the clear";
+  }
+}
+
+// An authPriv exchange still discovers first, and the second phase is encrypted like everything
+// else: an Engine that enforces a minimum Security Level per user would refuse it otherwise.
+TEST(ClientV3, AuthPrivDiscoversBeforeItAsks) {
+  Fixture f;
+  ScriptedV3Agent agent(f.io, privCredentials(PrivProtocol::Aes256), echoAnswer);
+  f.agent = &agent;
+
+  f.client.asyncGet(targetFor(agent), privCredentials(PrivProtocol::Aes256), {sysDescr},
+                    f.requestToken());
+  f.run();
+
+  EXPECT_FALSE(f.ec) << f.ec.message();
+  EXPECT_EQ(agent.requestsSeen(), 3);
+}
+
+// A reply we cannot open is dropped, not failed -- the same rule as a reply whose digest is wrong
+// (ADR-0006). The request stays outstanding, retransmits, and finally times out.
+TEST(ClientV3, DropsAReplyEncryptedWithAnotherKey) {
+  Fixture f;
+  ScriptedV3Agent agent(f.io, privCredentials(PrivProtocol::Aes128), echoAnswer);
+  f.agent = &agent;
+  agent.setResponder([&agent](const ScriptedV3Agent::Request& req) {
+    auto reply = agent.behaveLikeACompliantAgent(req);
+    if (reply && reply->scoped.pdu.type == PduType::Response) reply->corruptPrivKey = true;
+    return reply;
+  });
+
+  f.client.asyncGet(targetFor(agent), privCredentials(PrivProtocol::Aes128), {sysDescr},
+                    f.requestToken());
+  f.run();
+
+  EXPECT_EQ(f.ec, make_error_code(Errc::Timeout));
+}
+
+// usmStatsDecryptionErrors: the Agent could not open what we sent. Nothing about that is worth
+// retrying, so it fails the request rather than costing a second round trip.
+TEST(ClientV3, SurfacesADecryptionErrorReport) {
+  Fixture f;
+  ScriptedV3Agent agent(f.io, privCredentials(PrivProtocol::Aes128), echoAnswer);
+  f.agent = &agent;
+  agent.setResponder(
+      [&agent](const ScriptedV3Agent::Request& req) -> std::optional<ScriptedV3Agent::Reply> {
+        if (req.message.scoped.pdu.type == PduType::Get && !req.message.security.engineId.empty() &&
+            req.message.scoped.pdu.varbinds.size() == 1) {
+          return ScriptedV3Agent::report(ScriptedV3Agent::decryptionErrors,
+                                         SecurityLevel::AuthNoPriv);
+        }
+        return agent.behaveLikeACompliantAgent(req);
+      });
+
+  f.client.asyncGet(targetFor(agent), privCredentials(PrivProtocol::Aes128), {sysDescr},
+                    f.requestToken());
+  f.run();
+
+  EXPECT_EQ(f.ec, make_error_code(Errc::DecryptionError));
 }
 
 }  // namespace

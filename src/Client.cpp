@@ -37,6 +37,11 @@ constexpr std::uint32_t usmStatsUnknownEngineIds = 4;
 constexpr std::uint32_t usmStatsWrongDigests = 5;
 constexpr std::uint32_t usmStatsDecryptionErrors = 6;
 
+// A key that may not exist yet, as the span the encoder takes.
+std::span<const std::byte> keySpan(const Octets* key) noexcept {
+  return key != nullptr ? std::span<const std::byte>(*key) : std::span<const std::byte>();
+}
+
 // RFC 3414 section 2.2.3. 150 seconds either side, and an Engine that has booted this many times
 // can no longer be trusted for timeliness at all.
 constexpr std::int32_t timeWindowSeconds = 150;
@@ -218,18 +223,33 @@ void Client::deliverV3(std::span<const std::byte> datagram, const net::UdpEndpoi
   Pending& p = *it->second;
   if (from != p.from) return;
 
-  const bool isReport = msg->scoped.pdu.type == PduType::Report;
   // The one message the protocol requires us to accept unauthenticated: an Engine that does not
   // recognise our engineID has no key to authenticate its complaint with (RFC 3414 section 3.2).
   // It is accepted only as a Report, only against an outstanding msgID, and only from the address
   // we sent to -- and it can do no more than cost us one further round trip, because what it
   // triggers is a re-discovery, not a state change.
-  const bool exemptFromAuth = isReport && !isAuthenticated(msg->header.level);
+  //
+  // An encrypted message is never exempt and never has to be: privacy implies authentication, so
+  // the PDU inside it cannot be read before the digest has been, which is the right order anyway.
+  const bool encrypted = isEncrypted(msg->header.level);
+  const bool exemptFromAuth =
+      !encrypted && !isAuthenticated(msg->header.level) && msg->scoped.pdu.type == PduType::Report;
   if (p.authRequired && !exemptFromAuth) {
     net::ErrorCode authEc;
     if (!verifyAuth(datagram, *msg, p.authProtocol, p.authKey, authEc)) return;
     p.replyAuthenticated = true;
   }
+  // RFC 3414 section 3.2 puts decryption at step 8, after the digest at step 6 and timeliness at
+  // step 7. Timeliness is checked below rather than here, and has to be: an encrypted Report is
+  // exempt from that check, and nothing can tell a Report from a Response before it is open.
+  if (encrypted) {
+    net::ErrorCode privEc;
+    // Dropped like every other unreadable reply: the request stays outstanding and retransmits.
+    // An Agent that genuinely could not decrypt *ours* says so with a Report, which is a different
+    // path entirely and arrives readable.
+    if (!decryptScopedPdu(*msg, p.privProtocol, p.privKey, privEc)) return;
+  }
+  const bool isReport = msg->scoped.pdu.type == PduType::Report;
   // An unauthenticated Report is admitted whatever it says, because the four counters worth
   // hearing about are precisely the ones the Engine cannot sign: it does not know the user, or the
   // key, or the engineID the message was addressed to. Refusing them would turn "wrong password"
@@ -394,13 +414,28 @@ const Octets* Client::localizedKey(const Credentials& creds, const Octets& engin
                                    net::ErrorCode& ec) {
   // The user name is deliberately not part of the key: what the derivation consumes is the
   // password, the protocol and the engineID, so two users sharing a password share a key.
-  auto cacheKey = std::make_tuple(engineId, creds.authProtocol, creds.authPassword);
+  auto cacheKey =
+      std::make_tuple(engineId, creds.authProtocol, creds.authPassword, PrivProtocol::None);
   const auto it = m_keys.find(cacheKey);
   if (it != m_keys.end()) {
     ec = {};
     return &it->second;
   }
   auto derived = localizedAuthKey(creds, engineId, ec);
+  if (ec) return nullptr;
+  return &m_keys.emplace(std::move(cacheKey), std::move(derived)).first->second;
+}
+
+const Octets* Client::localizedPrivacyKey(const Credentials& creds, const Octets& engineId,
+                                          net::ErrorCode& ec) {
+  auto cacheKey =
+      std::make_tuple(engineId, creds.authProtocol, creds.privPassword, creds.privProtocol);
+  const auto it = m_keys.find(cacheKey);
+  if (it != m_keys.end()) {
+    ec = {};
+    return &it->second;
+  }
+  auto derived = localizedPrivKey(creds, engineId, ec);
   if (ec) return nullptr;
   return &m_keys.emplace(std::move(cacheKey), std::move(derived)).first->second;
 }
@@ -493,6 +528,11 @@ net::Awaitable<net::ErrorCode> Client::discoverEngine(Target target, Credentials
 
   const Octets* key = localizedKey(creds, engineId, ec);
   if (ec) co_return ec;
+  const Octets* privKey = nullptr;
+  if (isEncrypted(creds.level)) {
+    privKey = localizedPrivacyKey(creds, engineId, ec);
+    if (ec) co_return ec;
+  }
 
   const std::int32_t syncId = nextId();
   V3Header syncHeader;
@@ -502,8 +542,13 @@ net::Awaitable<net::ErrorCode> Client::discoverEngine(Target target, Credentials
   usm.engineId = engineId;
   usm.userName = creds.userName;  // boots and time left at zero: being wrong is the point
 
-  auto syncDatagram = encodeV3Message(syncHeader, usm, discoveryScopedPdu(syncId, engineId),
-                                      creds.authProtocol, *key, ec);
+  // Sent at the Credentials' own level rather than downgraded to authNoPriv: an Engine may enforce
+  // a minimum level per user, and being refused for asking too politely would end discovery. The
+  // Engine never has to decrypt it -- RFC 3414 section 3.2 rejects it as untimely at step 7, one
+  // step before decryption -- and the Report that rejection produces is the point of sending it.
+  auto syncDatagram =
+      encodeV3Message(syncHeader, usm, discoveryScopedPdu(syncId, engineId), creds.authProtocol,
+                      *key, ec, creds.privProtocol, keySpan(privKey));
   if (ec) co_return ec;
 
   auto sync = std::make_shared<Pending>(co_await net::asio::this_coro::executor);
@@ -511,7 +556,9 @@ net::Awaitable<net::ErrorCode> Client::discoverEngine(Target target, Credentials
   sync->v3 = true;
   sync->authRequired = true;
   sync->authProtocol = creds.authProtocol;
+  sync->privProtocol = creds.privProtocol;
   sync->authKey = *key;
+  if (privKey != nullptr) sync->privKey = *privKey;
   sync->engineId = engineId;
   sync->requestId = syncId;
 
@@ -555,9 +602,9 @@ net::Awaitable<Client::RequestResult> Client::doRequestV3(Target target, Credent
                                                           Pdu pdu) {
   if (m_stopped) co_return RequestResult{make_error_code(Errc::ClientStopped), Response{}};
   // Refused at the call rather than downgraded: a message that claims privacy it does not have is
-  // worse than one that was never sent. Privacy arrives in stage 4.
-  if (isEncrypted(creds.level)) {
-    co_return RequestResult{make_error_code(Errc::UnsupportedSecurityLevel), Response{}};
+  // worse than one that was never sent.
+  if (isEncrypted(creds.level) && creds.privProtocol == PrivProtocol::None) {
+    co_return RequestResult{make_error_code(Errc::UnsupportedPrivProtocol), Response{}};
   }
   if (isAuthenticated(creds.level) && creds.authProtocol == AuthProtocol::None) {
     co_return RequestResult{make_error_code(Errc::UnsupportedAuthProtocol), Response{}};
@@ -586,6 +633,11 @@ net::Awaitable<Client::RequestResult> Client::doRequestV3(Target target, Credent
       key = localizedKey(creds, engine->engineId, ec);
       if (ec) co_return RequestResult{ec, Response{}};
     }
+    const Octets* privKey = nullptr;
+    if (isEncrypted(creds.level)) {
+      privKey = localizedPrivacyKey(creds, engine->engineId, ec);
+      if (ec) co_return RequestResult{ec, Response{}};
+    }
 
     const std::int32_t id = nextId();
     pdu.requestId = id;
@@ -604,9 +656,8 @@ net::Awaitable<Client::RequestResult> Client::doRequestV3(Target target, Credent
     scoped.contextEngineId = engine->engineId;
     scoped.pdu = pdu;
 
-    auto datagram = encodeV3Message(
-        header, usm, scoped, creds.authProtocol,
-        key != nullptr ? std::span<const std::byte>(*key) : std::span<const std::byte>(), ec);
+    auto datagram = encodeV3Message(header, usm, scoped, creds.authProtocol, keySpan(key), ec,
+                                    creds.privProtocol, keySpan(privKey));
     if (ec) co_return RequestResult{ec, Response{}};
 
     auto pending = std::make_shared<Pending>(co_await net::asio::this_coro::executor);
@@ -614,7 +665,9 @@ net::Awaitable<Client::RequestResult> Client::doRequestV3(Target target, Credent
     pending->v3 = true;
     pending->authRequired = isAuthenticated(creds.level);
     pending->authProtocol = creds.authProtocol;
+    pending->privProtocol = creds.privProtocol;
     if (key != nullptr) pending->authKey = *key;
+    if (privKey != nullptr) pending->privKey = *privKey;
     pending->engineId = engine->engineId;
     pending->requestId = id;
 

@@ -22,7 +22,8 @@ std::byte encodeFlags(const V3Header& h) noexcept {
 }
 
 // Returns where the blank digest was written, relative to w.
-std::size_t encodeUsmContent(ber::Writer& w, const UsmParameters& usm, std::size_t authWidth) {
+std::size_t encodeUsmContent(ber::Writer& w, const UsmParameters& usm, std::size_t authWidth,
+                             std::span<const std::byte> privParams) {
   w.octetString(usm.engineId);
   w.integer(usm.boots);
   w.integer(usm.time);
@@ -33,7 +34,7 @@ std::size_t encodeUsmContent(ber::Writer& w, const UsmParameters& usm, std::size
   const Octets blank(authWidth, std::byte{0});
   const auto authOffset = w.size() + 2;
   w.octetString(blank);
-  w.octetString(usm.privParams);
+  w.octetString(privParams);
   return authOffset;
 }
 
@@ -65,10 +66,11 @@ std::optional<ScopedPdu> decodeScopedPdu(ber::Reader& r) {
 
 std::vector<std::byte> encodeV3Message(const V3Header& header, const UsmParameters& usm,
                                        const ScopedPdu& scoped, AuthProtocol auth,
-                                       std::span<const std::byte> localizedKey,
-                                       net::ErrorCode& ec) {
-  if (isEncrypted(header.level)) {
-    ec = make_error_code(Errc::UnsupportedSecurityLevel);
+                                       std::span<const std::byte> localizedKey, net::ErrorCode& ec,
+                                       PrivProtocol priv, std::span<const std::byte> privKey) {
+  const bool encrypt = isEncrypted(header.level);
+  if (encrypt && priv == PrivProtocol::None) {
+    ec = make_error_code(Errc::UnsupportedPrivProtocol);
     return {};
   }
   const bool authenticate = isAuthenticated(header.level);
@@ -78,12 +80,25 @@ std::vector<std::byte> encodeV3Message(const V3Header& header, const UsmParamete
   }
   const auto authWidth = authenticate ? authParamsSize(auth) : 0;
 
+  // Encrypted first: the salt it picks travels in the security parameters, which are encoded
+  // below, and the digest is computed over both once everything else is in place.
+  ber::Writer scopedContent(128);
+  encodeScopedPdu(scopedContent, scoped);
+  Octets privParams;
+  Octets ciphertext;
+  if (encrypt) {
+    ciphertext =
+        privEncrypt(priv, privKey, usm.boots, usm.time, scopedContent.bytes(), privParams, ec);
+    if (ec) return {};
+  }
+
   // Each layer is built into its own buffer and then wrapped, rather than written through nested
   // Writer scopes. A scope patches its length octet in place when it closes, widening it if the
   // content grew past 127 Octets and shifting everything after it -- which would invalidate the
   // digest's offset. Wrapping a finished buffer makes each shift a subtraction we can do here.
   ber::Writer usmContent(64);
-  auto authOffset = encodeUsmContent(usmContent, usm, authWidth);
+  auto authOffset =
+      encodeUsmContent(usmContent, usm, authWidth, encrypt ? privParams : usm.privParams);
 
   ber::Writer usmParams(usmContent.size() + 4);
   usmParams.tlv(ber::tag::sequence, usmContent.bytes());
@@ -101,13 +116,20 @@ std::vector<std::byte> encodeV3Message(const V3Header& header, const UsmParamete
   }
   body.octetString(usmParams.bytes());
   authOffset += body.size() - usmParams.size();
-  encodeScopedPdu(body, scoped);
+  // RFC 3412 section 6.8: msgData is either the ScopedPDU itself or an OCTET STRING holding its
+  // ciphertext, and the msgFlags the receiver already read say which.
+  if (encrypt) {
+    body.octetString(ciphertext);
+  } else {
+    body.raw(scopedContent.bytes());
+  }
 
   ber::Writer w(body.size() + 4);
   w.tlv(ber::tag::sequence, body.bytes());
   authOffset += w.size() - body.size();
 
-  for (const auto& stage : {usmContent.error(), usmParams.error(), body.error(), w.error()}) {
+  for (const auto& stage :
+       {scopedContent.error(), usmContent.error(), usmParams.error(), body.error(), w.error()}) {
     if (stage) {
       ec = stage;
       return {};
@@ -161,13 +183,6 @@ std::optional<V3Message> decodeV3Message(std::span<const std::byte> datagram, ne
           std::to_integer<std::uint8_t>(flags->front() & securityLevelMask));
       msg.header.reportable = (flags->front() & reportableFlag) != std::byte{0};
       msg.header.securityModel = *model;
-    }
-    // Gated on the flag rather than on what msgData turns out to be: a Security Level we cannot
-    // process is refused because it was claimed, not because the payload happened to look
-    // encrypted (RFC 3414 section 3.2 step 5). The encoder refuses the same level on the way out.
-    if (isEncrypted(msg.header.level)) {
-      ec = make_error_code(Errc::UnsupportedSecurityLevel);
-      return std::nullopt;
     }
     if (!r.ok()) {
       ec = r.error();
@@ -224,23 +239,26 @@ std::optional<V3Message> decodeV3Message(std::span<const std::byte> datagram, ne
       return std::nullopt;
     }
 
-    const auto dataTag = r.peekTag();
-    if (!dataTag) {
-      r.fail(Errc::Truncated);
-      ec = r.error();
-      return std::nullopt;
+    // RFC 3412 section 6.8: msgData is an encryptedPDU exactly when msgFlags said so. Which of
+    // the two it is is read off the flag rather than off the tag, so a message whose flags and
+    // payload disagree is refused rather than quietly interpreted the way the payload prefers.
+    if (isEncrypted(msg.header.level)) {
+      auto encrypted = r.octetString();
+      if (!encrypted) {
+        ec = r.error();
+        return std::nullopt;
+      }
+      // Left encrypted: opening it needs the privacy key, which belongs to the request this
+      // message answers and is not known here. decryptScopedPdu is the second half.
+      msg.encryptedPdu = std::move(*encrypted);
+    } else {
+      auto scoped = decodeScopedPdu(r);
+      if (!scoped) {
+        ec = r.error();
+        return std::nullopt;
+      }
+      msg.scoped = std::move(*scoped);
     }
-    if (*dataTag == ber::tag::octetString) {
-      // An encryptedPDU. Well-formed, and nothing we can open until stage 4.
-      ec = make_error_code(Errc::UnsupportedSecurityLevel);
-      return std::nullopt;
-    }
-    auto scoped = decodeScopedPdu(r);
-    if (!scoped) {
-      ec = r.error();
-      return std::nullopt;
-    }
-    msg.scoped = std::move(*scoped);
   }
   if (!r.finish()) {
     ec = r.error();
@@ -248,6 +266,29 @@ std::optional<V3Message> decodeV3Message(std::span<const std::byte> datagram, ne
   }
   ec = {};
   return msg;
+}
+
+bool decryptScopedPdu(V3Message& msg, PrivProtocol priv, std::span<const std::byte> privKey,
+                      net::ErrorCode& ec) {
+  const auto plain = privDecrypt(priv, privKey, msg.security.boots, msg.security.time,
+                                 msg.security.privParams, msg.encryptedPdu, ec);
+  if (ec) return false;
+
+  ber::Reader r(plain);
+  auto scoped = decodeScopedPdu(r);
+  // Deliberately not r.finish(): DES pads the plaintext to its block size and RFC 3414 section
+  // 8.1.1.2 leaves those Octets in place, so trailing bytes here are expected rather than an
+  // Agent making things up -- which is the opposite of what they mean in the datagram itself.
+  if (!scoped) {
+    // A wrong key decrypts to noise, and noise is not a ScopedPDU. Saying "decryption failed"
+    // rather than naming whichever BER rule the noise broke first is both truer and less of a
+    // hint to whoever is guessing keys.
+    ec = make_error_code(Errc::DecryptionFailed);
+    return false;
+  }
+  msg.scoped = std::move(*scoped);
+  ec = {};
+  return true;
 }
 
 bool verifyAuth(std::span<const std::byte> datagram, const V3Message& msg, AuthProtocol auth,

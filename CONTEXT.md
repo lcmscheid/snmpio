@@ -94,6 +94,11 @@ against another. Derived per (Master Key, engineID) pair and cached, because the
 deliberately expensive.
 _Avoid_: engine key, session key
 
+**Privacy Parameters**:
+The salt that travels in `msgPrivacyParameters`, from which both sides rebuild the cipher's IV. Ours
+to choose and never to repeat under one key; for DES it also carries the boots count.
+_Avoid_: nonce, IV — the IV is derived from this, and is not this.
+
 **Key Extension**:
 The scheme used to stretch a Localized Key when the privacy protocol needs more key material than the
 hash produces — either **Blumenthal** or **Reeder**. Neither is standardised, the two are mutually

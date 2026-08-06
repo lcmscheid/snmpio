@@ -44,6 +44,8 @@ class ScriptedV3Agent {
     std::optional<Octets> engineId;
     // Sign with a key that is not the Agent's, so the Command Generator must reject it.
     bool corruptDigest = false;
+    // Encrypt with a key that is not the Agent's, so the reply cannot be opened.
+    bool corruptPrivKey = false;
   };
 
   // The data plane: what a well-formed, authenticated, timely request gets back.
@@ -68,10 +70,21 @@ class ScriptedV3Agent {
     m_engineId = std::move(id);
     net::ErrorCode ec;
     m_key = localizedAuthKey(m_creds, m_engineId, ec);
+    m_privKey = m_creds.privProtocol == PrivProtocol::None
+                    ? Octets{}
+                    : localizedPrivKey(m_creds, m_engineId, ec);
   }
   void setBoots(std::int32_t boots) noexcept { m_boots = boots; }
   void setTime(std::int32_t time) noexcept { m_time = time; }
   void setResponder(Responder responder) { m_responder = std::move(responder); }
+  // Every datagram this Agent receives, for the tests that care what actually went out rather
+  // than what it decoded to.
+  void setOnDatagram(std::function<void(std::span<const std::byte>)> onDatagram) {
+    m_onDatagram = std::move(onDatagram);
+  }
+
+  // The compliant behaviour, for a Responder that wants to misbehave in one place only.
+  std::optional<Reply> behaveLikeACompliantAgent(const Request& req) { return behave(req); }
 
   // RFC 3414 section 5's counters, so that a test says which Report it means rather than which
   // number it is.
@@ -80,6 +93,7 @@ class ScriptedV3Agent {
   static constexpr std::uint32_t unknownUserNames = 3;
   static constexpr std::uint32_t unknownEngineIds = 4;
   static constexpr std::uint32_t wrongDigests = 5;
+  static constexpr std::uint32_t decryptionErrors = 6;
 
   // The Report a real Agent sends for each of the usmStats counters. Public because a misbehaving
   // Agent is written by handing one of these back at the wrong moment.
@@ -133,6 +147,7 @@ class ScriptedV3Agent {
   }
 
   void answer(std::span<const std::byte> datagram) {
+    if (m_onDatagram) m_onDatagram(datagram);
     net::ErrorCode ec;
     auto decoded = decodeV3Message(datagram, ec);
     if (!decoded) return;
@@ -140,31 +155,48 @@ class ScriptedV3Agent {
     Request req;
     req.authenticated = isAuthenticated(decoded->header.level) &&
                         verifyAuth(datagram, *decoded, m_creds.authProtocol, m_key, ec);
+    // RFC 3414 section 3.2 step 8: decryption comes after authentication, and a payload that will
+    // not open is a usmStatsDecryptionErrors Report rather than silence. A real Agent checks
+    // timeliness in between (step 7); this one checks it in behave(), below, which only means an
+    // untimely message is decrypted before being refused for a reason that has nothing to do with
+    // its ciphertext.
+    if (isEncrypted(decoded->header.level) &&
+        !decryptScopedPdu(*decoded, m_creds.privProtocol, m_privKey, ec)) {
+      send(report(decryptionErrors, SecurityLevel::AuthNoPriv), decoded->header.msgId, 0);
+      return;
+    }
     req.message = std::move(*decoded);
 
     auto reply = m_responder ? m_responder(req) : behave(req);
     if (!reply) return;  // silence, which is what a dead Agent looks like
 
+    send(std::move(*reply), req.message.header.msgId, req.message.scoped.pdu.requestId);
+  }
+
+  void send(Reply reply, std::int32_t msgId, std::int32_t requestId) {
     V3Header header;
-    header.msgId = req.message.header.msgId;
-    header.level = reply->level;
+    header.msgId = msgId;
+    header.level = reply.level;
     header.reportable = false;
 
     UsmParameters usm;
-    usm.engineId = reply->engineId.value_or(m_engineId);
-    usm.boots = reply->boots.value_or(m_boots);
-    usm.time = reply->time.value_or(m_time);
+    usm.engineId = reply.engineId.value_or(m_engineId);
+    usm.boots = reply.boots.value_or(m_boots);
+    usm.time = reply.time.value_or(m_time);
     usm.userName = m_creds.userName;
 
-    ScopedPdu scoped = std::move(reply->scoped);
+    ScopedPdu scoped = std::move(reply.scoped);
     if (scoped.contextEngineId.empty()) scoped.contextEngineId = usm.engineId;
-    if (scoped.pdu.type == PduType::Response)
-      scoped.pdu.requestId = req.message.scoped.pdu.requestId;
+    if (scoped.pdu.type == PduType::Response) scoped.pdu.requestId = requestId;
 
     auto key = m_key;
-    if (reply->corruptDigest && !key.empty()) key.front() ^= std::byte{0xff};
+    if (reply.corruptDigest && !key.empty()) key.front() ^= std::byte{0xff};
+    auto privKey = m_privKey;
+    if (reply.corruptPrivKey && !privKey.empty()) privKey.front() ^= std::byte{0xff};
 
-    m_out = encodeV3Message(header, usm, scoped, m_creds.authProtocol, key, ec);
+    net::ErrorCode ec;
+    m_out = encodeV3Message(header, usm, scoped, m_creds.authProtocol, key, ec,
+                            m_creds.privProtocol, privKey);
     if (ec) return;
     m_socket.send_to(net::asio::buffer(m_out), m_from, 0, ec);
   }
@@ -175,8 +207,10 @@ class ScriptedV3Agent {
   Credentials m_creds;
   Answer m_answer;
   Responder m_responder;
+  std::function<void(std::span<const std::byte>)> m_onDatagram;
   Octets m_engineId;
   Octets m_key;
+  Octets m_privKey;
   std::int32_t m_boots = 3;
   std::int32_t m_time = 1000;
   net::UdpEndpoint m_from;

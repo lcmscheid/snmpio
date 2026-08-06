@@ -38,7 +38,8 @@ UsmParameters params() {
 
 Octets authKey(AuthProtocol p) {
   net::ErrorCode ec;
-  const Credentials creds{"bert", SecurityLevel::AuthNoPriv, p, "maplesyrup"};
+  const Credentials creds{"bert",       SecurityLevel::AuthNoPriv, p,
+                          "maplesyrup", PrivProtocol::None,        ""};
   auto key = localizedAuthKey(creds, engineId(), ec);
   EXPECT_FALSE(ec) << ec.message();
   return key;
@@ -170,12 +171,14 @@ TEST(V3Message, AVerifiedMessageIsNotSelfAuthenticating) {
   EXPECT_EQ(ec, make_error_code(Errc::AuthFailed));
 }
 
-TEST(V3Message, RefusesToClaimPrivacyItCannotProvide) {
+// A message may not claim privacy it has no protocol to provide: sending it in the clear under a
+// flag saying otherwise is worse than not sending it.
+TEST(V3Message, RefusesToClaimPrivacyWithoutAProtocol) {
   V3Header header;
   header.level = SecurityLevel::AuthPriv;
   net::ErrorCode ec;
   EXPECT_TRUE(encodeV3Message(header, params(), scopedGet(), AuthProtocol::Sha256, {}, ec).empty());
-  EXPECT_EQ(ec, make_error_code(Errc::UnsupportedSecurityLevel));
+  EXPECT_EQ(ec, make_error_code(Errc::UnsupportedPrivProtocol));
 }
 
 TEST(V3Message, RefusesToAuthenticateWithoutAProtocol) {
@@ -220,8 +223,8 @@ TEST(V3Message, RejectsPrivacyWithoutAuthentication) {
   EXPECT_EQ(ec, make_error_code(Errc::BadMessageFlags));
 }
 
-// The flag is what is refused, not the payload: an Agent that claims authPriv and then sends a
-// plaintext ScopedPDU must not be read as though it had claimed nothing.
+// The flag decides which of the two shapes msgData is, so an Agent that claims authPriv and then
+// sends a plaintext ScopedPDU is refused rather than read as though it had claimed nothing.
 TEST(V3Message, RejectsAClaimOfPrivacyOverAPlaintextScopedPdu) {
   net::ErrorCode ec;
   const V3Header header;
@@ -231,7 +234,7 @@ TEST(V3Message, RejectsAClaimOfPrivacyOverAPlaintextScopedPdu) {
   ASSERT_NE(flags, wire.end());
   *(flags + 2) = std::byte{0x07};  // authPriv, reportable
   EXPECT_FALSE(decodeV3Message(wire, ec));
-  EXPECT_EQ(ec, make_error_code(Errc::UnsupportedSecurityLevel));
+  EXPECT_EQ(ec, make_error_code(Errc::UnexpectedTag));
 }
 
 // RFC 3414 section 2.4 fixes msgSecurityParameters at six fields. Anything after them is an Agent
@@ -269,10 +272,9 @@ TEST(V3Message, RejectsTrailingDataInsideTheSecurityParameters) {
   EXPECT_EQ(ec, make_error_code(Errc::TrailingData));
 }
 
-TEST(V3Message, ReportsAnEncryptedPduAsUnsupported) {
-  // msgData as an OCTET STRING is an encryptedPDU: nothing we can open until privacy arrives in
-  // stage 4. The flags here say noAuthNoPriv, so this is the payload check rather than the flag
-  // check above -- the two disagreeing is itself an Agent misbehaving.
+TEST(V3Message, RejectsAnEncryptedPduTheFlagsDidNotClaim) {
+  // msgData as an OCTET STRING is an encryptedPDU, and the flags here say noAuthNoPriv: the
+  // mirror of the test above, and the other half of "the flag decides, not the payload".
   ber::Writer body(64);
   body.integer(versionV3);
   {
@@ -299,7 +301,7 @@ TEST(V3Message, ReportsAnEncryptedPduAsUnsupported) {
 
   net::ErrorCode ec;
   EXPECT_FALSE(decodeV3Message(w.bytes(), ec));
-  EXPECT_EQ(ec, make_error_code(Errc::UnsupportedSecurityLevel));
+  EXPECT_EQ(ec, make_error_code(Errc::UnexpectedTag));
 }
 
 TEST(V3Message, RejectsTruncatedInput) {
@@ -311,6 +313,113 @@ TEST(V3Message, RejectsTruncatedInput) {
     EXPECT_FALSE(decodeV3Message(prefix, ec)) << "prefix of " << n << " Octets decoded";
     EXPECT_TRUE(ec);
   }
+}
+
+// ---------------------------------------------------------------------------
+// Privacy
+// ---------------------------------------------------------------------------
+
+Octets privKey(AuthProtocol auth, PrivProtocol priv) {
+  net::ErrorCode ec;
+  const Credentials creds{"bert", SecurityLevel::AuthPriv, auth, "maplesyrup", priv, "privatepass"};
+  auto key = localizedPrivKey(creds, engineId(), ec);
+  EXPECT_FALSE(ec) << ec.message();
+  return key;
+}
+
+TEST(V3Message, RoundTripsAuthPriv) {
+  V3Header header;
+  header.msgId = 0x4321;
+  header.level = SecurityLevel::AuthPriv;
+  const auto auth = AuthProtocol::Sha256;
+  const auto priv = PrivProtocol::Aes128;
+
+  net::ErrorCode ec;
+  const auto wire = encodeV3Message(header, params(), scopedGet(), auth, authKey(auth), ec, priv,
+                                    privKey(auth, priv));
+  ASSERT_FALSE(ec) << ec.message();
+
+  auto msg = decodeV3Message(wire, ec);
+  ASSERT_TRUE(msg) << ec.message();
+  EXPECT_EQ(msg->header.level, SecurityLevel::AuthPriv);
+  // The decode stops at the ciphertext: the ScopedPDU is not readable until a key turns up.
+  EXPECT_FALSE(msg->encryptedPdu.empty());
+  EXPECT_TRUE(msg->scoped.pdu.varbinds.empty());
+  // The salt the encoder chose travels in the message; it is what the IV is rebuilt from.
+  EXPECT_EQ(msg->security.privParams.size(), 8U);
+
+  // The digest covers the finished message, ciphertext included -- verified before anything is
+  // decrypted, which is the order RFC 3414 section 3.2 puts them in.
+  EXPECT_TRUE(verifyAuth(wire, *msg, auth, authKey(auth), ec)) << ec.message();
+
+  ASSERT_TRUE(decryptScopedPdu(*msg, priv, privKey(auth, priv), ec)) << ec.message();
+  EXPECT_EQ(msg->scoped.contextEngineId, engineId());
+  EXPECT_EQ(msg->scoped.pdu.type, PduType::Get);
+  EXPECT_EQ(msg->scoped.pdu.requestId, 0x2a);
+  ASSERT_EQ(msg->scoped.pdu.varbinds.size(), 1U);
+  EXPECT_EQ(msg->scoped.pdu.varbinds[0].name, sysUpTime);
+}
+
+// DES pads the plaintext to its block size, so the ScopedPDU it decrypts to has trailing Octets
+// the decoder has to walk past rather than call trailing data (RFC 3414 section 8.1.1.2).
+TEST(V3Message, RoundTripsAuthPrivUnderDesPadding) {
+  V3Header header;
+  header.level = SecurityLevel::AuthPriv;
+  const auto auth = AuthProtocol::Md5;
+  const auto priv = PrivProtocol::Des;
+
+  net::ErrorCode ec;
+  const auto wire = encodeV3Message(header, params(), scopedGet(), auth, authKey(auth), ec, priv,
+                                    privKey(auth, priv));
+  ASSERT_FALSE(ec) << ec.message();
+
+  auto msg = decodeV3Message(wire, ec);
+  ASSERT_TRUE(msg) << ec.message();
+  EXPECT_EQ(msg->encryptedPdu.size() % 8, 0U);
+  ASSERT_TRUE(decryptScopedPdu(*msg, priv, privKey(auth, priv), ec)) << ec.message();
+  ASSERT_EQ(msg->scoped.pdu.varbinds.size(), 1U);
+  EXPECT_EQ(msg->scoped.pdu.varbinds[0].name, sysUpTime);
+}
+
+// A wrong key decrypts to noise, and noise is not a ScopedPDU. What matters is that it says so
+// rather than naming whichever BER rule the noise happened to break first.
+TEST(V3Message, RefusesAnEncryptedPduTheKeyDoesNotOpen) {
+  V3Header header;
+  header.level = SecurityLevel::AuthPriv;
+  const auto auth = AuthProtocol::Sha256;
+  const auto priv = PrivProtocol::Aes128;
+
+  net::ErrorCode ec;
+  const auto wire = encodeV3Message(header, params(), scopedGet(), auth, authKey(auth), ec, priv,
+                                    privKey(auth, priv));
+  ASSERT_FALSE(ec) << ec.message();
+  auto msg = decodeV3Message(wire, ec);
+  ASSERT_TRUE(msg) << ec.message();
+
+  auto wrong = privKey(auth, priv);
+  wrong.front() ^= std::byte{0xff};
+  EXPECT_FALSE(decryptScopedPdu(*msg, priv, wrong, ec));
+  EXPECT_EQ(ec, make_error_code(Errc::DecryptionFailed));
+}
+
+// The digest is computed over the message the ciphertext is already in, so flipping a bit of the
+// ciphertext has to fail authentication before decryption is ever attempted.
+TEST(V3Message, AuthenticationCoversTheCiphertext) {
+  V3Header header;
+  header.level = SecurityLevel::AuthPriv;
+  const auto auth = AuthProtocol::Sha1;
+  const auto priv = PrivProtocol::Aes192C;
+
+  net::ErrorCode ec;
+  auto wire = encodeV3Message(header, params(), scopedGet(), auth, authKey(auth), ec, priv,
+                              privKey(auth, priv));
+  ASSERT_FALSE(ec) << ec.message();
+  wire.back() ^= std::byte{0x01};
+
+  const auto msg = decodeV3Message(wire, ec);
+  ASSERT_TRUE(msg) << ec.message();
+  EXPECT_FALSE(verifyAuth(wire, *msg, auth, authKey(auth), ec));
+  EXPECT_EQ(ec, make_error_code(Errc::AuthFailed));
 }
 
 }  // namespace

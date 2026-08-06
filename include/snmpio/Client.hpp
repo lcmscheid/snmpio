@@ -139,7 +139,8 @@ class Client {
   // The first request against an unknown Engine simply costs extra round trips, and requests
   // issued while that is in flight queue behind it rather than each probing separately.
   //
-  // authPriv is refused with Errc::UnsupportedSecurityLevel until privacy arrives in stage 4.
+  // At authPriv the Credentials name the privacy protocol as well; an authPriv level with none
+  // named fails with Errc::UnsupportedPrivProtocol rather than being sent in the clear.
   template <typename Token>
   auto asyncGet(Target target, Credentials credentials, std::vector<Oid> oids, Token&& token) {
     return spawn<void(net::ErrorCode, Response)>(
@@ -258,7 +259,9 @@ class Client {
     bool v3 = false;
     bool authRequired = false;
     AuthProtocol authProtocol = AuthProtocol::None;
+    PrivProtocol privProtocol = PrivProtocol::None;
     Octets authKey;   // the Localized Key this exchange is authenticated with
+    Octets privKey;   // and the one it is encrypted with, at authPriv
     Octets engineId;  // the Authoritative Engine addressed; empty while discovering
     std::int32_t requestId = 0;
     Pdu response;
@@ -309,8 +312,11 @@ class Client {
   // The Engine currently believed to answer at this endpoint, or nullptr if none is known.
   EngineState* engineAt(const net::UdpEndpoint& endpoint);
 
-  // Cached because the derivation is a megabyte hash and deliberately expensive (CONTEXT.md).
+  // Cached because the derivation is a megabyte hash and deliberately expensive (CONTEXT.md) --
+  // twice over for Reeder, whose key extension is a second one.
   const Octets* localizedKey(const Credentials& creds, const Octets& engineId, net::ErrorCode& ec);
+  const Octets* localizedPrivacyKey(const Credentials& creds, const Octets& engineId,
+                                    net::ErrorCode& ec);
 
   // What a Report means for the request that provoked it: an ErrorCode to fail with, or nothing
   // when it named something we can act on and ask again about.
@@ -330,9 +336,11 @@ class Client {
   std::map<Octets, EngineState> m_engines;
   std::map<net::UdpEndpoint, Octets> m_engineAt;
   std::map<net::UdpEndpoint, std::shared_ptr<Discovery>> m_discovering;
-  // (engineID, protocol, secret) -- ADR-0003's (master key, engineID), spelled as the two things
-  // the master key is derived from so that nothing has to derive it to look one up.
-  std::map<std::tuple<Octets, AuthProtocol, std::string>, Octets> m_keys;
+  // (engineID, hash, secret, privacy protocol) -- ADR-0003's (master key, engineID), spelled as
+  // the things the master key is derived from so that nothing has to derive it to look one up.
+  // The privacy protocol is part of the key rather than of the value because it decides how far
+  // the derivation is extended: PrivProtocol::None is the authentication key's row.
+  std::map<std::tuple<Octets, AuthProtocol, std::string, PrivProtocol>, Octets> m_keys;
   // One counter for both the v3 msgID and the PDU request-id, so that the two protocols cannot
   // collide in m_pending -- which is keyed on the msgID for v3, as CONTEXT.md requires, because a
   // message we cannot open must still be attributable.

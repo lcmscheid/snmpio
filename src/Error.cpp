@@ -78,6 +78,10 @@ class SnmpioCategory final : public net::ErrorCategory {
         return "authentication protocol is unavailable or unset";
       case Errc::UnsupportedSecurityLevel:
         return "security level is not one this build can produce";
+      case Errc::UnsupportedPrivProtocol:
+        return "privacy protocol is unset where the security level requires one";
+      case Errc::LegacyProviderUnavailable:
+        return "OpenSSL's legacy provider, which DES lives in, could not be loaded";
       case Errc::UnsupportedSecurityModel:
         return "message security model is not USM";
       case Errc::BadMessageFlags:
@@ -88,6 +92,8 @@ class SnmpioCategory final : public net::ErrorCategory {
         return "cryptographic operation failed";
       case Errc::AuthFailed:
         return "message authentication digest did not match";
+      case Errc::DecryptionFailed:
+        return "encryptedPDU did not decrypt into a ScopedPDU with this key";
       case Errc::UnknownUserName:
         return "the Authoritative Engine does not know this user name";
       case Errc::UnknownEngineId:

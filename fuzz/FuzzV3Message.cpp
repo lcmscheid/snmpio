@@ -1,7 +1,8 @@
 // The SNMPv3 datagram: message framing, the USM security parameters inside their OCTET STRING,
-// and the ScopedPDU. Two things here are worth a fuzzer that the v2c path does not have -- the
-// digest's offset is derived from attacker-controlled length fields, and verifyAuth indexes the
-// datagram with it.
+// and the ScopedPDU. Three things here are worth a fuzzer that the v2c path does not have -- the
+// digest's offset is derived from attacker-controlled length fields and verifyAuth indexes the
+// datagram with it, and an encryptedPDU is a length, a salt and a ciphertext an Agent chose,
+// decrypted into a buffer this then parses as BER.
 #include <cassert>
 #include <cstddef>
 #include <cstdint>
@@ -33,6 +34,21 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data, std::size_t size
   // Any key will do: what is being exercised is the blanking and the indexing, not the crypto.
   static const Octets key(32, std::byte{0xA5});
   verifyAuth(input, *decoded, AuthProtocol::Sha256, key, ec);
+
+  // An encryptedPDU decrypts under a key that is certainly not the one it was encrypted with, so
+  // what runs here is the salt handling, the block-size checks, and the BER decode of a buffer of
+  // noise -- which is exactly the path a hostile Agent reaches, since it does not have our key
+  // either. AES and DES both, because only DES constrains the ciphertext's length.
+  if (isEncrypted(decoded->header.level)) {
+    static const Octets aesKey(32, std::byte{0x5A});
+    V3Message copy = *decoded;
+    decryptScopedPdu(copy, PrivProtocol::Aes256, aesKey, ec);
+    copy = *decoded;
+    decryptScopedPdu(copy, PrivProtocol::Des, aesKey, ec);
+    // Nothing below applies: the ScopedPDU of an encrypted message was never decoded, so there is
+    // no round trip to assert.
+    return 0;
+  }
 
   // Round-trip identity, as everywhere else in this codec. The digest cannot survive a re-encode
   // -- it is computed over the message, and the message is what changed -- so the comparison is

@@ -50,7 +50,8 @@ void Client::stop() {
 std::vector<Varbind> Client::toVarbinds(std::vector<Oid> oids) {
   std::vector<Varbind> out;
   out.reserve(oids.size());
-  for (auto& oid : oids) out.push_back(Varbind{.name = std::move(oid), .val = null});
+  // In place rather than push_back of a temporary -- see the note in tests/TestClient.cpp.
+  for (auto& oid : oids) out.emplace_back(std::move(oid), null);
   return out;
 }
 

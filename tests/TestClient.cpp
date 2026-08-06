@@ -168,16 +168,19 @@ ScriptedAgent::Responder tableAgent(std::vector<Varbind> table) {
       if (from < vb.name) out.push_back(vb);
     }
     if (out.size() < count) {
-      out.push_back(Varbind{Oid{1, 3, 6, 1, 2, 1, 2}, ValueException::EndOfMibView});
+      out.emplace_back(Oid{1, 3, 6, 1, 2, 1, 2}, ValueException::EndOfMibView);
     }
     return respondWith(std::move(out));
   };
 }
 
 std::vector<Varbind> smallTable() {
+  // emplace_back, not push_back of a Varbind temporary: moving a Varbind moves the Value variant,
+  // and GCC 13 mis-analyses that move as reading the Opaque alternative's uninitialised vector.
+  // Constructing in place sidesteps a false positive that -Werror turns into a build failure.
   std::vector<Varbind> table;
   for (std::uint32_t i = 1; i <= 5; ++i) {
-    table.push_back(Varbind{systemGroup.child(i).child(0), Gauge32{i}});
+    table.emplace_back(systemGroup.child(i).child(0), Gauge32{i});
   }
   return table;
 }

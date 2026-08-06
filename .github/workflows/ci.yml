@@ -104,6 +104,11 @@ jobs:
   interop:
     name: interop (snmpd)
     runs-on: ubuntu-24.04
+    # One value configures the Agent and drives the suite, so the two cannot drift. It is not a
+    # secret: it authorizes a loopback `snmpd` this job starts and kills.
+    env:
+      SNMPIO_INTEROP_TARGET: 127.0.0.1:16161
+      SNMPIO_INTEROP_V3_PASSWORD: snmpio-interop-ci
     steps:
       - uses: actions/checkout@v5
 
@@ -119,20 +124,25 @@ jobs:
 
       - name: Start snmpd
         run: |
-          printf 'rocommunity public 127.0.0.1\nsysDescr snmpio interop, GitHub Actions\n' \
-            > "$RUNNER_TEMP/snmpd.conf"
-          /usr/sbin/snmpd -f -Lo -C -c "$RUNNER_TEMP/snmpd.conf" udp:127.0.0.1:16161 \
+          mkdir -p "$RUNNER_TEMP/snmp-persist"
+          tests/interop/snmpd-conf.sh > "$RUNNER_TEMP/snmpd.conf"
+          /usr/sbin/snmpd -f -Lo -C -c "$RUNNER_TEMP/snmpd.conf" \
+            --persistentDir="$RUNNER_TEMP/snmp-persist" udp:127.0.0.1:16161 \
             > "$RUNNER_TEMP/snmpd.log" 2>&1 &
           # The socket is what the suite needs, not the process -- so wait for the socket.
           timeout 10 bash -c 'until ss -lun | grep -q 127.0.0.1:16161; do sleep 0.5; done' \
             || { cat "$RUNNER_TEMP/snmpd.log"; exit 1; }
 
       # -R Interop is the live half only; the harness's own parsing tests are named Harness*, so a
-      # green run here means a Response actually came back.
+      # green run here means Responses actually came back. These tests skip when their environment
+      # is missing, which here is the `env:` block above -- delete that and this job goes green
+      # having proved nothing.
       - name: Interop
-        run: |
-          SNMPIO_INTEROP_TARGET=127.0.0.1:16161 \
-            ctest --test-dir build -R Interop --output-on-failure --no-tests=error
+        run: ctest --test-dir build -R Interop --output-on-failure --no-tests=error
+
+      - name: snmpd log
+        if: failure()
+        run: cat "$RUNNER_TEMP/snmpd.log"
 
   style:
     name: clang-format + clang-tidy

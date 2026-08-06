@@ -100,11 +100,13 @@ Or fold it into the build with `-DSNMPIO_CLANG_TIDY=ON`. `tests/` and `fuzz/` ca
 relaxing what only applies to library code (GoogleTest's do-while macros, fixture tables,
 `*Oid::parse("1.3.6.1")` on a literal).
 
-Four `NOLINT`s exist, each with its reason at the site: `make_error_code`, whose spelling is fixed
-by the standard because both `error_code` types call it unqualified through ADL; the
+Each `NOLINT` carries its reason at the site: `make_error_code`, whose spelling is fixed by the
+standard because both `error_code` types call it unqualified through ADL; the
 `SNMPIO_REGISTER_ERROR_CODE_ENUM` macro, which opens a namespace and so cannot be a template; the
-fixed PRNG seed in the round-trip sweep, which exists precisely to be reproducible; and the
-`std::getenv` the interop harness reads its Target from, which runs before any test thread does.
+fixed PRNG seed in the round-trip sweep, which exists precisely to be reproducible; the
+`std::getenv` the interop harness reads its Target from, which runs before any test thread does;
+and `socket::close(ec)` in the interop relay, whose return value only exists under one of the two
+Asios (ADR-0002).
 
 ## Interop tests
 
@@ -115,11 +117,17 @@ socket. There is no Agent in a bare checkout, so those tests **skip** unless a T
 so a run filtered to `Interop` that reports all green really did reach an Agent.
 
 ```sh
-SNMPIO_INTEROP_TARGET=127.0.0.1:16161 ctest --preset default -R Interop --output-on-failure
+export SNMPIO_INTEROP_TARGET=127.0.0.1:16161
+export SNMPIO_INTEROP_V3_PASSWORD=snmpio-interop   # 8+ characters; omit to skip the v3 half
+ctest --preset default -R Interop --output-on-failure
 ```
 
 `SNMPIO_INTEROP_TARGET` is the Target the Agent answers at, as `address`, `address:port` or
-`[v6]:port`. Unset, the suite skips.
+`[v6]:port`. `SNMPIO_INTEROP_V3_PASSWORD` is the password every v3 interop user carries, and
+gates the v3 tests: the Agent has to be running the configuration
+[`tests/interop/snmpd-conf.sh`](tests/interop/snmpd-conf.sh) prints, and a switch on the bench is
+not, so an unset variable skips rather than fails. One value configures the Agent and drives the
+suite, which is why it is not written down twice.
 
 An address, not a hostname. A `Target` is built from an endpoint so that choosing a resolver stays
 the caller's business (stage 1), and the harness is a caller like any other — so a hostname is
@@ -127,17 +135,25 @@ rejected outright rather than quietly resolved. A variable that is set but unusa
 suite; only an unset one skips it, since a typo that skipped would report green for an Agent it
 never reached.
 
-Any Agent will do. An `snmpd` on a spare port is enough to see it work:
+An `snmpd` on a spare port is the whole of what CI runs against, and it is two commands here:
 
 ```sh
-printf 'rocommunity public 127.0.0.1\n' > /tmp/snmpd.conf
-snmpd -f -Lo -C -c /tmp/snmpd.conf udp:127.0.0.1:16161
+mkdir -p /tmp/snmp-persist
+tests/interop/snmpd-conf.sh > /tmp/snmpd.conf
+snmpd -f -Lo -C -c /tmp/snmpd.conf --persistentDir=/tmp/snmp-persist udp:127.0.0.1:16161
 ```
 
-The suite currently proves one live exchange — a v2c GET of `sysDescr.0`, which it prints, because
-no two Agents say the same thing and which one answered is the first thing a failed run needs. CI
-runs it against a containerless `snmpd` on every commit. SNMPv3 against `snmpd`, the Simulator at a
-pinned digest and the misbehaviour cases are the rest of stage 5.
+The v3 users are a convention that script and the tests share — `noauth`, `auth<hash>` per
+authentication protocol, and `priv<hash><cipher>` per pair — because they are ours to create. The
+matrix is everything `snmpd` speaks: MD5, SHA-1 and the four SHA-2 hashes, each of them alone at
+`authNoPriv` and again over DES and AES-128 at `authPriv`. AES-192/256 under either Key Extension
+are not in `snmpd` at all, which is what the Simulator is for (ADR-0006).
+
+What the suite proves: a v2c GET of `sysDescr.0`, which it prints because no two Agents say the
+same thing; the eighteen v3 pairs above; that Engine Discovery costs the extra round trips exactly
+once, counted off the wire by a relay between Client and Agent, since the API deliberately never
+surfaces it; and that a wrong password comes back as the Report the Engine sent rather than as a
+timeout. The Simulator at a pinned digest and the misbehaviour cases are the rest of stage 5.
 
 ## Fuzzing
 

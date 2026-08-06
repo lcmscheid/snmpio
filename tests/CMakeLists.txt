@@ -18,6 +18,7 @@ add_executable(snmpio_tests
   TestClientV3.cpp
   TestError.cpp
   TestInterop.cpp
+  TestInteropV3.cpp
   TestOid.cpp
   TestPdu.cpp
   TestUsm.cpp

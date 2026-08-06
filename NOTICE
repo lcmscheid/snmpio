@@ -1,0 +1,16 @@
+snmpio
+Copyright 2026 Luiz Carlos Martins Scheid
+
+This product includes no third-party code. The following were consulted as
+reference implementations while implementing SNMPv3 and USM — for the interop
+workarounds and state-machine detail that the RFCs do not specify — and are
+credited here because their licences are attribution-based:
+
+  - gosnmp (https://github.com/gosnmp/gosnmp) — SNMPv3 USM, engine discovery
+    and vendor interop workarounds. BSD-3-Clause.
+  - async-snmp (https://github.com/lukeod/async-snmp) — async USM structure and
+    fuzzing approach. MIT OR Apache-2.0.
+
+Testing uses snmp-fault-agent (https://github.com/lcmscheid/snmp-fault-agent),
+Apache-2.0, consumed by CI as a container image and not linked into this
+library.

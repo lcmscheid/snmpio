@@ -81,6 +81,10 @@ cmake --preset default                          # always writes compile_commands
 clang-tidy -p build/default src/*.cpp tests/*.cpp fuzz/*.cpp
 ```
 
+Both clang tools are pinned to **22.1.8** — their output changes between major versions, so an
+unpinned local install will reformat files CI then rejects. Match it with
+`pip install clang-format==22.1.8 clang-tidy==22.1.8` if your distro ships something else.
+
 Or fold it into the build with `-DSNMPIO_CLANG_TIDY=ON`. `tests/` and `fuzz/` carry an overlay
 relaxing what only applies to library code (GoogleTest's do-while macros, fixture tables,
 `*Oid::parse("1.3.6.1")` on a literal).

@@ -35,6 +35,10 @@ Three names are fixed by forces outside this repo and must not be "corrected":
 `make_error_code` (ADL customisation point for both `error_code` types), `LLVMFuzzerTestOneInput`
 (libFuzzer looks it up by name), and `begin`/`end`/`size` on `Oid` (range-for).
 
+**Tooling version** — clang-format and clang-tidy are pinned to **22.1.8**, in CI and here. Their
+output changes between major versions, so an unpinned workstation will reformat files CI then
+rejects. `pip install clang-format==22.1.8 clang-tidy==22.1.8` if your distro ships a different one.
+
 **Static analysis** — `.clang-tidy` runs ten check groups with `WarningsAsErrors: '*'`. Every
 disabled check carries its reason in the file; add yours the same way rather than silently
 widening the list. `tests/` and `fuzz/` have an overlay for test idioms.

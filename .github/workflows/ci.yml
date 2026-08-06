@@ -27,7 +27,7 @@ jobs:
             asio: boost
             sanitize: true
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install dependencies
         run: |
@@ -58,7 +58,7 @@ jobs:
     name: fuzz (smoke)
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install dependencies
         run: |
@@ -97,11 +97,30 @@ jobs:
   style:
     name: clang-format + clang-tidy
     runs-on: ubuntu-24.04
+    # Both tools change their output between major versions, so an unpinned runner disagrees with
+    # an unpinned workstation and the job fails on formatting nobody chose. Pinned here and
+    # recorded in CLAUDE.md; the PyPI wheels are the same binaries LLVM ships.
+    env:
+      LLVM_VERSION: 22.1.8
     steps:
-      - uses: actions/checkout@v4
-      - run: |
+      - uses: actions/checkout@v5
+
+      - name: Install pinned clang tooling
+        run: |
+          python3 -m venv "$RUNNER_TEMP/llvm"
+          "$RUNNER_TEMP/llvm/bin/pip" install --quiet \
+            "clang-format==$LLVM_VERSION" "clang-tidy==$LLVM_VERSION"
+          echo "$RUNNER_TEMP/llvm/bin" >> "$GITHUB_PATH"
+
+      - name: Install build dependencies
+        run: |
           sudo apt-get update
-          sudo apt-get install -y ninja-build clang-format clang-tidy libasio-dev libgtest-dev
+          sudo apt-get install -y ninja-build libasio-dev libgtest-dev
+
+      - name: Report tool versions
+        run: |
+          clang-format --version
+          clang-tidy --version | head -2
 
       - name: Format
         run: |

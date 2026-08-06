@@ -129,6 +129,12 @@ std::optional<Pdu> decodePdu(ber::Reader& r) {
   return p;
 }
 
+std::optional<std::int32_t> messageVersion(std::span<const std::byte> datagram) noexcept {
+  ber::Reader r(datagram);
+  auto scope = r.enter(ber::tag::sequence);
+  return r.integer();
+}
+
 std::vector<std::byte> encodeV2cMessage(std::string_view community, const Pdu& pdu,
                                         net::ErrorCode& ec) {
   ber::Writer w(256);

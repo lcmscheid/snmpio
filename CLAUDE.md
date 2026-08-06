@@ -1,9 +1,9 @@
 # snmpio
 
 An async C++20 SNMPv2c/SNMPv3 command generator built directly on Asio. Manager side only, no
-net-snmp dependency. Currently at **stage 2 of 6** — v2c works end to end over UDP, and the v3
-message plus USM authentication exist but are not yet wired to the Client. `README.md` has the
-stage table.
+net-snmp dependency. Currently at **stage 3 of 6** — v2c and v3 both work end to end over UDP at
+`noAuthNoPriv` and `authNoPriv`, discovery and Reports included. Privacy is stage 4. `README.md`
+has the stage table.
 
 ## Read before changing anything
 
@@ -52,7 +52,7 @@ independent implementation, so they pin against drift rather than against being 
 non-minimal long-form lengths), strict where it is not (indefinite length, high-tag-number form,
 sub-identifier overflow). Changing which side something falls on is an ADR-sized decision.
 
-**Tests** — 128 of them, and the defensive paths are the point. A decoder change that keeps them all
+**Tests** — 151 of them, and the defensive paths are the point. A decoder change that keeps them all
 green has probably not been tested; the misbehaving-agent cases are why ADR-0006 exists.
 
 **Licence** — Apache-2.0. No per-file copyright headers, deliberately (ADR-0007). Anything ported

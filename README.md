@@ -8,17 +8,17 @@ that shaped it are in [`docs/adr/`](docs/adr).
 
 ## Status
 
-**Stage 2 of 6.** SNMPv2c works end to end over UDP: GET, GETNEXT, GETBULK, SET and Walk. The
-SNMPv3 message and its USM authentication are implemented and tested, but not yet wired to the
-Client — sending one needs engine discovery, which is stage 3.
+**Stage 3 of 6.** SNMPv2c and SNMPv3 both work end to end over UDP: GET, GETNEXT, GETBULK, SET and
+Walk, at `noAuthNoPriv` and `authNoPriv`. Engine Discovery, time synchronisation and Report routing
+happen underneath and are never surfaced. Privacy is stage 4, so `authPriv` is refused.
 
 | Stage | Deliverable | State |
 |---|---|---|
 | 0 | CMake skeleton, OID/value types, BER encode/decode + fuzz targets | **done** |
 | 1 | v2c GET / GETNEXT / GETBULK / SET and Walk over Asio UDP | **done** |
 | 2 | v3 message framing, USM auth (MD5, SHA-1, SHA-2), password-to-key, key localization | **done** |
-| 3 | Async engine discovery, time sync, Report handling | next |
-| 4 | Privacy: AES-128, then AES-192/256 under both key extensions, DES behind an opt-in | |
+| 3 | Async engine discovery, time sync, Report handling | **done** |
+| 4 | Privacy: AES-128, then AES-192/256 under both key extensions, DES behind an opt-in | next |
 | 5 | Interop matrix vs the Simulator, `snmpd`, and real vendor gear | |
 | 6 | Docs, cancellation semantics, error taxonomy, packaging | |
 
@@ -128,6 +128,45 @@ Five targets, each asserting a round-trip identity rather than merely "does not 
   offset is derived from attacker-controlled length fields and is then used to index the datagram,
   which is exactly the shape of bug a fuzzer under ASan finds and review does not.
 
+## What stage 3 contains
+
+- `Client`'s six operations again, taking `Credentials` where the v2c ones take a `Community`.
+  Same completion signatures, same three error categories; the type of that one argument is the
+  whole of the difference at the call site.
+- **Engine Discovery**, RFC 3414 section 4, as ordinary async work on the `Client`'s existing
+  strand — which is the entire point of ADR-0001, since net-snmp doing this synchronously inside
+  its send path is why this library exists. Phase one learns the engineID; phase two, needed only
+  when authenticating, learns the boots/time pair. Requests arriving while a discovery is in
+  flight queue behind it rather than each probing separately.
+- **Caches**, owned by the `Client` because ADR-0003 says there is nowhere else, and keyed the way
+  that ADR requires: the Authoritative Engine on its **engineID**, with a separate endpoint→engineID
+  index, and the Localized Key on (engineID, protocol, secret). One Engine reachable at two Targets
+  is therefore one cache entry and one megabyte-hash derivation, which is the whole reason there is
+  no session type.
+- **Report routing.** The six `usmStats` counters map to outcomes in one table: `notInTimeWindows`
+  and `unknownEngineIDs` resynchronise and retry exactly once, the rest fail the request with an
+  `ErrorCode` naming which. No Report ever reaches a completion handler.
+- **The Time Window**, 150 seconds, checked against the cached pair projected forward by the local
+  clock rather than against a raw cached number.
+- Discovery **outlives the request that started it** (ADR-0003 again): it runs detached on the
+  Client's strand, so cancelling whichever request happened to arrive first does not cancel what
+  every other request is queued behind.
+
+A **Response** that fails to decode, to authenticate, or to be timely is dropped, not failed — the
+request stays outstanding and its retransmission timer keeps running. UDP is spoofable and the
+`msgID` is guessable, so the alternative is a library whose requests anyone on the path can cancel.
+
+**Reports are the exception, and cannot not be.** The four counters worth hearing about are exactly
+the ones an Engine cannot sign — it does not know the user, or the key, or the engineID it was
+addressed by — so refusing an unauthenticated Report would turn "wrong password" into "timed out".
+They are accepted against an outstanding `msgID` from the address we sent to, which is the same bar
+a spoofed v2c Response clears. What an unauthenticated Report can never do is change cached state:
+resynchronising the boots/time pair requires a Report whose digest verified, and anything else that
+asks us to resynchronise gets a full re-discovery instead, whose own answer is authenticated.
+
+Outstanding requests are keyed on the Message ID rather than the PDU's request-id, as CONTEXT.md
+requires: a message that cannot be opened must still be attributable to the request that sent it.
+
 ## What stage 2 contains
 
 - `snmpio::AuthProtocol` / `snmpio::SecurityLevel` / `snmpio::Credentials` — the USM user, the
@@ -146,10 +185,9 @@ Five targets, each asserting a round-trip identity rather than merely "does not 
   buffer and then wrapped, so that a sequence length widening past 127 Octets cannot silently move
   the digest; the long-user-name test is the one that fails if that changes.
 
-Not yet here: privacy (stage 4), so `authPriv` is refused rather than downgraded, and an incoming
-`encryptedPDU` decodes to `Errc::UnsupportedSecurityLevel`. Timeliness — boots, time and the
-150-second Time Window — is stage 3's, because it needs the cached engine state that discovery
-produces.
+Not in stage 2: privacy (stage 4), so `authPriv` is refused rather than downgraded and an incoming
+`encryptedPDU` decodes to `Errc::UnsupportedSecurityLevel`; and timeliness, which needs the cached
+engine state discovery produces and so arrived with stage 3.
 
 ## What stage 1 contains
 
@@ -175,9 +213,9 @@ Cancellation is split as the ADR requires: `total` stops at a batch boundary and
 `Errc::WalkIncomplete` alongside what was already delivered, `terminal` drops everything with
 `operation_aborted`.
 
-Not yet here, and deliberately: SNMPv3 on the Client's own API, Report routing (stage 3), and
-hostname resolution — a `Target` is built from an `asio::ip::udp::endpoint`, so resolving is the
-caller's choice of resolver rather than a policy this library picks.
+Not in stage 1, and deliberately: SNMPv3 in any form (stages 2 and 3), and hostname resolution —
+a `Target` is built from an `asio::ip::udp::endpoint`, so resolving is the caller's choice of
+resolver rather than a policy this library picks, in this stage or any later one.
 
 ## What stage 0 contains
 

@@ -96,6 +96,11 @@ struct V2cMessage {
   Pdu pdu;
 };
 
+// The version field of any SNMP message, without decoding the rest of it. The receive loop has to
+// choose a decoder before it knows which protocol arrived, and guessing from the length or the
+// shape would be guessing.
+std::optional<std::int32_t> messageVersion(std::span<const std::byte> datagram) noexcept;
+
 // SEQUENCE { version INTEGER, community OCTET STRING, PDU }.
 std::vector<std::byte> encodeV2cMessage(std::string_view community, const Pdu& pdu,
                                         net::ErrorCode& ec);

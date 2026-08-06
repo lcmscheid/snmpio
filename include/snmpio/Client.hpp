@@ -1,9 +1,11 @@
 #ifndef SNMPIO_CLIENT_HPP
 #define SNMPIO_CLIENT_HPP
 
+#include <chrono>
 #include <cstdint>
 #include <exception>
 #include <functional>
+#include <map>
 #include <memory>
 #include <optional>
 #include <span>
@@ -11,11 +13,14 @@
 #include <tuple>
 #include <unordered_map>
 #include <utility>
+#include <variant>
 #include <vector>
 
 #include <snmpio/Oid.hpp>
 #include <snmpio/Pdu.hpp>
 #include <snmpio/Target.hpp>
+#include <snmpio/Usm.hpp>
+#include <snmpio/V3Message.hpp>
 #include <snmpio/Value.hpp>
 #include <snmpio/detail/Net.hpp>
 
@@ -69,7 +74,7 @@ class Client {
   template <typename Token>
   auto asyncGet(Target target, Community community, std::vector<Oid> oids, Token&& token) {
     return spawn<void(net::ErrorCode, Response)>(
-        doRequest(std::move(target), std::move(community),
+        doRequest(std::move(target), Auth{std::move(community)},
                   makePdu(PduType::Get, toVarbinds(std::move(oids)))),
         std::forward<Token>(token));
   }
@@ -78,7 +83,7 @@ class Client {
   template <typename Token>
   auto asyncGetNext(Target target, Community community, std::vector<Oid> oids, Token&& token) {
     return spawn<void(net::ErrorCode, Response)>(
-        doRequest(std::move(target), std::move(community),
+        doRequest(std::move(target), Auth{std::move(community)},
                   makePdu(PduType::GetNext, toVarbinds(std::move(oids)))),
         std::forward<Token>(token));
   }
@@ -89,7 +94,7 @@ class Client {
   auto asyncGetBulk(Target target, Community community, std::vector<Oid> oids,
                     std::int32_t nonRepeaters, std::int32_t maxRepetitions, Token&& token) {
     return spawn<void(net::ErrorCode, Response)>(
-        doRequest(std::move(target), std::move(community),
+        doRequest(std::move(target), Auth{std::move(community)},
                   makeBulkPdu(toVarbinds(std::move(oids)), nonRepeaters, maxRepetitions)),
         std::forward<Token>(token));
   }
@@ -99,7 +104,7 @@ class Client {
   template <typename Token>
   auto asyncSet(Target target, Community community, std::vector<Varbind> varbinds, Token&& token) {
     return spawn<void(net::ErrorCode, Response)>(
-        doRequest(std::move(target), std::move(community),
+        doRequest(std::move(target), Auth{std::move(community)},
                   makePdu(PduType::Set, std::move(varbinds))),
         std::forward<Token>(token));
   }
@@ -112,7 +117,7 @@ class Client {
   template <typename Token>
   auto asyncWalk(Target target, Community community, Oid base, WalkOptions options,
                  BatchHandler onBatch, Token&& token) {
-    return spawn<void(net::ErrorCode)>(doWalk(std::move(target), std::move(community),
+    return spawn<void(net::ErrorCode)>(doWalk(std::move(target), Auth{std::move(community)},
                                               std::move(base), options, std::move(onBatch)),
                                        std::forward<Token>(token));
   }
@@ -123,11 +128,74 @@ class Client {
   auto asyncWalkCollect(Target target, Community community, Oid base, WalkOptions options,
                         Token&& token) {
     return spawn<void(net::ErrorCode, std::vector<Varbind>)>(
-        doWalkCollect(std::move(target), std::move(community), std::move(base), options),
+        doWalkCollect(std::move(target), Auth{std::move(community)}, std::move(base), options),
+        std::forward<Token>(token));
+  }
+
+  // The same six operations over SNMPv3. `Credentials` in place of a `Community` is the whole of
+  // the difference at the call site: same completion signatures, same three error categories.
+  //
+  // Engine Discovery, time synchronisation and Report routing happen underneath and never surface.
+  // The first request against an unknown Engine simply costs extra round trips, and requests
+  // issued while that is in flight queue behind it rather than each probing separately.
+  //
+  // authPriv is refused with Errc::UnsupportedSecurityLevel until privacy arrives in stage 4.
+  template <typename Token>
+  auto asyncGet(Target target, Credentials credentials, std::vector<Oid> oids, Token&& token) {
+    return spawn<void(net::ErrorCode, Response)>(
+        doRequest(std::move(target), Auth{std::move(credentials)},
+                  makePdu(PduType::Get, toVarbinds(std::move(oids)))),
+        std::forward<Token>(token));
+  }
+
+  template <typename Token>
+  auto asyncGetNext(Target target, Credentials credentials, std::vector<Oid> oids, Token&& token) {
+    return spawn<void(net::ErrorCode, Response)>(
+        doRequest(std::move(target), Auth{std::move(credentials)},
+                  makePdu(PduType::GetNext, toVarbinds(std::move(oids)))),
+        std::forward<Token>(token));
+  }
+
+  template <typename Token>
+  auto asyncGetBulk(Target target, Credentials credentials, std::vector<Oid> oids,
+                    std::int32_t nonRepeaters, std::int32_t maxRepetitions, Token&& token) {
+    return spawn<void(net::ErrorCode, Response)>(
+        doRequest(std::move(target), Auth{std::move(credentials)},
+                  makeBulkPdu(toVarbinds(std::move(oids)), nonRepeaters, maxRepetitions)),
+        std::forward<Token>(token));
+  }
+
+  template <typename Token>
+  auto asyncSet(Target target, Credentials credentials, std::vector<Varbind> varbinds,
+                Token&& token) {
+    return spawn<void(net::ErrorCode, Response)>(
+        doRequest(std::move(target), Auth{std::move(credentials)},
+                  makePdu(PduType::Set, std::move(varbinds))),
+        std::forward<Token>(token));
+  }
+
+  template <typename Token>
+  auto asyncWalk(Target target, Credentials credentials, Oid base, WalkOptions options,
+                 BatchHandler onBatch, Token&& token) {
+    return spawn<void(net::ErrorCode)>(doWalk(std::move(target), Auth{std::move(credentials)},
+                                              std::move(base), options, std::move(onBatch)),
+                                       std::forward<Token>(token));
+  }
+
+  template <typename Token>
+  auto asyncWalkCollect(Target target, Credentials credentials, Oid base, WalkOptions options,
+                        Token&& token) {
+    return spawn<void(net::ErrorCode, std::vector<Varbind>)>(
+        doWalkCollect(std::move(target), Auth{std::move(credentials)}, std::move(base), options),
         std::forward<Token>(token));
   }
 
  private:
+  // Which Credentials a request travels under. A variant rather than two parallel stacks: from the
+  // retransmission loop down the two protocols are identical, and the only places that care are
+  // where the datagram is built and where a reply is matched to it.
+  using Auth = std::variant<Community, Credentials>;
+
   // Named because a coroutine's co_return cannot deduce a braced tuple.
   using RequestResult = std::tuple<net::ErrorCode, Response>;
   using WalkResult = std::tuple<net::ErrorCode>;
@@ -138,13 +206,18 @@ class Client {
   static Pdu makeBulkPdu(std::vector<Varbind> varbinds, std::int32_t nonRepeaters,
                          std::int32_t maxRepetitions);
 
-  net::Awaitable<RequestResult> doRequest(Target target, Community community, Pdu pdu);
-  net::Awaitable<WalkResult> doWalk(Target target, Community community, Oid base,
-                                    WalkOptions options, BatchHandler onBatch);
-  net::Awaitable<CollectResult> doWalkCollect(Target target, Community community, Oid base,
+  net::Awaitable<RequestResult> doRequest(Target target, Auth auth, Pdu pdu);
+  net::Awaitable<WalkResult> doWalk(Target target, Auth auth, Oid base, WalkOptions options,
+                                    BatchHandler onBatch);
+  net::Awaitable<CollectResult> doWalkCollect(Target target, Auth auth, Oid base,
                                               WalkOptions options);
 
   net::Awaitable<void> receiveLoop(net::UdpSocket* sock);
+  void deliverV2c(std::span<const std::byte> datagram, const net::UdpEndpoint& from);
+  void deliverV3(std::span<const std::byte> datagram, const net::UdpEndpoint& from);
+  [[nodiscard]] bool timely(const net::UdpEndpoint& from, const UsmParameters& security) const;
+  void observeEngineTime(const net::UdpEndpoint& from, const UsmParameters& security);
+  static RequestResult toResult(const Pdu& response);
   net::UdpSocket* socketFor(const net::UdpEndpoint& to, net::ErrorCode& ec);
 
   // Runs coro on the strand and delivers its result tuple through the completion token, on the
@@ -181,16 +254,89 @@ class Client {
     explicit Pending(const net::Executor& ex) : timer(ex) {}
     net::SteadyTimer timer;
     net::UdpEndpoint from;  // only a Response from the Target we asked counts
-    std::string community;
+    std::string community;  // v2c: quoted back, and checked
+    bool v3 = false;
+    bool authRequired = false;
+    AuthProtocol authProtocol = AuthProtocol::None;
+    Octets authKey;   // the Localized Key this exchange is authenticated with
+    Octets engineId;  // the Authoritative Engine addressed; empty while discovering
+    std::int32_t requestId = 0;
     Pdu response;
+    UsmParameters security;  // what the reply's security parameters said
     bool answered = false;
+    // Whether the reply's digest was checked and matched. False for an unauthenticated Report,
+    // which the protocol obliges us to accept and which therefore must not be trusted with
+    // anything beyond asking us to discover the Engine again.
+    bool replyAuthenticated = false;
   };
+
+  // What we know about one Authoritative Engine, and when we learnt it. The Engine's current time
+  // is `time` advanced by the local clock since `at` -- the Time Window is checked against that
+  // projection, never against a raw cached number.
+  struct EngineState {
+    Octets engineId;
+    std::int32_t boots = 0;
+    std::int32_t time = 0;
+    std::chrono::steady_clock::time_point at;
+    // Whether the pair above came from an authenticated exchange. A noAuthNoPriv discovery learns
+    // the engineID and nothing trustworthy about its clock, so the first authenticated request
+    // against the same Engine still has to synchronise.
+    bool timeSynced = false;
+  };
+
+  // A discovery in flight. The timer is an event, not a deadline: waiters park on it and the
+  // discovering coroutine cancels it to wake them all. Same trick as Pending's.
+  struct Discovery {
+    explicit Discovery(const net::Executor& ex) : done(ex) {}
+    net::SteadyTimer done;
+    net::ErrorCode ec;
+    bool finished = false;
+  };
+
+  std::int32_t nextId() noexcept;
+
+  // The shared half of every exchange: send, wait, retransmit, and observe cancellation. Returns
+  // an empty ErrorCode when `pending` was answered.
+  net::Awaitable<net::ErrorCode> transact(Target target, std::vector<std::byte> datagram,
+                                          std::int32_t key, std::shared_ptr<Pending> pending);
+
+  // RFC 3414 section 4, in two phases: the engineID, and then -- only when authenticating -- the
+  // boots/time pair. At most one runs per Target; anything else arriving waits on it.
+  net::Awaitable<net::ErrorCode> ensureEngine(Target target, Credentials creds);
+  net::Awaitable<void> runDiscovery(Target target, Credentials creds,
+                                    std::shared_ptr<Discovery> discovery);
+  net::Awaitable<net::ErrorCode> discoverEngine(Target target, Credentials creds);
+  // The Engine currently believed to answer at this endpoint, or nullptr if none is known.
+  EngineState* engineAt(const net::UdpEndpoint& endpoint);
+
+  // Cached because the derivation is a megabyte hash and deliberately expensive (CONTEXT.md).
+  const Octets* localizedKey(const Credentials& creds, const Octets& engineId, net::ErrorCode& ec);
+
+  // What a Report means for the request that provoked it: an ErrorCode to fail with, or nothing
+  // when it named something we can act on and ask again about.
+  std::optional<net::ErrorCode> handleReport(const net::UdpEndpoint& from, const Pending& pending,
+                                             bool mayRetry);
+
+  net::Awaitable<RequestResult> doRequestV2c(Target target, Community community, Pdu pdu);
+  net::Awaitable<RequestResult> doRequestV3(Target target, Credentials creds, Pdu pdu);
 
   net::Strand m_strand;
   std::optional<net::UdpSocket> m_v4;
   std::optional<net::UdpSocket> m_v6;
   std::unordered_map<std::int32_t, std::shared_ptr<Pending>> m_pending;
-  std::int32_t m_nextRequestId;
+  // Keyed on engineID with a separate endpoint->engineID index, as ADR-0003 requires: one Engine
+  // reachable at two Targets is one cache entry, discovered once. The in-flight map below is keyed
+  // on the endpoint of necessity -- learning which Engine is there is what discovery is for.
+  std::map<Octets, EngineState> m_engines;
+  std::map<net::UdpEndpoint, Octets> m_engineAt;
+  std::map<net::UdpEndpoint, std::shared_ptr<Discovery>> m_discovering;
+  // (engineID, protocol, secret) -- ADR-0003's (master key, engineID), spelled as the two things
+  // the master key is derived from so that nothing has to derive it to look one up.
+  std::map<std::tuple<Octets, AuthProtocol, std::string>, Octets> m_keys;
+  // One counter for both the v3 msgID and the PDU request-id, so that the two protocols cannot
+  // collide in m_pending -- which is keyed on the msgID for v3, as CONTEXT.md requires, because a
+  // message we cannot open must still be attributable.
+  std::int32_t m_nextId;
   bool m_stopped = false;
 };
 

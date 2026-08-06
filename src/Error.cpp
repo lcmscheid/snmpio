@@ -88,6 +88,16 @@ class SnmpioCategory final : public net::ErrorCategory {
         return "cryptographic operation failed";
       case Errc::AuthFailed:
         return "message authentication digest did not match";
+      case Errc::UnknownUserName:
+        return "the Authoritative Engine does not know this user name";
+      case Errc::UnknownEngineId:
+        return "the Authoritative Engine rejected its own engineID after re-discovery";
+      case Errc::NotInTimeWindow:
+        return "the Authoritative Engine rejected the message as untimely after resynchronising";
+      case Errc::DecryptionError:
+        return "the Authoritative Engine could not decrypt the message";
+      case Errc::UnexpectedReport:
+        return "Report carried a usmStats counter this library does not recognise";
     }
     return "unknown snmpio error " + std::to_string(ev);
   }

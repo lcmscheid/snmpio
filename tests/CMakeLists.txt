@@ -15,6 +15,7 @@ add_executable(snmpio_tests
   TestBerRoundtrip.cpp
   TestBerWriter.cpp
   TestClient.cpp
+  TestClientV3.cpp
   TestError.cpp
   TestOid.cpp
   TestPdu.cpp

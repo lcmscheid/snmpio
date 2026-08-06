@@ -20,7 +20,7 @@ TEST(Error, ComparesAgainstTheEnumDirectly) {
 }
 
 TEST(Error, EveryCodeHasAMessage) {
-  for (int i = 0; i <= static_cast<int>(Errc::AuthFailed); ++i) {
+  for (int i = 0; i <= static_cast<int>(Errc::UnexpectedReport); ++i) {
     const net::ErrorCode ec = make_error_code(static_cast<Errc>(i));
     const std::string message = ec.message();
     EXPECT_FALSE(message.empty()) << i;

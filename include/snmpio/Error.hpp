@@ -63,6 +63,16 @@ enum class Errc {
   EmptyPassword,             // password-to-key on an empty password, which it cannot expand
   CryptoFailure,             // OpenSSL refused an operation that should not have been refusable
   AuthFailed,                // the message's digest is not the one its key produces
+
+  // usmStats Reports the Authoritative Engine sent back (RFC 3414 section 5). Two of the six are
+  // not here on purpose: usmStatsWrongDigests arrives as AuthFailed and
+  // usmStatsUnsupportedSecLevels as UnsupportedSecurityLevel, because that is what they mean and a
+  // second spelling of each would only be a second thing to check for.
+  UnknownUserName,   // usmStatsUnknownUserNames: no such user on that Engine
+  UnknownEngineId,   // usmStatsUnknownEngineIDs, still, after re-discovering
+  NotInTimeWindow,   // usmStatsNotInTimeWindows, still, after resynchronising
+  DecryptionError,   // usmStatsDecryptionErrors
+  UnexpectedReport,  // a Report whose usmStats counter we do not recognise
 };
 
 const net::ErrorCategory& errorCategory() noexcept;

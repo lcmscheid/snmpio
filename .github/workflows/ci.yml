@@ -95,6 +95,48 @@ jobs:
             timeout-*
           if-no-files-found: ignore
 
+  # The one job that sends a real datagram to an Agent nobody here wrote. Everything else in this
+  # workflow talks to the Scripted Agent, which shares our own reading of the protocol -- so a
+  # misreading of RFC 3416 would pass every other job in this file.
+  #
+  # `snmpd` unprivileged on a high port, not a container: this is the v2c smoke test, and stage 5's
+  # remaining tickets are what bring the Simulator image and the v3 matrix.
+  interop:
+    name: interop (snmpd)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build libboost-system-dev libgtest-dev libssl-dev snmpd
+
+      - name: Build
+        run: |
+          cmake -S . -B build -G Ninja -DSNMPIO_WERROR=ON
+          cmake --build build
+
+      - name: Start snmpd
+        run: |
+          printf 'rocommunity public 127.0.0.1\nsysDescr snmpio interop, GitHub Actions\n' \
+            > "$RUNNER_TEMP/snmpd.conf"
+          /usr/sbin/snmpd -f -Lo -C -c "$RUNNER_TEMP/snmpd.conf" udp:127.0.0.1:16161 \
+            > "$RUNNER_TEMP/snmpd.log" 2>&1 &
+          # The socket is what the suite needs, not the process -- so wait for the socket.
+          for _ in $(seq 20); do
+            ss -lun | grep -q 127.0.0.1:16161 && exit 0
+            sleep 0.5
+          done
+          echo "snmpd never bound 127.0.0.1:16161"; cat "$RUNNER_TEMP/snmpd.log"; exit 1
+
+      # -R Interop is the live half only; the harness's own parsing tests are named Harness*, so a
+      # green run here means a Response actually came back.
+      - name: Interop
+        run: |
+          SNMPIO_INTEROP_TARGET=127.0.0.1:16161 \
+            ctest --test-dir build -R Interop --output-on-failure --no-tests=error
+
   style:
     name: clang-format + clang-tidy
     runs-on: ubuntu-24.04

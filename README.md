@@ -100,10 +100,46 @@ Or fold it into the build with `-DSNMPIO_CLANG_TIDY=ON`. `tests/` and `fuzz/` ca
 relaxing what only applies to library code (GoogleTest's do-while macros, fixture tables,
 `*Oid::parse("1.3.6.1")` on a literal).
 
-Three `NOLINT`s exist, each with its reason at the site: `make_error_code`, whose spelling is fixed
+Four `NOLINT`s exist, each with its reason at the site: `make_error_code`, whose spelling is fixed
 by the standard because both `error_code` types call it unqualified through ADL; the
-`SNMPIO_REGISTER_ERROR_CODE_ENUM` macro, which opens a namespace and so cannot be a template; and
-the fixed PRNG seed in the round-trip sweep, which exists precisely to be reproducible.
+`SNMPIO_REGISTER_ERROR_CODE_ENUM` macro, which opens a namespace and so cannot be a template; the
+fixed PRNG seed in the round-trip sweep, which exists precisely to be reproducible; and the
+`std::getenv` the interop harness reads its Target from, which runs before any test thread does.
+
+## Interop tests
+
+`ctest` runs everything against the Scripted Agent, which shares our own reading of the protocol.
+The interop suite is the half that does not: it talks to an Agent nobody here wrote, over a real
+socket. There is no Agent in a bare checkout, so those tests **skip** unless a Target is named.
+`-R Interop` selects exactly the live ones — the harness's own parsing tests are named `Harness*`,
+so a run filtered to `Interop` that reports all green really did reach an Agent.
+
+```sh
+SNMPIO_INTEROP_TARGET=127.0.0.1:16161 ctest --preset default -R Interop --output-on-failure
+```
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `SNMPIO_INTEROP_TARGET` | unset — suite skips | The Target the Agent answers at, as `address`, `address:port` or `[v6]:port` |
+| `SNMPIO_INTEROP_COMMUNITY` | `public` | The v2c Community |
+
+An address, not a hostname. A `Target` is built from an endpoint so that choosing a resolver stays
+the caller's business (stage 1), and the harness is a caller like any other — so a hostname is
+rejected outright rather than quietly resolved. A variable that is set but unusable **fails** the
+suite; only an unset one skips it, since a typo that skipped would report green for an Agent it
+never reached.
+
+Any Agent will do. An `snmpd` on a spare port is enough to see it work:
+
+```sh
+printf 'rocommunity public 127.0.0.1\n' > /tmp/snmpd.conf
+snmpd -f -Lo -C -c /tmp/snmpd.conf udp:127.0.0.1:16161
+```
+
+The suite currently proves one live exchange — a v2c GET of `sysDescr.0`, which it prints, because
+no two Agents say the same thing and which one answered is the first thing a failed run needs. CI
+runs it against a containerless `snmpd` on every commit. SNMPv3 against `snmpd`, the Simulator at a
+pinned digest and the misbehaviour cases are the rest of stage 5.
 
 ## Fuzzing
 

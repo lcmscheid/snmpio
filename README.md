@@ -148,6 +148,7 @@ Agent, because nothing on the wire announces either:
 | `SNMPIO_INTEROP_V3_KEY_EXTENSIONS` | serves the `privsha1aes192`/`256`(`c`) users — AES-192/256 under both schemes |
 | `SNMPIO_INTEROP_V3_USM_REPORTS` | answers a bad digest with a usmStats Report, which RFC 3414 leaves optional |
 | `SNMPIO_INTEROP_FAULTS` | can be **told to misbehave** — the port the Simulator's control UI is on |
+| `SNMPIO_INTEROP_FAULTS_ENGINE_ID` | offers the `engineIDChange` fault, which the older pinned image does not |
 
 CI runs three Agents, one job each, and between them they cover every v3 case above. Neither gate is
 a Security Level being negotiated: the Simulator **infers** the level from which protocols a user
@@ -214,6 +215,7 @@ conditions, which is the whole reason the Simulator is CI's primary target (ADR-
 | answers a Walk's GETBULK with `tooBig` | ask for fewer repetitions, and finish the Walk once it fits |
 | echoes the requested OID straight back | fail the Walk with `Errc::NonIncreasingOid` instead of asking for ever (ADR-0004) |
 | truncates the Response mid-message | drop it and leave the request outstanding until it times out |
+| comes back under a **different engineID** | re-discover it and re-derive both keys against the new one, which every key is localized to |
 
 The last one is the one worth stating as a rule: an undecodable datagram says nothing about whether
 the Response is still coming, so `Errc::Timeout` is the only honest answer. Surfacing the decode

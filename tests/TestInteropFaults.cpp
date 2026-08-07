@@ -179,6 +179,37 @@ TEST_F(InteropFaults, RefusesATimeRegressionWithinOneBoot) {
       << "a Client with an empty cache should still get in";
 }
 
+// Criterion: an Engine that changes identity mid-session is re-discovered, and the keys follow it.
+//
+// Every key this Client holds is localized to an engineID, so an Engine that comes back under a
+// different one invalidates all of them at once. What arrives is an unauthenticated
+// usmStatsUnknownEngineIDs Report -- the Engine cannot sign a complaint about a key it does not
+// have -- carrying the new identity, and the request has to survive that: re-discover, re-derive
+// both the authentication and the privacy key against the new engineID, and complete.
+//
+// At authPriv, because that is what makes the re-derivation observable. A Client that re-discovered
+// but reused the localized keys authenticates with a digest the Engine will not accept, which is a
+// failure and not a Response.
+//
+// Gated on its own capability: the fault is newer than the older of the two Simulator images CI
+// pins, and an Agent that does not offer it must skip rather than fail for not being asked.
+TEST_F(InteropFaults, RediscoversAnEngineThatChangesItsIdentity) {
+  if (m_password.empty()) GTEST_SKIP() << "needs SNMPIO_INTEROP_V3_PASSWORD";
+  if (!envVar("SNMPIO_INTEROP_FAULTS_ENGINE_ID")) {
+    GTEST_SKIP() << "needs SNMPIO_INTEROP_FAULTS_ENGINE_ID and an Agent offering engineIDChange";
+  }
+  SimulatorFaults faults(m_target.endpoint, m_controlPort);
+  bool changed = false;
+  const auto results =
+      getSequence(m_target, credentials(), {[&] { changed = faults.set("engineIDChange", "on"); }});
+
+  ASSERT_TRUE(changed) << "the Simulator did not accept engineIDChange";
+  ASSERT_EQ(results.size(), 2U);
+  EXPECT_FALSE(results[0]) << "before the change: " << results[0].message();
+  EXPECT_FALSE(results[1]) << "the Engine changed identity and the request did not follow it: "
+                           << results[1].message();
+}
+
 // Criterion: `tooBig` degrades max-repetitions and the Walk still finishes.
 //
 // Both halves need the wire. max-repetitions is a number this library picks and revises on its

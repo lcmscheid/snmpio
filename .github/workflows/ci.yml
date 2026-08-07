@@ -142,6 +142,7 @@ jobs:
             apt: ''
             keyExtensions: '1'
             faults: '8080'
+            faultsEngineId: '1'
             image: ghcr.io/lcmscheid/snmp-fault-agent@sha256:78d0abcd7eeba46fd5f7fbef987208ff745f63a72cd416289d8316bf60a6a144
     # One value configures the Agent and drives the suite, so the two cannot drift. It is not a
     # secret: it authorizes a loopback Agent this job starts and kills.
@@ -152,6 +153,7 @@ jobs:
       SNMPIO_INTEROP_V3_USM_REPORTS: ${{ matrix.usmReports }}
       SNMPIO_INTEROP_V3_KEY_EXTENSIONS: ${{ matrix.keyExtensions }}
       SNMPIO_INTEROP_FAULTS: ${{ matrix.faults }}
+      SNMPIO_INTEROP_FAULTS_ENGINE_ID: ${{ matrix.faultsEngineId }}
     steps:
       - uses: actions/checkout@v5
 

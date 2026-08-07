@@ -282,8 +282,15 @@ Client::EngineState* Client::engineAt(const net::UdpEndpoint& endpoint) {
   return engine == m_engines.end() ? nullptr : &engine->second;
 }
 
-// RFC 3414 section 3.2 step 7, from the non-authoritative side: the pair has to name the boots we
-// know about and a time within 150 seconds of where we believe that Engine's clock has reached.
+// RFC 3414 section 3.2 step 7(b), which is the non-authoritative side's rule and not the
+// authoritative side's: only a pair *older* than the one we hold is untimely. A higher boots count
+// is an Engine that has restarted and a later time is one whose clock was stepped, and both are it
+// telling us where it has got to -- observeEngineTime adopts them, which is the same section 2.2.3
+// rule read from the other end.
+//
+// Requiring the pair to match, as the authoritative side does, costs a Target that is answering:
+// every reply from an Engine that restarted mid-session is dropped and the caller is told Timeout
+// until the cache is thrown away.
 bool Client::timely(const net::UdpEndpoint& from, const UsmParameters& security) const {
   const auto indexed = m_engineAt.find(from);
   if (indexed == m_engineAt.end()) return true;  // nothing yet to disagree with
@@ -291,13 +298,18 @@ bool Client::timely(const net::UdpEndpoint& from, const UsmParameters& security)
   if (found == m_engines.end()) return true;
 
   const EngineState& engine = found->second;
-  if (security.boots == bootsCeiling || security.boots != engine.boots) return false;
+  // An Engine at the boots ceiling can never be timely again (RFC 3414 section 2.2.3), which is
+  // why observeEngineTime refuses to cache one either.
+  if (security.boots == bootsCeiling || engine.boots == bootsCeiling) return false;
+  if (security.boots != engine.boots) return security.boots > engine.boots;
 
   const auto elapsed =
       std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - engine.at)
           .count();
   const auto projected = static_cast<std::int64_t>(engine.time) + elapsed;
-  return std::abs(projected - static_cast<std::int64_t>(security.time)) <= timeWindowSeconds;
+  // Behind our projection by more than the Window is the replay this check exists for; ahead of it
+  // is a clock that was stepped forward, which is not.
+  return static_cast<std::int64_t>(security.time) >= projected - timeWindowSeconds;
 }
 
 void Client::observeEngineTime(const net::UdpEndpoint& from, const UsmParameters& security) {

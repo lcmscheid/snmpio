@@ -144,9 +144,12 @@ TEST_F(InteropFaults, RefusesABootsRegression) {
   ASSERT_EQ(results.size(), 3U);
   EXPECT_FALSE(results[0]) << results[0].message();
   EXPECT_FALSE(results[1]) << "the boots bump did not resynchronise: " << results[1].message();
-  EXPECT_EQ(results[2], make_error_code(Errc::NotInTimeWindow))
-      << "the regression was cached rather than refused: " << results[2].message();
-
+  // That it failed, rather than which code it failed with: what an Agent does with a request it
+  // considers untimely is the Agent's choice, and the Simulator makes a third one -- it does not
+  // run the check at all, so it answers with its real pair and there is no Report to name. The
+  // pair of assertions is what pins the criterion: this Client refuses, and a Client with nothing
+  // cached still gets in, so it was the comparison that refused and not the Agent that died.
+  EXPECT_TRUE(results[2]) << "the regression was cached rather than refused";
   EXPECT_FALSE(get(m_target, credentials()).ec)
       << "a Client with an empty cache should still get in";
 }
@@ -169,8 +172,11 @@ TEST_F(InteropFaults, RefusesATimeRegressionWithinOneBoot) {
   ASSERT_EQ(results.size(), 3U);
   EXPECT_FALSE(results[0]) << results[0].message();
   EXPECT_FALSE(results[1]) << "the clock jump did not resynchronise: " << results[1].message();
-  EXPECT_EQ(results[2], make_error_code(Errc::NotInTimeWindow))
-      << "the clock going back was cached rather than refused: " << results[2].message();
+  // Failure, and a fresh Client getting in regardless -- the same pair of assertions, and for the
+  // same reason, as RefusesABootsRegression states.
+  EXPECT_TRUE(results[2]) << "the clock going back was cached rather than refused";
+  EXPECT_FALSE(get(m_target, credentials()).ec)
+      << "a Client with an empty cache should still get in";
 }
 
 // Criterion: `tooBig` degrades max-repetitions and the Walk still finishes.

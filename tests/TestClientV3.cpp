@@ -211,6 +211,73 @@ TEST(ClientV3, ResynchronisesAfterANotInTimeWindowsReport) {
   EXPECT_EQ(f.response.varbinds.size(), 1U);
 }
 
+// An Agent that answers the request but stamps a boots/time pair of its own into the reply --
+// which is what an Engine that restarted between two requests looks like from here, and what the
+// Simulator's engineBootsBump and engineTimeOffsetS put on the wire.
+ScriptedV3Agent::Responder answersWith(std::int32_t boots, std::int32_t time) {
+  return [boots, time](const ScriptedV3Agent::Request& req) {
+    ScriptedV3Agent::Reply reply;
+    reply.level = req.message.header.level;
+    reply.scoped.pdu = echoAnswer(req.message.scoped.pdu);
+    reply.boots = boots;
+    reply.time = time;
+    return std::optional(reply);
+  };
+}
+
+// What a second GET makes of a reply carrying `boots`/`time`, the first having settled the cache
+// on the Agent's own pair. One Client throughout, because the cache is the Client's (ADR-0003).
+net::ErrorCode secondGetAnsweredWith(std::int32_t boots, std::int32_t time) {
+  Fixture f;
+  ScriptedV3Agent agent(f.io, credentials(), echoAnswer);
+  f.agent = &agent;
+  f.expectedCompletions = 2;
+
+  const auto target = targetFor(agent);
+  net::ErrorCode second;
+  f.client.asyncGet(target, credentials(), {sysDescr}, [&](net::ErrorCode first, const Response&) {
+    EXPECT_FALSE(first) << "the GET that settles the cache: " << first.message();
+    agent.setResponder(answersWith(boots, time));
+    f.client.asyncGet(target, credentials(), {sysDescr}, [&](net::ErrorCode ec, const Response&) {
+      second = ec;
+      f.finish();
+    });
+    f.finish();
+  });
+  f.run();
+  return second;
+}
+
+// Criterion: a reply from an Engine that has restarted since we cached it is timely. RFC 3414
+// section 3.2 step 7(b) makes only an *older* pair untimely from the non-authoritative side; a
+// higher boots count is the Engine saying where it has got to, and it resets the cache rather than
+// being dropped.
+//
+// Requiring the pair to match instead costs a Target that is answering: every reply from a
+// restarted Engine is discarded, and the caller is told Timeout until the cache is thrown away.
+TEST(ClientV3, AcceptsAReplyFromAnEngineThatRestartedSinceWeCachedIt) {
+  const auto ec = secondGetAnsweredWith(9, 20);
+  EXPECT_FALSE(ec) << "a restarted Engine's reply was dropped: " << ec.message();
+}
+
+// The other half of the same rule, and the ordinary one of the two: a clock stepped forward within
+// one boot needs nothing more than NTP. Only a time *behind* our projection by more than the
+// Window is untimely, so this is a Response to be answered from, not one to drop.
+TEST(ClientV3, AcceptsAReplyWhoseClockSteppedForwardWithinOneBoot) {
+  const auto ec = secondGetAnsweredWith(3, 4000);
+  EXPECT_FALSE(ec) << "a clock step forward was read as untimely: " << ec.message();
+}
+
+// And the direction that must stay refused, which is what the rule is for: a pair older than the
+// one we hold is a replay, and RFC 3414 section 2.2.3 never lets a cached boots count go down.
+// Dropped rather than failed, like every other unusable datagram -- the request stays outstanding
+// and times out.
+TEST(ClientV3, DropsAReplyClaimingAnOlderBootsCount) {
+  const auto ec = secondGetAnsweredWith(2, 1000);
+  EXPECT_EQ(ec, make_error_code(Errc::Timeout))
+      << "a boots regression was accepted: " << ec.message();
+}
+
 TEST(ClientV3, FailsWhenTheEngineNeverAgreesOnTheTimeWindow) {
   Fixture f;
   ScriptedV3Agent agent(f.io, credentials(), echoAnswer);
@@ -297,8 +364,11 @@ TEST(ClientV3, DropsAResponseFromOutsideTheTimeWindow) {
         ScriptedV3Agent::Reply reply;
         reply.level = req.message.header.level;
         reply.scoped.pdu = echoAnswer(req.message.scoped.pdu);
-        // A replay of a capture taken an hour ago looks exactly like this.
-        reply.time = 5000;
+        // A replay of a capture taken earlier looks exactly like this: the pair discovery seeded
+        // from is (3, 1000), and this one is nine hundred seconds behind it -- six times the
+        // Window. A time *ahead* of that pair would be an Engine whose clock was stepped, which
+        // AcceptsAReplyWhoseClockSteppedForwardWithinOneBoot is about and which is not this.
+        reply.time = 100;
         return reply;
       });
 

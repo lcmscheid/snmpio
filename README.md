@@ -149,7 +149,7 @@ Agent, because nothing on the wire announces either:
 | `SNMPIO_INTEROP_V3_USM_REPORTS` | answers a bad digest with a usmStats Report, which RFC 3414 leaves optional |
 | `SNMPIO_INTEROP_FAULTS` | can be **told to misbehave** — the port the Simulator's control UI is on |
 
-CI runs both Agents, one job each, and between them they cover every v3 case above. Neither gate is
+CI runs three Agents, one job each, and between them they cover every v3 case above. Neither gate is
 a Security Level being negotiated: the Simulator **infers** the level from which protocols a user
 carries, while this library **requires** it explicitly, and that divergence is deliberate on both
 sides — a Client that silently downgraded `authPriv` would have a security hole, where a test Agent
@@ -164,7 +164,7 @@ snmpd -f -Lo -C -c /tmp/snmpd.conf --persistentDir=/tmp/snmp-persist udp:127.0.0
 ```
 
 The [Simulator](https://github.com/lcmscheid/snmp-fault-agent) is one. `latest` is the tag to run
-here; CI names the same image by digest, so a push to the Simulator's own repo cannot change what a
+here; CI names images by digest instead, so a push to the Simulator's own repo cannot change what a
 commit was tested against between two runs of it:
 
 ```sh
@@ -172,6 +172,15 @@ tests/interop/fault-agent-auth.sh > /tmp/auth.json
 docker run --rm -p 127.0.0.1:16161:1161/udp -p 127.0.0.1:8080:8080 \
   -v /tmp/auth.json:/etc/snmpfault/auth.json:ro ghcr.io/lcmscheid/snmp-fault-agent:latest
 ```
+
+CI pins two of them, and the older one is not redundant. `0.1.0` runs the authoritative-side
+timeliness check and answers a request whose boots/time it disagrees with by sending the
+usmStats Report, which is what a compliant Agent does; the earlier `sha-b300f60` stamps its own
+pair into an ordinary Response instead. Only that second shape reaches the Command Generator's own
+timeliness comparison — a Response of exactly that kind is what caught this Client reading RFC 3414
+section 3.2 step 7a where 7b applies, and against the release image the same bug passes in silence.
+The release is pinned because it is what anyone else will run; the older image because it is the
+only Agent that makes the comparison observable at all.
 
 The v3 users are a convention those two scripts and the tests share — `noauth`, `auth<hash>` per
 authentication protocol, and `priv<hash><cipher>` per pair — because they are ours to create; the

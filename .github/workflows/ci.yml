@@ -102,7 +102,9 @@ jobs:
   # the only Agent in CI that speaks AES-192/256 under either Key Extension scheme (ADR-0006) --
   # net-snmp needs a build flag for them that Debian does not carry.
   #
-  # Telling the Simulator to misbehave is stage 5's remaining ticket; this runs it compliant.
+  # It runs compliant against both, and then -- against the Simulator alone -- misbehaving: the
+  # boots/time comparison, the Walk's two guards and the decoder's refusal of malformed input are
+  # reachable no other way, because a correct Agent never produces any of them.
   interop:
     name: interop (${{ matrix.agent }})
     runs-on: ubuntu-24.04
@@ -120,13 +122,16 @@ jobs:
           - agent: simulator
             apt: ''
             keyExtensions: '1'
+            faults: '8080'
     # One value configures the Agent and drives the suite, so the two cannot drift. It is not a
     # secret: it authorizes a loopback Agent this job starts and kills.
     env:
-      SNMPIO_INTEROP_TARGET: 127.0.0.1:16161
+      SNMPIO_INTEROP_TARGET: 127.0.0.1
+      SNMPIO_INTEROP_PORT: '16161'
       SNMPIO_INTEROP_V3_PASSWORD: snmpio-interop-ci
       SNMPIO_INTEROP_V3_USM_REPORTS: ${{ matrix.usmReports }}
       SNMPIO_INTEROP_V3_KEY_EXTENSIONS: ${{ matrix.keyExtensions }}
+      SNMPIO_INTEROP_FAULTS: ${{ matrix.faults }}
     steps:
       - uses: actions/checkout@v5
 
@@ -177,9 +182,9 @@ jobs:
           timeout 30 bash -c 'until curl -fsS -o /dev/null http://127.0.0.1:8080/; do sleep 0.5; done' \
             || { docker logs simulator; exit 1; }
 
-      # -R Interop is the live half only; the harness's own parsing tests are named Harness*, so a
-      # green run here means Responses actually came back. These tests skip when their environment
-      # is missing, which here is the `env:` block above -- delete that and this job goes green
+      # -R Interop is the live half only, and every test in it needs an Agent -- so a green run
+      # here means Responses actually came back. These tests skip when their environment is
+      # missing, which here is the `env:` block above -- delete that and this job goes green
       # having proved nothing.
       - name: Interop
         run: ctest --test-dir build -R Interop --output-on-failure --no-tests=error

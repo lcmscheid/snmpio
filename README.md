@@ -105,25 +105,28 @@ standard because both `error_code` types call it unqualified through ADL; the
 `SNMPIO_REGISTER_ERROR_CODE_ENUM` macro, which opens a namespace and so cannot be a template; the
 fixed PRNG seed in the round-trip sweep, which exists precisely to be reproducible; the
 `std::getenv` the interop harness reads its Target from, which runs before any test thread does;
-and `socket::close(ec)` in the interop relay, whose return value only exists under one of the two
-Asios (ADR-0002).
+`socket::close(ec)` in the interop relay, whose return value only exists under one of the two
+Asios (ADR-0002); and the `curl` the misbehaviour suite drives the Simulator's control UI with,
+which is one form POST that would otherwise be an HTTP client written here.
 
 ## Interop tests
 
 `ctest` runs everything against the Scripted Agent, which shares our own reading of the protocol.
 The interop suite is the half that does not: it talks to an Agent nobody here wrote, over a real
 socket. There is no Agent in a bare checkout, so those tests **skip** unless a Target is named.
-`-R Interop` selects exactly the live ones — the harness's own parsing tests are named `Harness*`,
-so a run filtered to `Interop` that reports all green really did reach an Agent.
+`-R Interop` selects exactly them, and every one of them needs an Agent — so a run filtered to
+`Interop` that reports all green really did reach one.
 
 ```sh
-export SNMPIO_INTEROP_TARGET=127.0.0.1:16161
-export SNMPIO_INTEROP_V3_PASSWORD=snmpio-interop   # 8+ characters; omit to skip the v3 half
+export SNMPIO_INTEROP_TARGET=127.0.0.1
+export SNMPIO_INTEROP_PORT=16161                  # omit for 161
+export SNMPIO_INTEROP_V3_PASSWORD=snmpio-interop  # 8+ characters; omit to skip the v3 half
+export SNMPIO_INTEROP_FAULTS=8080                 # the Simulator only; omit against any other Agent
 ctest --preset default -R Interop --output-on-failure
 ```
 
-`SNMPIO_INTEROP_TARGET` is the Target the Agent answers at, as `address`, `address:port` or
-`[v6]:port`. `SNMPIO_INTEROP_V3_PASSWORD` is the password every v3 interop user carries, and
+`SNMPIO_INTEROP_TARGET` is the address the Agent answers at and `SNMPIO_INTEROP_PORT` the port,
+which defaults to 161. `SNMPIO_INTEROP_V3_PASSWORD` is the password every v3 interop user carries, and
 gates the v3 tests: the Agent has to be running the configuration
 [`tests/interop/snmpd-conf.sh`](tests/interop/snmpd-conf.sh) or
 [`tests/interop/fault-agent-auth.sh`](tests/interop/fault-agent-auth.sh) prints, and a switch on
@@ -144,6 +147,7 @@ Agent, because nothing on the wire announces either:
 |---|---|
 | `SNMPIO_INTEROP_V3_KEY_EXTENSIONS` | serves the `privsha1aes192`/`256`(`c`) users — AES-192/256 under both schemes |
 | `SNMPIO_INTEROP_V3_USM_REPORTS` | answers a bad digest with a usmStats Report, which RFC 3414 leaves optional |
+| `SNMPIO_INTEROP_FAULTS` | can be **told to misbehave** — the port the Simulator's control UI is on |
 
 CI runs both Agents, one job each, and between them they cover every v3 case above. Neither gate is
 a Security Level being negotiated: the Simulator **infers** the level from which protocols a user
@@ -184,8 +188,30 @@ What the suite proves: a v2c GET of `sysDescr.0`, which it prints because no two
 same thing; the eighteen v3 pairs above and the four Key Extension ones; that Engine Discovery
 costs the extra round trips exactly once, counted off the wire by a relay between Client and Agent,
 since the API deliberately never surfaces it; and that a wrong password comes back as the Report
-the Engine sent rather than as a timeout. Telling the Simulator to misbehave is the rest of
-stage 5.
+the Engine sent rather than as a timeout.
+
+### The misbehaviour suite
+
+`SNMPIO_INTEROP_FAULTS` is the port of the Simulator's web UI, on the Target's own address — the
+same endpoint a browser opens, since what the UI does is post a form — and turns on the half of the suite the other Agents cannot run.
+`snmpd` and a switch on the bench are correct, and a correct Agent never produces any of these
+conditions, which is the whole reason the Simulator is CI's primary target (ADR-0006):
+
+| What the Agent does | What this library has to do |
+|---|---|
+| restarts, so its engine boots jump past the pair we cached | resynchronise from the Report and complete the request |
+| reports a **lower** boots count than the one we hold | refuse it rather than cache it (RFC 3414 §2.2.3) — being walked backwards is a replay window |
+| steps its clock back inside one boot | refuse that too: it is the same comparison and the commoner case, since it needs only NTP |
+| answers a Walk's GETBULK with `tooBig` | ask for fewer repetitions, and finish the Walk once it fits |
+| echoes the requested OID straight back | fail the Walk with `Errc::NonIncreasingOid` instead of asking for ever (ADR-0004) |
+| truncates the Response mid-message | drop it and leave the request outstanding until it times out |
+
+The last one is the one worth stating as a rule: an undecodable datagram says nothing about whether
+the Response is still coming, so `Errc::Timeout` is the only honest answer. Surfacing the decode
+error would let anyone able to send this Client one junk datagram end a request it had no part in.
+
+Each case has a counterpart against the Scripted Agent, for the reason
+[`tests/TestInteropFaults.cpp`](tests/TestInteropFaults.cpp) opens with.
 
 ## Fuzzing
 

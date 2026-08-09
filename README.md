@@ -254,6 +254,41 @@ gates the v3 tests: the Agent has to be running the configuration
 the bench is not, so an unset variable skips rather than fails. One value configures the Agent and
 drives the suite, which is why it is not written down twice.
 
+### Two ways to name a v3 user
+
+The above is the first: the Agent is **ours to configure**, so the tests know the users by name and
+walk the whole matrix. It is what CI's three Agents run, and what an `snmpd` or Simulator started
+from the commands below runs.
+
+The second is for an Agent that is **not** ours — a switch on the bench, whose users someone
+created years ago and will not be renaming for us. Name the one user it has and what that user
+carries, and the v3 tests address it instead of the convention:
+
+```sh
+export SNMPIO_INTEROP_TARGET=10.0.0.7
+export SNMPIO_INTEROP_V3_USER=netops-legacy        # what the user is actually called
+export SNMPIO_INTEROP_V3_AUTH=sha256               # none, md5, sha1, sha224, sha256, sha384, sha512
+export SNMPIO_INTEROP_V3_PRIV=aes                  # none, des, aes, aes192, aes256, aes192c, aes256c
+export SNMPIO_INTEROP_V3_PASSWORD=bench-secret-123 # both secrets; omit only at noAuthNoPriv
+ctest --preset default -R Interop --output-on-failure
+```
+
+One user is enough to be useful, because a Target typically has exactly one. The matrix test then
+covers the single pair that user can serve and logs which of the eighteen it therefore did not
+reach; the Key Extension test skips, since it needs four users of its own. The other two v3 tests —
+Engine Discovery and the wrong-password Report — run against the named user rather than against the
+conventional one, and the v2c half of the suite is untouched, since a Community has no user.
+
+Naming a user the Target does not have **fails** the suite, the same as any other variable that is
+set but unusable: a skip there would report green for a user nobody ever reached. So does a
+protocol name that is not one of the words above; a privacy protocol with no authentication
+protocol beside it — USM derives the privacy key with the authentication protocol's hash, so there
+is no privacy without one; an authenticating user with no password to authenticate with; and
+`SNMPIO_INTEROP_V3_AUTH` or `_PRIV` set with no user for them to describe.
+
+One password, used as both the authentication and the privacy secret. A device whose user carries
+two different ones cannot be addressed this way yet.
+
 An address, not a hostname. A `Target` is built from an endpoint so that choosing a resolver stays
 the caller's business (stage 1), and the harness is a caller like any other — so a hostname is
 rejected outright rather than quietly resolved. A variable that is set but unusable **fails** the

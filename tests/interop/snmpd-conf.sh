@@ -3,8 +3,9 @@
 #
 # The v3 users are a convention shared with tests/TestInteropV3.cpp: one per auth protocol at
 # authNoPriv, and one per (auth, privacy) pair at authPriv, named after what they carry. They are
-# ours to create, which is why the suite can name them -- and why a Target that is not running
-# this configuration must leave SNMPIO_INTEROP_V3_PASSWORD unset, so those tests skip.
+# ours to create, which is why the suite can name them. An Agent running someone else's
+# configuration is addressed the other way in -- SNMPIO_INTEROP_V3_USER names the one user it has,
+# and the matrix covers the pair that user serves.
 #
 # The password arrives in the environment rather than in this file: one value configures the Agent
 # and drives the suite, so the two cannot drift.

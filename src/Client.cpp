@@ -349,7 +349,7 @@ net::Awaitable<net::ErrorCode> Client::transact(Target target, std::vector<std::
 
   // Cancellation is handled here rather than thrown, so every exit still goes through the
   // bookkeeping below. Which types are observable at all is decided once per request, where the
-  // request starts -- see enableRequestCancellation.
+  // request starts -- see observeBothCancellationTypes.
   co_await net::asio::this_coro::throw_if_cancelled(false);
   auto cancelState = co_await net::asio::this_coro::cancellation_state;
   const auto aborted = [&cancelState] {
@@ -392,6 +392,10 @@ net::Awaitable<net::ErrorCode> Client::transact(Target target, std::vector<std::
   // honest answer rather than what the Target was last heard doing.
   if (aborted()) co_return net::ErrorCode(net::asio::error::operation_aborted);
   if (pending->answered) co_return net::ErrorCode{};
+  // Spelled out rather than reusing softCancelled(). Not style: GCC 16 emits a spurious
+  // -Wmismatched-new-delete from inside Asio's coroutine frame allocator, blamed on doRequestV3,
+  // for almost any perturbation of this block's inlining -- reusing the lambda, hoisting it, or
+  // deleting the block all trip it. Leave the shape alone unless the compiler stops caring.
   if (cancelState.cancelled() != net::asio::cancellation_type::none) {
     co_return net::ErrorCode(net::asio::error::operation_aborted);
   }
@@ -416,11 +420,12 @@ Client::RequestResult Client::toResult(const Pdu& response) {
   return RequestResult{net::ErrorCode{}, std::move(resp)};
 }
 
-// The one place a request decides which cancellation signals it can see. Called once, where the
-// request begins, so that nothing further down re-seats the state a caller above is reading --
-// and total has to be turned on explicitly, because co_spawn's default filter would drop it
-// before any of the waits below could act on it. Client.hpp states what each signal then means.
-net::Awaitable<void> Client::enableRequestCancellation() {
+// The one place an operation decides which cancellation signals it can see: neither type is
+// thrown, and total is turned on explicitly because co_spawn's default filter would otherwise
+// drop it before any of the waits below could act on it. Per coroutine, at its start -- a Walk
+// calls it and so does each request underneath, which is why doWalk re-reads the state it needs
+// rather than holding it.
+net::Awaitable<void> Client::observeBothCancellationTypes() {
   co_await net::asio::this_coro::throw_if_cancelled(false);
   co_await net::asio::this_coro::reset_cancellation_state(net::asio::enable_total_cancellation());
 }
@@ -435,7 +440,7 @@ net::Awaitable<Client::RequestResult> Client::doRequest(Target target, Auth auth
 net::Awaitable<Client::RequestResult> Client::doRequestV2c(Target target, Community community,
                                                            Pdu pdu) {
   if (m_stopped) co_return RequestResult{make_error_code(Errc::ClientStopped), Response{}};
-  co_await enableRequestCancellation();
+  co_await observeBothCancellationTypes();
 
   pdu.requestId = nextId();
 
@@ -650,7 +655,7 @@ std::optional<net::ErrorCode> Client::handleReport(const net::UdpEndpoint& from,
 net::Awaitable<Client::RequestResult> Client::doRequestV3(Target target, Credentials creds,
                                                           Pdu pdu) {
   if (m_stopped) co_return RequestResult{make_error_code(Errc::ClientStopped), Response{}};
-  co_await enableRequestCancellation();
+  co_await observeBothCancellationTypes();
   // Refused at the call rather than downgraded: a message that claims privacy it does not have is
   // worse than one that was never sent.
   if (isEncrypted(creds.level) && creds.privProtocol == PrivProtocol::None) {
@@ -742,8 +747,7 @@ net::Awaitable<Client::WalkResult> Client::doWalk(Target target, Auth auth, Oid 
                                                   WalkOptions options, BatchHandler onBatch) {
   // A total cancellation is a request to stop cleanly at a batch boundary rather than to drop
   // everything, so it has to be observable here -- and observed, not thrown.
-  co_await net::asio::this_coro::throw_if_cancelled(false);
-  co_await net::asio::this_coro::reset_cancellation_state(net::asio::enable_total_cancellation());
+  co_await observeBothCancellationTypes();
   // The two halves of ADR-0004's split, in one place so they cannot drift apart: terminal drops
   // everything and says so with operation_aborted, total stops here and reports an incomplete
   // Walk. Nothing else may turn a cancellation into an ordinary failure. The state is asked for

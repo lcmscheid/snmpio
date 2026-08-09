@@ -564,33 +564,49 @@ TEST(ClientV3, CancellingTheRequestThatStartedDiscoveryLeavesTheQueueIntact) {
   EXPECT_EQ(f.response.varbinds[0].name, sysUpTime);
 }
 
-// The same rule as TestClient.cpp's ClientCancel suite, in the other wait a request can be in.
-TEST(ClientV3, ATotalSignalAbortsARequestQueuedBehindDiscovery) {
+// The same rule as TestClient.cpp's ClientCancel suite, in the other wait a request can be in:
+// parked on an Engine Discovery. The signal is emitted from the Agent, as the discovery request
+// reaches it, which is the one moment both requests are suspended on the discovery rather than on
+// a reply of their own. That it is answered there and not later is countable: a request ended in
+// the discovery wait never sends a datagram of its own.
+class QueuedBehindDiscovery : public testing::TestWithParam<net::asio::cancellation_type> {};
+
+TEST_P(QueuedBehindDiscovery, IsAbortedAndLeavesTheDiscoveryRunning) {
   Fixture f;
   f.expectedCompletions = 2;
   ScriptedV3Agent agent(f.io, credentials(), echoAnswer);
   f.agent = &agent;
 
   net::asio::cancellation_signal signal;
-  net::ErrorCode firstEc;
+  net::ErrorCode queuedEc;
   const auto target = targetFor(agent);
 
+  agent.setOnDatagram([&signal, seen = 0](std::span<const std::byte>) mutable {
+    if (seen++ == 0) signal.emit(GetParam());
+  });
+
+  f.client.asyncGet(target, credentials(), {sysUpTime}, f.requestToken());
   f.client.asyncGet(
       target, credentials(), {sysDescr},
       net::asio::bind_cancellation_slot(signal.slot(), [&](net::ErrorCode e, const Response&) {
-        firstEc = e;
+        queuedEc = e;
         f.finish();
       }));
-  f.client.asyncGet(target, credentials(), {sysUpTime}, f.requestToken());
-  signal.emit(net::asio::cancellation_type::total);
 
   f.run();
 
-  EXPECT_EQ(firstEc, net::asio::error::operation_aborted);
-  EXPECT_FALSE(f.ec) << "a total signal took the discovery down with it: " << f.ec.message();
+  EXPECT_EQ(queuedEc, net::asio::error::operation_aborted);
+  EXPECT_FALSE(f.ec) << "cancelling one waiter took the discovery down with it: " << f.ec.message();
   ASSERT_EQ(f.response.varbinds.size(), 1U);
   EXPECT_EQ(f.response.varbinds[0].name, sysUpTime);
+  // The discovery's two datagrams and the surviving request's one. A fourth would mean the
+  // cancelled request was let through to send an exchange it had already been told to abandon.
+  EXPECT_EQ(agent.requestsSeen(), 3);
 }
+
+INSTANTIATE_TEST_SUITE_P(ClientV3, QueuedBehindDiscovery,
+                         testing::Values(net::asio::cancellation_type::terminal,
+                                         net::asio::cancellation_type::total));
 
 TEST(ClientV3, StoppingDuringDiscoveryFailsTheQueuedRequests) {
   Fixture f;

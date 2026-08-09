@@ -47,10 +47,10 @@ struct Response {
 //
 // Cancellation means one thing for a request, whichever wait it happens to be sitting in --
 // awaiting a reply, between retransmissions, or queued behind an Engine Discovery. A `terminal`
-// signal drops it at once, reply in hand or not; a `total` one stops it cleanly, sending nothing
-// further but still taking a reply already on its way. Both complete with `operation_aborted`
-// where no reply counted, never with Errc::Timeout: the Target's silence is not why the request
-// ended.
+// signal drops it at once, reply in hand or not; a `total` one stops it cleanly, retransmitting no
+// further but still taking a reply already on its way, which means waiting out the deadline of the
+// exchange in flight. Both complete with `operation_aborted` where no reply counted, never with
+// Errc::Timeout -- the Target's silence is not why the request ended.
 // Cancelling one request queued behind a discovery leaves the discovery and its other waiters
 // running (ADR-0003). A Walk reads `total` differently, and ADR-0004 says why -- see asyncWalk.
 //
@@ -338,8 +338,8 @@ class Client {
   std::optional<net::ErrorCode> handleReport(const net::UdpEndpoint& from, const Pending& pending,
                                              bool mayRetry);
 
-  // Observe both cancellation types rather than throwing on either, once per request.
-  static net::Awaitable<void> enableRequestCancellation();
+  // Observe both cancellation types rather than throwing on either, once per operation.
+  static net::Awaitable<void> observeBothCancellationTypes();
 
   net::Awaitable<RequestResult> doRequestV2c(Target target, Community community, Pdu pdu);
   net::Awaitable<RequestResult> doRequestV3(Target target, Credentials creds, Pdu pdu);

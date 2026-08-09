@@ -45,6 +45,15 @@ struct Response {
 // faults; snmpio's, for timeouts and malformed Responses; and snmp-agent's, for an error-status
 // the Agent itself returned.
 //
+// Cancellation means one thing for a request, whichever wait it happens to be sitting in --
+// awaiting a reply, between retransmissions, or queued behind an Engine Discovery. A `terminal`
+// signal drops it at once, reply in hand or not; a `total` one stops it cleanly, sending nothing
+// further but still taking a reply already on its way. Both complete with `operation_aborted`
+// where no reply counted, never with Errc::Timeout: the Target's silence is not why the request
+// ended.
+// Cancelling one request queued behind a discovery leaves the discovery and its other waiters
+// running (ADR-0003). A Walk reads `total` differently, and ADR-0004 says why -- see asyncWalk.
+//
 // The Client must outlive its outstanding operations. Call stop() and let the io_context drain
 // before destroying it.
 class Client {
@@ -141,6 +150,10 @@ class Client {
   //
   // At authPriv the Credentials name the privacy protocol as well; an authPriv level with none
   // named fails with Errc::UnsupportedPrivProtocol rather than being sent in the clear.
+  //
+  // Cancelling a request while it is queued behind a discovery means exactly what cancelling it
+  // in any other wait means -- see the rule above -- and leaves the discovery and everything else
+  // waiting on it running (ADR-0003).
   template <typename Token>
   auto asyncGet(Target target, Credentials credentials, std::vector<Oid> oids, Token&& token) {
     return spawn<void(net::ErrorCode, Response)>(
@@ -324,6 +337,9 @@ class Client {
   // when it named something we can act on and ask again about.
   std::optional<net::ErrorCode> handleReport(const net::UdpEndpoint& from, const Pending& pending,
                                              bool mayRetry);
+
+  // Observe both cancellation types rather than throwing on either, once per request.
+  static net::Awaitable<void> enableRequestCancellation();
 
   net::Awaitable<RequestResult> doRequestV2c(Target target, Community community, Pdu pdu);
   net::Awaitable<RequestResult> doRequestV3(Target target, Credentials creds, Pdu pdu);

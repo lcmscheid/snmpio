@@ -437,6 +437,11 @@ Cancellation is split as the ADR requires: `total` stops at a batch boundary and
 `Errc::WalkIncomplete` alongside what was already delivered, `terminal` drops everything with
 `operation_aborted`.
 
+A single request reads both signals the same way whichever wait it is in -- awaiting a reply,
+between retransmissions, or queued behind an Engine Discovery: `terminal` drops it at once,
+`total` stops it cleanly but still takes a reply already on its way, and either completes with
+`operation_aborted` rather than `Errc::Timeout`.
+
 Not in stage 1, and deliberately: SNMPv3 in any form (stages 2 and 3), and hostname resolution —
 a `Target` is built from an `asio::ip::udp::endpoint`, so resolving is the caller's choice of
 resolver rather than a policy this library picks, in this stage or any later one.

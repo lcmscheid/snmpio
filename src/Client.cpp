@@ -348,7 +348,8 @@ net::Awaitable<net::ErrorCode> Client::transact(Target target, std::vector<std::
   m_pending.emplace(key, pending);
 
   // Cancellation is handled here rather than thrown, so every exit still goes through the
-  // bookkeeping below.
+  // bookkeeping below. Which types are observable at all is decided once per request, where the
+  // request starts -- see enableRequestCancellation.
   co_await net::asio::this_coro::throw_if_cancelled(false);
   auto cancelState = co_await net::asio::this_coro::cancellation_state;
   const auto aborted = [&cancelState] {
@@ -372,10 +373,11 @@ net::Awaitable<net::ErrorCode> Client::transact(Target target, std::vector<std::
     if (pending->answered || m_stopped || aborted()) break;
 
     if (softCancelled()) {
-      // A total signal is not this request's to act on -- it belongs to the Walk above us, which
-      // stops at a batch boundary and wants this exchange finished (ADR-0004). It did however cut
-      // the wait short, so wait out the rest of the deadline on a slot nothing can cancel, and
-      // stop retransmitting either way.
+      // A total signal stops this request cleanly rather than dropping it: the exchange already
+      // in flight is allowed to finish, so wait out the rest of the deadline on a slot nothing
+      // can cancel -- a reply that arrives inside it still counts. No further retransmission,
+      // and no new exchange after this one, which is also what the Walk above wants when it
+      // stops at a batch boundary (ADR-0004).
       co_await pending->timer.async_wait(net::asio::bind_cancellation_slot(
           net::asio::cancellation_slot(), redirect_error(use_awaitable, waitEc)));
       break;
@@ -384,8 +386,15 @@ net::Awaitable<net::ErrorCode> Client::transact(Target target, std::vector<std::
 
   m_pending.erase(key);
 
-  if (pending->answered) co_return net::ErrorCode{};
+  // Terminal drops the exchange whatever else happened, including a reply that landed while the
+  // signal was on its way; total lets that reply count, and ends the request otherwise. Both are
+  // ahead of dropReason as well as of ec: the caller asked for this to stop, so that is the
+  // honest answer rather than what the Target was last heard doing.
   if (aborted()) co_return net::ErrorCode(net::asio::error::operation_aborted);
+  if (pending->answered) co_return net::ErrorCode{};
+  if (cancelState.cancelled() != net::asio::cancellation_type::none) {
+    co_return net::ErrorCode(net::asio::error::operation_aborted);
+  }
   // Ahead of ec on purpose: stop() closes the socket, so the socket's own complaint about a bad
   // descriptor is a symptom of the stop and would bury the actual reason.
   if (m_stopped) co_return make_error_code(Errc::ClientStopped);
@@ -407,6 +416,15 @@ Client::RequestResult Client::toResult(const Pdu& response) {
   return RequestResult{net::ErrorCode{}, std::move(resp)};
 }
 
+// The one place a request decides which cancellation signals it can see. Called once, where the
+// request begins, so that nothing further down re-seats the state a caller above is reading --
+// and total has to be turned on explicitly, because co_spawn's default filter would drop it
+// before any of the waits below could act on it. Client.hpp states what each signal then means.
+net::Awaitable<void> Client::enableRequestCancellation() {
+  co_await net::asio::this_coro::throw_if_cancelled(false);
+  co_await net::asio::this_coro::reset_cancellation_state(net::asio::enable_total_cancellation());
+}
+
 net::Awaitable<Client::RequestResult> Client::doRequest(Target target, Auth auth, Pdu pdu) {
   if (const auto* community = std::get_if<Community>(&auth)) {
     co_return co_await doRequestV2c(std::move(target), *community, std::move(pdu));
@@ -417,6 +435,7 @@ net::Awaitable<Client::RequestResult> Client::doRequest(Target target, Auth auth
 net::Awaitable<Client::RequestResult> Client::doRequestV2c(Target target, Community community,
                                                            Pdu pdu) {
   if (m_stopped) co_return RequestResult{make_error_code(Errc::ClientStopped), Response{}};
+  co_await enableRequestCancellation();
 
   pdu.requestId = nextId();
 
@@ -480,7 +499,7 @@ net::Awaitable<net::ErrorCode> Client::ensureEngine(Target target, Credentials c
     // rather than each starting their own.
     discovery = inFlight->second;
   } else {
-    discovery = std::make_shared<Discovery>(co_await net::asio::this_coro::executor);
+    discovery = std::make_shared<Discovery>(m_strand);
     // A timer used as an event rather than a deadline: it never expires on its own, and cancelling
     // it is how every waiter is woken at once.
     discovery->done.expires_at(std::chrono::steady_clock::time_point::max());
@@ -492,12 +511,18 @@ net::Awaitable<net::ErrorCode> Client::ensureEngine(Target target, Credentials c
                         net::asio::detached);
   }
 
+  co_await net::asio::this_coro::throw_if_cancelled(false);
   [[maybe_unused]] net::ErrorCode waitEc;
   co_await discovery->done.async_wait(redirect_error(use_awaitable, waitEc));
   if (m_stopped) co_return make_error_code(Errc::ClientStopped);
-  // Woken by our own cancellation rather than by the discovery finishing. The discovery carries on
-  // for whoever else is waiting; this request is the one that is over.
-  if (!discovery->finished) co_return net::ErrorCode(net::asio::error::operation_aborted);
+  // The same rule as transact's, in the other wait a request can be in: either cancellation type
+  // ends this request. Asked, rather than inferred from an unfinished discovery, because a signal
+  // arriving as the discovery completes has to count too. The discovery itself carries on for
+  // whoever else is waiting -- this request is the only one that is over.
+  const auto cancelled = co_await net::asio::this_coro::cancellation_state;
+  if (cancelled.cancelled() != net::asio::cancellation_type::none || !discovery->finished) {
+    co_return net::ErrorCode(net::asio::error::operation_aborted);
+  }
   co_return discovery->ec;
 }
 
@@ -625,6 +650,7 @@ std::optional<net::ErrorCode> Client::handleReport(const net::UdpEndpoint& from,
 net::Awaitable<Client::RequestResult> Client::doRequestV3(Target target, Credentials creds,
                                                           Pdu pdu) {
   if (m_stopped) co_return RequestResult{make_error_code(Errc::ClientStopped), Response{}};
+  co_await enableRequestCancellation();
   // Refused at the call rather than downgraded: a message that claims privacy it does not have is
   // worse than one that was never sent.
   if (isEncrypted(creds.level) && creds.privProtocol == PrivProtocol::None) {
@@ -718,12 +744,12 @@ net::Awaitable<Client::WalkResult> Client::doWalk(Target target, Auth auth, Oid 
   // everything, so it has to be observable here -- and observed, not thrown.
   co_await net::asio::this_coro::throw_if_cancelled(false);
   co_await net::asio::this_coro::reset_cancellation_state(net::asio::enable_total_cancellation());
-  auto cancelState = co_await net::asio::this_coro::cancellation_state;
   // The two halves of ADR-0004's split, in one place so they cannot drift apart: terminal drops
   // everything and says so with operation_aborted, total stops here and reports an incomplete
-  // Walk. Nothing else may turn a cancellation into an ordinary failure.
-  const auto stopNow = [&cancelState]() -> std::optional<net::ErrorCode> {
-    const auto c = cancelState.cancelled();
+  // Walk. Nothing else may turn a cancellation into an ordinary failure. The state is asked for
+  // at each call rather than held, because each request underneath re-seats it.
+  const auto stopNow = [](net::asio::cancellation_state state) -> std::optional<net::ErrorCode> {
+    const auto c = state.cancelled();
     if ((c & net::asio::cancellation_type::terminal) != net::asio::cancellation_type::none) {
       return net::ErrorCode(net::asio::error::operation_aborted);
     }
@@ -735,7 +761,8 @@ net::Awaitable<Client::WalkResult> Client::doWalk(Target target, Auth auth, Oid 
   std::int32_t maxRepetitions = options.maxRepetitions;
 
   for (;;) {
-    if (const auto stop = stopNow()) co_return WalkResult{*stop};
+    if (const auto stop = stopNow(co_await net::asio::this_coro::cancellation_state))
+      co_return WalkResult{*stop};
 
     const Pdu req = maxRepetitions <= 0 ? makePdu(PduType::GetNext, toVarbinds({current}))
                                         : makeBulkPdu(toVarbinds({current}), 0, maxRepetitions);
@@ -750,7 +777,8 @@ net::Awaitable<Client::WalkResult> Client::doWalk(Target target, Auth auth, Oid 
     if (ec) {
       // A cancellation that cut the exchange short is an incomplete Walk, not a fault of the
       // Target's -- a total cancel against a silent Target must not surface as a Timeout.
-      if (const auto stop = stopNow()) co_return WalkResult{*stop};
+      if (const auto stop = stopNow(co_await net::asio::this_coro::cancellation_state))
+        co_return WalkResult{*stop};
       co_return WalkResult{ec};
     }
     if (resp.varbinds.empty()) co_return WalkResult{make_error_code(Errc::MissingVarbind)};

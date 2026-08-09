@@ -379,6 +379,64 @@ TEST(ClientWalk, ACancelledWalkAgainstASilentTargetIsIncompleteNotTimedOut) {
   EXPECT_EQ(f.collected.size(), 2U) << "the batch that did arrive is kept";
 }
 
+// One rule, whichever wait the request is in: terminal drops it at once, total stops it cleanly
+// but still takes a reply already on its way. The v3 half of the same rule -- a request queued
+// behind an Engine Discovery -- is pinned in TestClientV3.cpp.
+TEST(ClientCancel, ATerminalSignalAbortsARequestWaitingForAReply) {
+  Fixture f;
+  net::asio::cancellation_signal signal;
+  ScriptedAgent agent(f.io, [&signal](const V2cMessage&) -> std::optional<Pdu> {
+    signal.emit(net::asio::cancellation_type::terminal);
+    return std::nullopt;
+  });
+  f.agent = &agent;
+
+  f.client.asyncGet(targetFor(agent, 2), publicCommunity, {sysDescr},
+                    net::asio::bind_cancellation_slot(signal.slot(), f.requestToken()));
+  f.run();
+
+  EXPECT_EQ(f.ec, net::asio::error::operation_aborted);
+  EXPECT_EQ(agent.requestsSeen(), 1) << "terminal stops the retransmissions too";
+}
+
+TEST(ClientCancel, ATotalSignalAgainstASilentTargetIsAbortedNotTimedOut) {
+  Fixture f;
+  // The wait ran out, but the reason this request ended is the caller's signal, not the Target's
+  // silence -- and a caller must be able to tell the two apart.
+  net::asio::cancellation_signal signal;
+  ScriptedAgent agent(f.io, [&signal](const V2cMessage&) -> std::optional<Pdu> {
+    signal.emit(net::asio::cancellation_type::total);
+    return std::nullopt;
+  });
+  f.agent = &agent;
+
+  f.client.asyncGet(targetFor(agent, 2), publicCommunity, {sysDescr},
+                    net::asio::bind_cancellation_slot(signal.slot(), f.requestToken()));
+  f.run();
+
+  EXPECT_EQ(f.ec, net::asio::error::operation_aborted);
+  EXPECT_NE(f.ec, Errc::Timeout);
+  EXPECT_EQ(agent.requestsSeen(), 1) << "total stops the retransmissions";
+}
+
+TEST(ClientCancel, ATotalSignalStillTakesTheReplyAlreadyOnItsWay) {
+  Fixture f;
+  // The half that separates total from terminal: the exchange in flight is allowed to finish.
+  net::asio::cancellation_signal signal;
+  ScriptedAgent agent(f.io, [&signal](const V2cMessage&) {
+    signal.emit(net::asio::cancellation_type::total);
+    return respondWith({Varbind{sysDescr, TimeTicks{7}}});
+  });
+  f.agent = &agent;
+
+  f.client.asyncGet(targetFor(agent, 0), publicCommunity, {sysDescr},
+                    net::asio::bind_cancellation_slot(signal.slot(), f.requestToken()));
+  f.run();
+
+  EXPECT_FALSE(f.ec) << f.ec.message();
+  ASSERT_EQ(f.response.varbinds.size(), 1U);
+}
+
 TEST(Client, FailsOutstandingRequestsWhenItStops) {
   Fixture f;
   ScriptedAgent agent(f.io, [](const V2cMessage&) { return std::nullopt; });

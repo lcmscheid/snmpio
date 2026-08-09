@@ -564,6 +564,34 @@ TEST(ClientV3, CancellingTheRequestThatStartedDiscoveryLeavesTheQueueIntact) {
   EXPECT_EQ(f.response.varbinds[0].name, sysUpTime);
 }
 
+// The same rule as TestClient.cpp's ClientCancel suite, in the other wait a request can be in.
+TEST(ClientV3, ATotalSignalAbortsARequestQueuedBehindDiscovery) {
+  Fixture f;
+  f.expectedCompletions = 2;
+  ScriptedV3Agent agent(f.io, credentials(), echoAnswer);
+  f.agent = &agent;
+
+  net::asio::cancellation_signal signal;
+  net::ErrorCode firstEc;
+  const auto target = targetFor(agent);
+
+  f.client.asyncGet(
+      target, credentials(), {sysDescr},
+      net::asio::bind_cancellation_slot(signal.slot(), [&](net::ErrorCode e, const Response&) {
+        firstEc = e;
+        f.finish();
+      }));
+  f.client.asyncGet(target, credentials(), {sysUpTime}, f.requestToken());
+  signal.emit(net::asio::cancellation_type::total);
+
+  f.run();
+
+  EXPECT_EQ(firstEc, net::asio::error::operation_aborted);
+  EXPECT_FALSE(f.ec) << "a total signal took the discovery down with it: " << f.ec.message();
+  ASSERT_EQ(f.response.varbinds.size(), 1U);
+  EXPECT_EQ(f.response.varbinds[0].name, sysUpTime);
+}
+
 TEST(ClientV3, StoppingDuringDiscoveryFailsTheQueuedRequests) {
   Fixture f;
   ScriptedV3Agent agent(f.io, credentials(), echoAnswer);

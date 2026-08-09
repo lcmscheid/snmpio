@@ -55,3 +55,7 @@ reply whose digest failed is a reply we will not decrypt.
 The last reason wins where several replies were dropped for different reasons. Nothing is lost that
 a caller could have used: the alternative is a list, and a caller that must act on a list of
 refusals has a packet capture problem, not an error-code problem.
+
+A cancelled request reports the cancellation instead, not the drop reason. The reason a caller who
+asked for this request to stop needs is that it stopped -- what the Target was last heard doing is
+about a request that no longer exists. `Client.hpp` states that rule for both cancellation types.

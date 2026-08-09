@@ -271,6 +271,8 @@ class Client {
     // which the protocol obliges us to accept and which therefore must not be trusted with
     // anything beyond asking us to discover the Engine again.
     bool replyAuthenticated = false;
+    // Why the last unusable reply was discarded, or empty. Read only at expiry (ADR-0008).
+    net::ErrorCode dropReason;
   };
 
   // What we know about one Authoritative Engine, and when we learnt it. The Engine's current time

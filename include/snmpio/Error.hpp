@@ -47,7 +47,9 @@ enum class Errc {
   MissingVarbind,     // Response carried no Varbind where the operation required one
 
   // Transport and operations.
-  Timeout,           // no Response inside the Target's timeout, after every retry
+  Timeout,           // the Target said nothing at all inside its timeout, after every retry. A
+                     // Target that answered but whose every reply we discarded reports why
+                     // instead: AuthFailed, DecryptionFailed or NotInTimeWindow (ADR-0008).
   ClientStopped,     // the Client stopped while the request was outstanding
   NonIncreasingOid,  // a Walk Response repeated or went backwards (ADR-0004)
   WalkIncomplete,    // a Walk stopped early: cancelled, or the batch handler asked it to

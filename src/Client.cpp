@@ -236,7 +236,10 @@ void Client::deliverV3(std::span<const std::byte> datagram, const net::UdpEndpoi
       !encrypted && !isAuthenticated(msg->header.level) && msg->scoped.pdu.type == PduType::Report;
   if (p.authRequired && !exemptFromAuth) {
     net::ErrorCode authEc;
-    if (!verifyAuth(datagram, *msg, p.authProtocol, p.authKey, authEc)) return;
+    if (!verifyAuth(datagram, *msg, p.authProtocol, p.authKey, authEc)) {
+      p.dropReason = make_error_code(Errc::AuthFailed);
+      return;
+    }
     p.replyAuthenticated = true;
   }
   // RFC 3414 section 3.2 puts decryption at step 8, after the digest at step 6 and timeliness at
@@ -247,7 +250,10 @@ void Client::deliverV3(std::span<const std::byte> datagram, const net::UdpEndpoi
     // Dropped like every other unreadable reply: the request stays outstanding and retransmits.
     // An Agent that genuinely could not decrypt *ours* says so with a Report, which is a different
     // path entirely and arrives readable.
-    if (!decryptScopedPdu(*msg, p.privProtocol, p.privKey, privEc)) return;
+    if (!decryptScopedPdu(*msg, p.privProtocol, p.privKey, privEc)) {
+      p.dropReason = make_error_code(Errc::DecryptionFailed);
+      return;
+    }
   }
   const bool isReport = msg->scoped.pdu.type == PduType::Report;
   // An unauthenticated Report is admitted whatever it says, because the four counters worth
@@ -266,7 +272,10 @@ void Client::deliverV3(std::span<const std::byte> datagram, const net::UdpEndpoi
     if (!p.engineId.empty() && msg->security.engineId != p.engineId) return;
     if (msg->scoped.pdu.requestId != p.requestId) return;
     if (msg->scoped.pdu.type != PduType::Response) return;
-    if (p.authRequired && !timely(from, msg->security)) return;
+    if (p.authRequired && !timely(from, msg->security)) {
+      p.dropReason = make_error_code(Errc::NotInTimeWindow);
+      return;
+    }
   }
 
   p.security = std::move(msg->security);
@@ -381,6 +390,9 @@ net::Awaitable<net::ErrorCode> Client::transact(Target target, std::vector<std::
   // descriptor is a symptom of the stop and would bury the actual reason.
   if (m_stopped) co_return make_error_code(Errc::ClientStopped);
   if (ec) co_return ec;
+  // A Target that said nothing at all is a Timeout. One whose replies we refused says why it
+  // refused them, at the deadline rather than before it.
+  if (pending->dropReason) co_return pending->dropReason;
   co_return make_error_code(Errc::Timeout);
 }
 

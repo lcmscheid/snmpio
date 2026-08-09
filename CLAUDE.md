@@ -9,7 +9,7 @@ all three Security Levels, discovery, Reports and privacy included. Interop is s
 
 - **`CONTEXT.md`** — the domain glossary. Its _Avoid:_ lists are binding: this codebase says
   Target, not "device"; Command Generator, not "manager"; Credentials, not "auth config".
-- **`docs/adr/`** — seven decisions, several of which look wrong until you read why. If a change
+- **`docs/adr/`** — eight decisions, several of which look wrong until you read why. If a change
   contradicts one, say so explicitly rather than quietly overriding it.
 
 ## Build

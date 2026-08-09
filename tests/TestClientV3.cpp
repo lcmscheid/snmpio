@@ -271,10 +271,10 @@ TEST(ClientV3, AcceptsAReplyWhoseClockSteppedForwardWithinOneBoot) {
 // And the direction that must stay refused, which is what the rule is for: a pair older than the
 // one we hold is a replay, and RFC 3414 section 2.2.3 never lets a cached boots count go down.
 // Dropped rather than failed, like every other unusable datagram -- the request stays outstanding
-// and times out.
+// and retransmits. At the deadline it says why it dropped them rather than Timeout (ADR-0008).
 TEST(ClientV3, DropsAReplyClaimingAnOlderBootsCount) {
   const auto ec = secondGetAnsweredWith(2, 1000);
-  EXPECT_EQ(ec, make_error_code(Errc::Timeout))
+  EXPECT_EQ(ec, make_error_code(Errc::NotInTimeWindow))
       << "a boots regression was accepted: " << ec.message();
 }
 
@@ -324,30 +324,25 @@ TEST(ClientV3, SurfacesAWrongDigestReport) {
   EXPECT_EQ(f.ec, make_error_code(Errc::AuthFailed));
 }
 
-TEST(ClientV3, DropsAResponseWhoseDigestDoesNotVerify) {
+// The half of ADR-0008 that must not have moved: recording *why* a datagram was dropped is not the
+// same as acting on it. The reply still cannot fail the request early, so every retransmission the
+// Target's retries buy still goes out -- one attempt plus one retry, on top of the two discovery
+// exchanges.
+TEST(ClientV3, KeepsRetransmittingThroughRepliesItDrops) {
   Fixture f;
   ScriptedV3Agent agent(f.io, credentials(), echoAnswer);
   f.agent = &agent;
-  agent.setResponder(
-      [&](const ScriptedV3Agent::Request& req) -> std::optional<ScriptedV3Agent::Reply> {
-        if (req.message.security.engineId.empty()) {
-          return ScriptedV3Agent::report(ScriptedV3Agent::unknownEngineIds,
-                                         SecurityLevel::NoAuthNoPriv);
-        }
-        if (!req.authenticated) return std::nullopt;
-        ScriptedV3Agent::Reply reply;
-        reply.level = req.message.header.level;
-        reply.scoped.pdu = echoAnswer(req.message.scoped.pdu);
-        // Signed with a key that is not this Agent's. Nobody who can forge a datagram should be
-        // able to fail somebody else's request, so this has to be dropped rather than surfaced.
-        reply.corruptDigest = true;
-        return reply;
-      });
+  agent.setResponder([&agent](const ScriptedV3Agent::Request& req) {
+    auto reply = agent.behaveLikeACompliantAgent(req);
+    if (reply && reply->scoped.pdu.type == PduType::Response) reply->corruptDigest = true;
+    return reply;
+  });
 
-  f.client.asyncGet(targetFor(agent, 0), credentials(), {sysDescr}, f.requestToken());
+  f.client.asyncGet(targetFor(agent, 1), credentials(), {sysDescr}, f.requestToken());
   f.run();
 
-  EXPECT_EQ(f.ec, make_error_code(Errc::Timeout));
+  EXPECT_EQ(f.ec, make_error_code(Errc::AuthFailed));
+  EXPECT_EQ(agent.requestsSeen(), 4) << "a dropped reply cut the retransmissions short";
 }
 
 TEST(ClientV3, DropsAResponseFromOutsideTheTimeWindow) {
@@ -376,7 +371,7 @@ TEST(ClientV3, DropsAResponseFromOutsideTheTimeWindow) {
   f.client.asyncGet(targetFor(agent, 0), credentials(), {sysDescr}, f.requestToken());
   f.run();
 
-  EXPECT_EQ(f.ec, make_error_code(Errc::Timeout));
+  EXPECT_EQ(f.ec, make_error_code(Errc::NotInTimeWindow));
 }
 
 TEST(ClientV3, RediscoversWhenTheEngineIdChanges) {
@@ -670,7 +665,8 @@ TEST(ClientV3, AuthPrivDiscoversBeforeItAsks) {
 }
 
 // A reply we cannot open is dropped, not failed -- the same rule as a reply whose digest is wrong
-// (ADR-0006). The request stays outstanding, retransmits, and finally times out.
+// (ADR-0006). The request stays outstanding, retransmits, and at the deadline reports why the
+// replies were unusable rather than Timeout (ADR-0008).
 TEST(ClientV3, DropsAReplyEncryptedWithAnotherKey) {
   Fixture f;
   ScriptedV3Agent agent(f.io, privCredentials(PrivProtocol::Aes128), echoAnswer);
@@ -685,7 +681,7 @@ TEST(ClientV3, DropsAReplyEncryptedWithAnotherKey) {
                     f.requestToken());
   f.run();
 
-  EXPECT_EQ(f.ec, make_error_code(Errc::Timeout));
+  EXPECT_EQ(f.ec, make_error_code(Errc::DecryptionFailed));
 }
 
 // usmStatsDecryptionErrors: the Agent could not open what we sent. Nothing about that is worth

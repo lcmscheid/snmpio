@@ -80,6 +80,52 @@ enum class Errc {
   UnexpectedReport,  // a Report whose usmStats counter we do not recognise
 };
 
+// What a caller can do about a failure, across all three categories a completion can carry --
+// snmpio's Errc, the Agent's ErrorStatus, and the system's socket faults. Callers write retry
+// policies against this rather than against forty-odd enumerators; the useful question is not how
+// bad a failure was but what to do next.
+//
+// The borderline calls, since they are the ones worth arguing with:
+//
+//   * AuthFailed, DecryptionFailed, DecryptionError and UnknownUserName are Configuration, not
+//     Retriable. Wrong Credentials produce them on every retry, and a retry loop that treats them
+//     like a lost datagram is an infinite loop against a Target that is answering perfectly.
+//   * UnknownEngineId and NotInTimeWindow are Retriable even though the Client already
+//     re-discovered and resynchronised once before reporting them: they are what an Agent that
+//     rebooted mid-exchange produces, and the next request discovers the new boots/time.
+//   * CommitFailed and UndoFailed are Fatal rather than Retriable. The Agent is telling us it does
+//     not know what state the SET left behind, and replaying a half-applied SET is the one retry
+//     that can do damage.
+//   * WalkIncomplete and ClientStopped are Fatal because the caller asked for them. Nothing about
+//     the Target changed, so there is nothing for a retry policy to wait out.
+//   * ErrorStatus::GenErr is Retriable, and it is the least comfortable call here. It is the
+//     Agent's catch-all for a processing failure it has no better code for, which is usually
+//     transient -- but after a SET it carries the same unknown-state risk CommitFailed does, and
+//     classify() cannot see which operation produced it. A caller retrying SETs should treat this
+//     one as Fatal itself.
+//   * In the system category, the socket faults worth waiting out -- unreachable, reset, down,
+//     refused, out of buffers, timed out, interrupted -- are Retriable; everything else, including
+//     the operation_canceled a cancellation signal produces, is Fatal. connection_refused on UDP
+//     is an ICMP port-unreachable, which is a Target still booting at least as often as it is a
+//     Target with nothing listening, so it goes with the retriable half.
+//   * An ErrorCode from a fourth category is Unclassified rather than Fatal. Naming what we cannot
+//     interpret is honest; guessing would be a retry policy deciding on evidence it does not have.
+//   * Malformed replies -- the framing, primitive and OID decode faults -- are Fatal. They mean
+//     the Agent is producing something no correct Agent produces, and the next datagram will be
+//     just as unusable. Encode-side faults on the caller's own input (OidNotEncodable,
+//     OidBadSyntax) are Configuration instead: those the caller can fix.
+enum class ErrorClass {
+  Ok,             // not a failure
+  Retriable,      // retry unchanged: the Target was silent, unreachable, or busy
+  Configuration,  // change something -- Credentials, Oid, request size -- and retry
+  Fatal,          // stop: retrying changes nothing, and nothing the caller can set will help
+  Unclassified,   // a code from a category this library does not know. No Errc or ErrorStatus
+                  // produces this -- TestError pins that -- so it means a fourth category arrived.
+};
+
+// The one entry point. Safe to call on a success code, which classifies as Ok.
+[[nodiscard]] ErrorClass classify(const net::ErrorCode& ec) noexcept;
+
 const net::ErrorCategory& errorCategory() noexcept;
 
 // Not makeErrorCode: this is an ADL customisation point. Both std::error_code and

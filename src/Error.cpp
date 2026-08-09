@@ -1,6 +1,9 @@
 #include <snmpio/Error.hpp>
 
 #include <string>
+#include <system_error>
+
+#include <snmpio/Pdu.hpp>
 
 namespace snmpio {
 namespace {
@@ -118,6 +121,141 @@ class SnmpioCategory final : public net::ErrorCategory {
 const net::ErrorCategory& errorCategory() noexcept {
   static const SnmpioCategory instance;
   return instance;
+}
+
+namespace {
+
+ErrorClass classifyErrc(Errc e) noexcept {
+  switch (e) {
+    case Errc::Ok:
+      return ErrorClass::Ok;
+
+    // The Target said nothing, or said it was busy. Retransmission is the whole reason UDP
+    // transport survives, and these are what it survives.
+    case Errc::Timeout:
+    case Errc::UnknownEngineId:
+    case Errc::NotInTimeWindow:
+      return ErrorClass::Retriable;
+
+    // Something the caller set is wrong: Credentials, an Oid, or the build's crypto.
+    case Errc::OidNotEncodable:
+    case Errc::OidBadSyntax:
+    case Errc::UnsupportedAuthProtocol:
+    case Errc::UnsupportedSecurityLevel:
+    case Errc::UnsupportedPrivProtocol:
+    case Errc::LegacyProviderUnavailable:
+    case Errc::EmptyPassword:
+    case Errc::AuthFailed:
+    case Errc::DecryptionFailed:
+    case Errc::UnknownUserName:
+    case Errc::DecryptionError:
+      return ErrorClass::Configuration;
+
+    // Malformed replies, a Target that is not speaking SNMP as this library understands it, and
+    // the endings the caller asked for. None of them changes with another datagram.
+    case Errc::Truncated:
+    case Errc::IndefiniteLength:
+    case Errc::LengthTooLarge:
+    case Errc::HighTagNumber:
+    case Errc::UnexpectedTag:
+    case Errc::TrailingData:
+    case Errc::ReservedLength:
+    case Errc::EmptyContent:
+    case Errc::IntegerTooLarge:
+    case Errc::BadIpAddress:
+    case Errc::BadNull:
+    case Errc::OidEmpty:
+    case Errc::OidTooLong:
+    case Errc::OidSubidOverflow:
+    case Errc::OidNonMinimal:
+    case Errc::OidTruncatedSubid:
+    case Errc::UnknownValueTag:
+    case Errc::BadVersion:
+    case Errc::UnexpectedPduType:
+    case Errc::MissingVarbind:
+    case Errc::ClientStopped:
+    case Errc::NonIncreasingOid:
+    case Errc::WalkIncomplete:
+    case Errc::UnsupportedSecurityModel:
+    case Errc::BadMessageFlags:
+    case Errc::CryptoFailure:
+    case Errc::UnexpectedReport:
+      return ErrorClass::Fatal;
+  }
+  return ErrorClass::Unclassified;
+}
+
+ErrorClass classifyErrorStatus(ErrorStatus e) noexcept {
+  switch (e) {
+    case ErrorStatus::NoError:
+      return ErrorClass::Ok;
+
+    // The Agent is temporarily unable, not permanently unwilling.
+    case ErrorStatus::GenErr:
+    case ErrorStatus::ResourceUnavailable:
+      return ErrorClass::Retriable;
+
+    // Ask for something else: fewer Varbinds, a different Oid, a different value, or different
+    // Credentials.
+    case ErrorStatus::TooBig:
+    case ErrorStatus::NoSuchName:
+    case ErrorStatus::BadValue:
+    case ErrorStatus::ReadOnly:
+    case ErrorStatus::NoAccess:
+    case ErrorStatus::WrongType:
+    case ErrorStatus::WrongLength:
+    case ErrorStatus::WrongEncoding:
+    case ErrorStatus::WrongValue:
+    case ErrorStatus::NoCreation:
+    case ErrorStatus::InconsistentValue:
+    case ErrorStatus::AuthorizationError:
+    case ErrorStatus::NotWritable:
+    case ErrorStatus::InconsistentName:
+      return ErrorClass::Configuration;
+
+    // The Agent does not know what state the SET left behind. Replaying it is the one retry that
+    // can do damage.
+    case ErrorStatus::CommitFailed:
+    case ErrorStatus::UndoFailed:
+      return ErrorClass::Fatal;
+  }
+  return ErrorClass::Unclassified;
+}
+
+// Socket faults, via the generic condition so the same list works under both Asio flavours.
+// Anything not named here is Fatal: an unrecognised socket fault is not one we can argue is worth
+// waiting out.
+ErrorClass classifySystem(const net::ErrorCode& ec) noexcept {
+  switch (static_cast<std::errc>(ec.default_error_condition().value())) {
+    case std::errc::timed_out:
+    case std::errc::interrupted:
+    case std::errc::network_down:
+    case std::errc::network_unreachable:
+    case std::errc::network_reset:
+    case std::errc::host_unreachable:
+    case std::errc::connection_refused:
+    case std::errc::connection_reset:
+    case std::errc::no_buffer_space:
+      return ErrorClass::Retriable;
+    default:
+      return ErrorClass::Fatal;
+  }
+}
+
+}  // namespace
+
+ErrorClass classify(const net::ErrorCode& ec) noexcept {
+  if (!ec) return ErrorClass::Ok;
+  if (ec.category() == errorCategory()) return classifyErrc(static_cast<Errc>(ec.value()));
+  if (ec.category() == agentErrorCategory()) {
+    return classifyErrorStatus(static_cast<ErrorStatus>(ec.value()));
+  }
+  if (ec.category() == net::systemCategory() || ec.category() == net::genericCategory()) {
+    return classifySystem(ec);
+  }
+  // Not one of the three. Naming a category we cannot interpret is honest; guessing Fatal for it
+  // would be a retry policy silently deciding on evidence it does not have.
+  return ErrorClass::Unclassified;
 }
 
 net::ErrorCode make_error_code(Errc e) noexcept {

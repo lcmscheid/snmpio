@@ -23,10 +23,22 @@ namespace snmpio::net {
 using ErrorCode = ::boost::system::error_code;
 using ErrorCategory = ::boost::system::error_category;
 using SystemError = ::boost::system::system_error;
+inline const ErrorCategory& systemCategory() noexcept {
+  return ::boost::system::system_category();
+}
+inline const ErrorCategory& genericCategory() noexcept {
+  return ::boost::system::generic_category();
+}
 #else
 using ErrorCode = ::std::error_code;
 using ErrorCategory = ::std::error_category;
 using SystemError = ::std::system_error;
+inline const ErrorCategory& systemCategory() noexcept {
+  return ::std::system_category();
+}
+inline const ErrorCategory& genericCategory() noexcept {
+  return ::std::generic_category();
+}
 #endif
 
 }  // namespace snmpio::net

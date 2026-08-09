@@ -91,6 +91,59 @@ cmake --build build/examples
 ./build/examples/example-walk 127.0.0.1 16161 privsha1aes snmpio-interop 1.3.6.1.2.1.1
 ```
 
+## Errors
+
+Every operation reports failure the Asio way, as a `net::ErrorCode`, and three categories can land
+in the same completion handler: the system's for socket faults, `snmpio`'s (`Errc`) for timeouts
+and unusable replies, and `snmp-agent`'s (`ErrorStatus`) for an error-status the Agent itself
+returned. `ec.message()` is readable in all three.
+
+Writing a retry policy against those individually means switching over forty-odd enumerators, and
+getting it wrong the same way every time — a wrong password and a lost datagram both look like
+failure, and retrying the first is pointless while retrying the second is the whole reason UDP
+transport is survivable. `classify()` answers the question that actually matters, across all three
+categories at once:
+
+| `ErrorClass` | Means | Do |
+|---|---|---|
+| `Ok` | not a failure | carry on |
+| `Retriable` | the Target was silent, unreachable, or busy | retry unchanged, with backoff |
+| `Configuration` | something you set is wrong or unacceptable | fix the Credentials, the Oid, or the request size — then retry |
+| `Fatal` | nothing you can change will help | give up on this request |
+| `Unclassified` | an ErrorCode from a fourth category | treat as `Fatal` |
+
+```cpp
+snmpio::Response response;
+net::ErrorCode ec;
+
+for (int attempt = 0; attempt < 3; ++attempt) {
+  response = co_await client.asyncGet(target, community, oids,
+                                      net::asio::redirect_error(net::asio::use_awaitable, ec));
+  if (snmpio::classify(ec) != snmpio::ErrorClass::Retriable) break;
+  co_await backOff(attempt);
+}
+
+if (ec) std::cerr << ec.message() << "\n";  // Configuration, Fatal, or Retriable but exhausted
+co_return response;
+```
+
+`snmpio::Client` already retransmits inside a single request, up to `Target::retries`, before
+reporting `Errc::Timeout` — the loop above is the layer above that, for a Target that stayed
+unreachable across whole exchanges.
+
+The borderline calls are documented next to the enumeration in
+[`include/snmpio/Error.hpp`](include/snmpio/Error.hpp), with the reasoning. Three worth knowing
+here:
+
+- **`Errc::AuthFailed` is `Configuration`, not `Retriable`.** A wrong authentication password fails
+  identically on every retry, so a loop that waits it out never terminates against a Target that is
+  answering perfectly. The same goes for `DecryptionFailed` and `UnknownUserName`.
+- **`Errc::NotInTimeWindow` *is* `Retriable`**, even though the Client already resynchronised once
+  before reporting it. It is what an Agent that rebooted mid-exchange produces, and the next request
+  discovers the new boots/time.
+- **`ErrorStatus::CommitFailed` is `Fatal`.** The Agent is saying it does not know what state the
+  SET left behind; replaying a half-applied SET is the one retry that can do damage.
+
 ## Building
 
 ```sh

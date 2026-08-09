@@ -112,6 +112,15 @@ all, so the distinction only arises at 192 and 256 bits. Reeder is spelled with 
 on; we follow it rather than invent a fourth spelling.
 _Avoid_: key expansion, key stretching, "Cisco AES" as a protocol name
 
+### Errors
+
+**Error Class**:
+What a caller can do about a failed operation — retry unchanged, change something and retry, or give
+up — as opposed to how severe the failure was. One classification spanning all three ErrorCode
+categories a completion can carry, so a socket fault and an Agent's `authorizationError` answer the
+same question.
+_Avoid_: severity, error level, fatal/non-fatal
+
 ### Testing
 
 **Simulator**:

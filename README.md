@@ -23,6 +23,74 @@ Blumenthal and the Reeder key extension.
 | 5 | Interop matrix vs the Simulator, `snmpd`, and real vendor gear | next |
 | 6 | Docs, cancellation semantics, error taxonomy, packaging | |
 
+## Using it
+
+Both files below are in [`examples/`](examples/), which is a separate CMake project that
+`find_package()`s an installed snmpio — so building it is what proves the install rules work, and
+CI builds it on every push. Neither can drift from the other.
+
+A v2c GET, in the callback form:
+
+```cpp
+namespace net = snmpio::net;
+net::IoContext io;
+snmpio::Client client(io.get_executor());
+
+snmpio::Target target;
+target.endpoint = {net::asio::ip::make_address("127.0.0.1"), 161};
+
+client.asyncGet(target, snmpio::Community{"public"}, {snmpio::Oid{1, 3, 6, 1, 2, 1, 1, 1, 0}},
+                [&client](const net::ErrorCode& ec, const snmpio::Response& response) {
+                  client.stop();
+                  if (ec) return;
+                  std::cout << snmpio::toString(response.varbinds.front().val) << "\n";
+                });
+
+io.run();
+```
+
+A v3 `authPriv` Walk, in the coroutine form. There is nothing extra to call first: Engine
+Discovery and time synchronisation happen underneath, and swapping the `Community` for
+`Credentials` is the whole of the difference between the two versions at this API.
+
+```cpp
+snmpio::Credentials credentials;
+credentials.userName = "privsha1aes";
+credentials.level = snmpio::SecurityLevel::AuthPriv;
+credentials.authProtocol = snmpio::AuthProtocol::Sha1;
+credentials.authPassword = password;
+credentials.privProtocol = snmpio::PrivProtocol::Aes128;
+credentials.privPassword = password;
+
+net::ErrorCode ec;
+auto varbinds = co_await client.asyncWalkCollect(
+    target, credentials, *snmpio::Oid::parse("1.3.6.1.2.1.1"), {},
+    net::asio::redirect_error(net::asio::use_awaitable, ec));
+```
+
+Three things the compiler will not tell you:
+
+- **The Security Level is required, never inferred.** A Client that silently downgraded `authPriv`
+  because the Credentials happened to carry no privacy password would be a security hole, so an
+  `authPriv` level with `PrivProtocol::None` is `Errc::UnsupportedPrivProtocol` rather than an
+  `authNoPriv` request.
+- **`io.run()` returns only after `client.stop()`.** The Client's receive loop is outstanding work.
+  `stop()` also fails everything in flight with `Errc::ClientStopped`; it is deliberately not called
+  from the destructor, because the cleanup runs on the strand and would be scheduled against an
+  object that no longer exists.
+- **A Target is an address, not a hostname.** Choosing a resolver stays the caller's business
+  (`CONTEXT.md`), so nothing here will quietly resolve one for you.
+
+To build and run them against the `snmpd` two sections down:
+
+```sh
+cmake --install build/default --prefix /tmp/prefix
+cmake -S examples -B build/examples -DCMAKE_PREFIX_PATH=/tmp/prefix
+cmake --build build/examples
+./build/examples/example-get 127.0.0.1 16161 public
+./build/examples/example-walk 127.0.0.1 16161 privsha1aes snmpio-interop 1.3.6.1.2.1.1
+```
+
 ## Building
 
 ```sh

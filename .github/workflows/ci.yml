@@ -211,6 +211,33 @@ jobs:
         run: |
           [ '${{ matrix.agent }}' = snmpd ] && cat "$RUNNER_TEMP/snmpd.log" || docker logs simulator
 
+  package:
+    name: install + consume
+    runs-on: ubuntu-24.04
+    # The examples are a separate CMake project that find_package()s an installed snmpio, so
+    # building them here is the only thing that exercises the install rules and
+    # snmpioConfig.cmake. A consumer whose build broke would otherwise find out before we did.
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build libboost-system-dev libssl-dev
+
+      - name: Build and install
+        run: |
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DSNMPIO_BUILD_TESTS=OFF -DSNMPIO_WERROR=ON
+          cmake --build build
+          cmake --install build --prefix "$RUNNER_TEMP/prefix"
+
+      - name: Build the examples against it
+        run: |
+          cmake -S examples -B build/examples -G Ninja \
+            -DCMAKE_PREFIX_PATH="$RUNNER_TEMP/prefix"
+          cmake --build build/examples
+
   style:
     name: clang-format + clang-tidy
     runs-on: ubuntu-24.04
@@ -241,7 +268,7 @@ jobs:
 
       - name: Format
         run: |
-          find include src tests fuzz -name '*.hpp' -o -name '*.cpp' \
+          find include src tests fuzz examples -name '*.hpp' -o -name '*.cpp' \
             | xargs clang-format --dry-run --Werror
 
       # Static analysis, plus the naming convention the formatter cannot check. tests/ and fuzz/

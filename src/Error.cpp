@@ -226,7 +226,11 @@ ErrorClass classifyErrorStatus(ErrorStatus e) noexcept {
 // Anything not named here is Fatal: an unrecognised socket fault is not one we can argue is worth
 // waiting out.
 ErrorClass classifySystem(const net::ErrorCode& ec) noexcept {
-  switch (static_cast<std::errc>(ec.default_error_condition().value())) {
+  const auto cond = ec.default_error_condition();
+  // A code with no generic meaning keeps its own value and category; reading that value as a
+  // std::errc anyway would let it alias an unrelated errno and be retried on its behalf.
+  if (cond.category() != net::genericCategory()) return ErrorClass::Fatal;
+  switch (static_cast<std::errc>(cond.value())) {
     case std::errc::timed_out:
     case std::errc::interrupted:
     case std::errc::network_down:

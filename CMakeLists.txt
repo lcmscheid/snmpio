@@ -136,12 +136,15 @@ set_target_properties(snmpio PROPERTIES
   VISIBILITY_INLINES_HIDDEN ON)
 
 add_library(snmpio_warnings INTERFACE)
+# /we4062 and -Werror=switch are not gated on SNMPIO_WERROR: the classification switches in
+# Error.cpp have no default so that a newly added Errc fails the build rather than silently
+# classifying as Unclassified. A warning nobody opted into would not do that.
 if(MSVC)
-  target_compile_options(snmpio_warnings INTERFACE /W4 $<$<BOOL:${SNMPIO_WERROR}>:/WX>)
+  target_compile_options(snmpio_warnings INTERFACE /W4 /we4062 $<$<BOOL:${SNMPIO_WERROR}>:/WX>)
 else()
   target_compile_options(snmpio_warnings INTERFACE
     -Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion -Wshadow -Wold-style-cast
-    -Wnon-virtual-dtor -Woverloaded-virtual -Wdouble-promotion
+    -Wnon-virtual-dtor -Woverloaded-virtual -Wdouble-promotion -Werror=switch
     $<$<BOOL:${SNMPIO_WERROR}>:-Werror>)
 endif()
 target_link_libraries(snmpio PRIVATE snmpio_warnings)

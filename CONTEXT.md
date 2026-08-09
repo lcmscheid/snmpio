@@ -119,7 +119,7 @@ What a caller can do about a failed operation — retry unchanged, change someth
 up — as opposed to how severe the failure was. One classification spanning all three ErrorCode
 categories a completion can carry, so a socket fault and an Agent's `authorizationError` answer the
 same question.
-_Avoid_: severity, error level, fatal/non-fatal
+_Avoid_: severity, error level, "fatal" as a severity rating (the class name is not one)
 
 ### Testing
 

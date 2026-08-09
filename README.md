@@ -274,10 +274,10 @@ ctest --preset default -R Interop --output-on-failure
 ```
 
 One user is enough to be useful, because a Target typically has exactly one. The matrix test then
-covers the single pair that user can serve and logs which of the eighteen it therefore did not
-reach; the Key Extension test skips, since it needs four users of its own. The other two v3 tests —
-Engine Discovery and the wrong-password Report — run against the named user rather than against the
-conventional one, and the v2c half of the suite is untouched, since a Community has no user.
+covers the single pair that user can serve, and the Key Extension test skips, since it needs four
+users of its own. The other two v3 tests in that file — Engine Discovery and the wrong-password Report — run against the named
+user rather than against the conventional one, and the v2c half of the suite is untouched, since a Community
+has no user.
 
 Naming a user the Target does not have **fails** the suite, the same as any other variable that is
 set but unusable: a skip there would report green for a user nobody ever reached. So does a
@@ -286,8 +286,24 @@ protocol beside it — USM derives the privacy key with the authentication proto
 is no privacy without one; an authenticating user with no password to authenticate with; and
 `SNMPIO_INTEROP_V3_AUTH` or `_PRIV` set with no user for them to describe.
 
-One password, used as both the authentication and the privacy secret. A device whose user carries
+One password, used as both the authentication and the privacy secret. A Target whose user carries
 two different ones cannot be addressed this way yet.
+
+Verifying this way in needs no hardware. The `snmpd` below also carries `netops-legacy`, a user
+deliberately named after nothing it holds, which is what a Target somebody else configured looks
+like:
+
+```sh
+export SNMPIO_INTEROP_TARGET=127.0.0.1 SNMPIO_INTEROP_PORT=16161
+export SNMPIO_INTEROP_V3_USER=netops-legacy SNMPIO_INTEROP_V3_AUTH=sha256
+export SNMPIO_INTEROP_V3_PRIV=aes SNMPIO_INTEROP_V3_PASSWORD=snmpio-interop
+ctest --preset default -R InteropV3 --output-on-failure
+```
+
+CI runs exactly this, as a second pass over the same `snmpd`, so the way in for a Target we did not
+configure is not merely documented.
+
+### Everything else the harness reads
 
 An address, not a hostname. A `Target` is built from an endpoint so that choosing a resolver stays
 the caller's business (stage 1), and the harness is a caller like any other — so a hostname is

@@ -65,7 +65,15 @@ constexpr AuthRow sha1Row{AuthProtocol::Sha1, "sha1"};
 constexpr AuthRow sha256Row{AuthProtocol::Sha256, "sha256"};
 constexpr PrivRow aes128Row{PrivProtocol::Aes128, "aes"};
 
-// The Security Level a pair adds up to, said the way a failure message wants to read it.
+// The Security Level a pair adds up to. Said once, because the label, the user name and the
+// Credentials all ask the same question of the same pair and must not answer it three ways.
+SecurityLevel securityLevel(const AuthRow& auth, const PrivRow& priv) {
+  if (auth.protocol == AuthProtocol::None) return SecurityLevel::NoAuthNoPriv;
+  if (priv.protocol == PrivProtocol::None) return SecurityLevel::AuthNoPriv;
+  return SecurityLevel::AuthPriv;
+}
+
+// The pair, said the way a failure message wants to read it.
 std::string pairLabel(const AuthRow& auth, const PrivRow& priv) {
   if (auth.protocol == AuthProtocol::None) return "noAuthNoPriv";
   if (priv.protocol == PrivProtocol::None) return std::string("authNoPriv/") + auth.name;
@@ -109,23 +117,6 @@ struct NamedUser {
   PrivRow priv;
 };
 
-// Every pair of the matrix but the one a named user carries, for the message that says what
-// naming it cost this run.
-std::string matrixPairsExcept(const std::string& covered) {
-  std::string out;
-  const auto add = [&](const std::string& label) {
-    if (label == covered) return;
-    if (!out.empty()) out += ", ";
-    out += label;
-  };
-  add(pairLabel(noAuthRow, noPrivRow));
-  for (const auto& auth : authProtocols) {
-    add(pairLabel(auth, noPrivRow));
-    for (const auto& priv : privProtocols) add(pairLabel(auth, priv));
-  }
-  return out;
-}
-
 void expectSysDescr(const GetResult& result, const std::string& what) {
   ASSERT_FALSE(result.ec) << what << ": " << result.ec.category().name() << ": "
                           << result.ec.message();
@@ -144,12 +135,21 @@ class InteropV3 : public ::testing::Test {
     const auto authName = envVar("SNMPIO_INTEROP_V3_AUTH");
     const auto privName = envVar("SNMPIO_INTEROP_V3_PRIV");
     const auto password = envVar("SNMPIO_INTEROP_V3_PASSWORD");
-    // Neither way in named: no Target, or no user of any kind. Only unset variables skip; from
-    // here on every one of them is set, and a set one that cannot be used fails instead.
-    if (!address || (!user && !password)) {
-      GTEST_SKIP() << "needs SNMPIO_INTEROP_TARGET, and either SNMPIO_INTEROP_V3_PASSWORD for the "
-                      "users our own configuration creates or SNMPIO_INTEROP_V3_USER for one the "
-                      "Agent already had";
+    // No Target at all is the bare checkout, where nothing here is addressed at anything and a
+    // stray variable left over from some other run is not this suite's to complain about.
+    if (!address) GTEST_SKIP() << "needs SNMPIO_INTEROP_TARGET";
+    // A Target, though, means a run that meant to reach it. The protocols say what one named user
+    // carries, so without the name they are addressed at nobody -- and this is checked ahead of
+    // the skip below because the run that forgot SNMPIO_INTEROP_V3_USER is exactly the run that
+    // has no password either, and would otherwise skip green believing it had named a user.
+    ASSERT_TRUE(user || (!authName && !privName))
+        << "SNMPIO_INTEROP_V3_AUTH/_PRIV say what SNMPIO_INTEROP_V3_USER carries, and no user "
+           "was named";
+    // Neither way in named. Only unset variables skip; from here on every one of them is set, and
+    // a set one that cannot be used fails instead.
+    if (!user && !password) {
+      GTEST_SKIP() << "needs either SNMPIO_INTEROP_V3_PASSWORD for the users our own configuration "
+                      "creates or SNMPIO_INTEROP_V3_USER for one the Agent already had";
     }
     const auto target = makeInteropTarget(*address, envPort("SNMPIO_INTEROP_PORT"));
     ASSERT_TRUE(target.has_value())
@@ -157,15 +157,7 @@ class InteropV3 : public ::testing::Test {
     m_target = *target;
     m_password = password.value_or("");
 
-    if (!user) {
-      // The protocols say what one named user carries, so without the name they are addressed at
-      // nobody -- and silently running the convention path instead would report green for a user
-      // this run believed it had asked for.
-      ASSERT_TRUE(!authName && !privName)
-          << "SNMPIO_INTEROP_V3_AUTH/_PRIV say what SNMPIO_INTEROP_V3_USER carries, and no user "
-             "was named";
-      return;
-    }
+    if (!user) return;
     // Set but unspellable fails the run, like every other interop variable: a protocol name that
     // fell back to a default would send the wrong digest and blame the Agent for refusing it.
     const auto* const auth = findAuth(authName.value_or("none"));
@@ -188,14 +180,8 @@ class InteropV3 : public ::testing::Test {
   // The user to send for one pair: the one this run named, or the conventional one that says what
   // it carries. Callers filter first -- a named user serves its own pair and no other.
   [[nodiscard]] Credentials credentials(const AuthRow& auth, const PrivRow& priv) const {
-    auto level = SecurityLevel::AuthPriv;
-    if (auth.protocol == AuthProtocol::None) {
-      level = SecurityLevel::NoAuthNoPriv;
-    } else if (priv.protocol == PrivProtocol::None) {
-      level = SecurityLevel::AuthNoPriv;
-    }
     return Credentials{m_named ? m_named->name : conventionalUser(auth, priv),
-                       level,
+                       securityLevel(auth, priv),
                        auth.protocol,
                        auth.protocol == AuthProtocol::None ? std::string() : m_password,
                        priv.protocol,
@@ -203,7 +189,7 @@ class InteropV3 : public ::testing::Test {
   }
 
   // The pair the tests that want one reach for: the named user's, or SHA-256 over AES-128.
-  [[nodiscard]] Credentials defaultCredentials() const {
+  [[nodiscard]] Credentials singlePairCredentials() const {
     return m_named ? credentials(m_named->auth, m_named->priv) : credentials(sha256Row, aes128Row);
   }
 
@@ -217,14 +203,11 @@ class InteropV3 : public ::testing::Test {
 // Security Level, in the same pass.
 //
 // A named user is one user and so one pair, and the rest of the matrix is not its to answer: the
-// run covers what that user carries and says what it did not reach, rather than failing the
-// Target for users nobody claimed it had.
+// run covers what that user carries, rather than failing the Target for users nobody claimed it
+// had.
 TEST_F(InteropV3, CoversTheAuthAndPrivacyMatrix) {
   if (m_named) {
-    const auto label = pairLabel(m_named->auth, m_named->priv);
-    expectSysDescr(get(m_target, defaultCredentials()), label);
-    GTEST_LOG_(INFO) << "SNMPIO_INTEROP_V3_USER=" << m_named->name << " carries " << label
-                     << " and nothing else, so this run skipped: " << matrixPairsExcept(label);
+    expectSysDescr(get(m_target, singlePairCredentials()), pairLabel(m_named->auth, m_named->priv));
     return;
   }
   expectSysDescr(get(m_target, credentials(noAuthRow, noPrivRow)), "noAuthNoPriv");
@@ -268,7 +251,7 @@ TEST_F(InteropV3, DiscoveryCostsExtraRoundTripsOnlyOnce) {
   target.endpoint = relay.endpoint();
 
   Client client(io.get_executor());
-  const auto credentials = defaultCredentials();
+  const auto credentials = singlePairCredentials();
   int first = 0;
   int second = 0;
   net::ErrorCode firstEc;
@@ -326,13 +309,13 @@ TEST_F(InteropV3, SurfacesAWrongPasswordAsAReport) {
   // The named user at its own Security Level, since a Target that requires privacy of it would
   // refuse the request before ever checking the digest; the conventional path keeps the
   // authNoPriv user it has always used.
-  Credentials wrong = m_named ? defaultCredentials() : credentials(sha256Row, noPrivRow);
+  Credentials wrong = m_named ? singlePairCredentials() : credentials(sha256Row, noPrivRow);
   wrong.authPassword += "-and-then-some";
   const auto wrongResult = get(m_target, wrong);
   EXPECT_EQ(wrongResult.ec, make_error_code(Errc::AuthFailed))
       << "got " << wrongResult.ec.category().name() << ": " << wrongResult.ec.message();
 
-  Credentials nobody = m_named ? defaultCredentials() : credentials(sha256Row, noPrivRow);
+  Credentials nobody = wrong;  // the password is irrelevant to a user the Agent has not got
   nobody.userName = "nobody-by-that-name";
   const auto unknown = get(m_target, nobody);
   EXPECT_EQ(unknown.ec, make_error_code(Errc::UnknownUserName))

@@ -7,6 +7,11 @@
 # configuration is addressed the other way in -- SNMPIO_INTEROP_V3_USER names the one user it has,
 # and the matrix covers the pair that user serves.
 #
+# `netops-legacy` below is that second way in, made reachable without a switch on the bench: one
+# user whose name says nothing about what it carries, which is the whole of what a Target we did
+# not configure looks like. No run addresses it unless SNMPIO_INTEROP_V3_USER asks for it by name,
+# so the convention path over this Agent is the run it always was.
+#
 # The password arrives in the environment rather than in this file: one value configures the Agent
 # and drives the suite, so the two cannot drift.
 set -eu
@@ -19,6 +24,9 @@ sysDescr snmpio interop Agent
 
 createUser noauth
 rouser noauth noauth
+
+createUser netops-legacy SHA-256 "$SNMPIO_INTEROP_V3_PASSWORD" AES "$SNMPIO_INTEROP_V3_PASSWORD"
+rouser netops-legacy priv
 CONF
 
 # net-snmp's spelling on the left of each pair, ours on the right. SHA-1 is plain "SHA" to

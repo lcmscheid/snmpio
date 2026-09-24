@@ -11,6 +11,7 @@ if(NOT GTest_FOUND)
 endif()
 
 add_executable(snmpio_tests
+  InteropSummary.cpp
   TestBerReader.cpp
   TestBerRoundtrip.cpp
   TestBerWriter.cpp

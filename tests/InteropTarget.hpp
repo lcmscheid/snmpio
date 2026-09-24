@@ -13,7 +13,12 @@
 
 #include <snmpio/Client.hpp>
 #include <snmpio/Target.hpp>
+#include <snmpio/Value.hpp>
 #include <snmpio/detail/Net.hpp>
+
+#include <gtest/gtest.h>
+
+#include "InteropSummary.hpp"
 
 // Where the interop suite's Agent is, and the one GET every half of the suite is built on.
 //
@@ -63,16 +68,13 @@ inline const Oid sysDescr{1, 3, 6, 1, 2, 1, 1, 1, 0};
   return target;
 }
 
-// Runs one GET of sysDescr.0 to completion on its own io_context and Client, and hands back what
-// the completion saw. A Client per call on purpose: the caches are the Client's (ADR-0003), so a
-// fresh one is the only way to ask what an Engine costs the first time.
+// The one GET every half of the suite is built on, plus a sysDescr recording so that the run
+// summary can identify the Agent that answered.
 struct GetResult {
   net::ErrorCode ec;
   Response response;
 };
 
-// `auth` is a Community or a Credentials, which are two overloads rather than one type -- so the
-// half of the suite each belongs to says which, and this stays one helper.
 template <typename Auth>
 GetResult get(const Target& target, const Auth& auth) {
   net::IoContext io;
@@ -86,6 +88,33 @@ GetResult get(const Target& target, const Auth& auth) {
   });
   io.run();
   return result;
+}
+
+// Assert that `result` is a successful sysDescr.0 response, and record its OCTET STRING value as
+// the device/firmware identification for the run summary.
+inline void expectSysDescr(const GetResult& result, const std::string& what) {
+  ASSERT_FALSE(result.ec) << what << ": " << result.ec.category().name() << ": "
+                          << result.ec.message();
+  ASSERT_EQ(result.response.varbinds.size(), 1U) << what;
+  EXPECT_EQ(result.response.varbinds[0].name, sysDescr) << what;
+
+  const auto* const descr = std::get_if<Octets>(&result.response.varbinds[0].val);
+  ASSERT_NE(descr, nullptr) << what
+                            << ": sysDescr.0 came back as something other than an OCTET STRING";
+  EXPECT_FALSE(descr->empty());
+  recordSysDescr(std::string(reinterpret_cast<const char*>(descr->data()), descr->size()));
+}
+
+// Run one GET of sysDescr.0, record whether it succeeded for the run summary, and assert that it
+// brought back the OCTET STRING. The outcome is recorded even on failure, so the summary can say
+// which pairs passed and which did not. `auth` is a Community or a Credentials, which are two
+// overloads rather than one type -- so the half of the suite each belongs to says which, and this
+// stays one helper.
+template <typename Auth>
+void getAndRecord(const Target& target, const Auth& auth, const std::string& label) {
+  const auto result = get(target, auth);
+  recordPair(label, !result.ec, result.ec ? result.ec.message() : std::string());
+  expectSysDescr(result, label);
 }
 
 }  // namespace snmpio::test

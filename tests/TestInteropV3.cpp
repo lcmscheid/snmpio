@@ -11,6 +11,7 @@
 #include <snmpio/Client.hpp>
 
 #include "InteropRelay.hpp"
+#include "InteropSummary.hpp"
 #include "InteropTarget.hpp"
 
 namespace snmpio {
@@ -20,8 +21,9 @@ using test::CountingRelay;
 using test::envPort;
 using test::envVar;
 using test::get;
-using test::GetResult;
+using test::getAndRecord;
 using test::makeInteropTarget;
+using test::recordSkip;
 using test::sysDescr;
 
 // The users tests/interop/snmpd-conf.sh creates, named after what they carry: `noauth`, `authX`
@@ -117,11 +119,24 @@ struct NamedUser {
   PrivRow priv;
 };
 
-void expectSysDescr(const GetResult& result, const std::string& what) {
-  ASSERT_FALSE(result.ec) << what << ": " << result.ec.category().name() << ": "
-                          << result.ec.message();
-  ASSERT_EQ(result.response.varbinds.size(), 1U) << what;
-  EXPECT_EQ(result.response.varbinds[0].name, sysDescr) << what;
+// Record that every v3 matrix row was skipped for the same reason. Called from SetUp when the
+// Target is configured but the run did not name any v3 way in, and from the matrix test when the
+// run named a single user instead of the conventional fleet.
+void recordAllAuthAndPrivacySkipped(const std::string& reason) {
+  recordSkip("noAuthNoPriv", reason);
+  for (const auto& auth : authProtocols) {
+    recordSkip(pairLabel(auth, noPrivRow), reason);
+    for (const auto& priv : privProtocols) {
+      recordSkip(pairLabel(auth, priv), reason);
+    }
+  }
+}
+
+// Record that all four Key Extension rows were skipped for the same reason.
+void recordAllKeyExtensionsSkipped(const std::string& reason) {
+  for (const auto& priv : keyExtensionProtocols) {
+    recordSkip(pairLabel(sha1Row, priv), reason);
+  }
 }
 
 // The Target and the password every test here needs, or a skip -- plus, optionally, the one user
@@ -146,8 +161,14 @@ class InteropV3 : public ::testing::Test {
         << "SNMPIO_INTEROP_V3_AUTH/_PRIV say what SNMPIO_INTEROP_V3_USER carries, and no user "
            "was named";
     // Neither way in named. Only unset variables skip; from here on every one of them is set, and
-    // a set one that cannot be used fails instead.
+    // a set one that cannot be used fails instead. When the Target is configured but v3 is not,
+    // record the whole v3 matrix as skipped so the summary still lists every pair.
     if (!user && !password) {
+      const std::string reason =
+          "needs either SNMPIO_INTEROP_V3_PASSWORD for the conventional users or "
+          "SNMPIO_INTEROP_V3_USER for a named user";
+      recordAllAuthAndPrivacySkipped(reason);
+      recordAllKeyExtensionsSkipped(reason);
       GTEST_SKIP() << "needs either SNMPIO_INTEROP_V3_PASSWORD for the users our own configuration "
                       "creates or SNMPIO_INTEROP_V3_USER for one the Agent already had";
     }
@@ -207,14 +228,15 @@ class InteropV3 : public ::testing::Test {
 // had.
 TEST_F(InteropV3, CoversTheAuthAndPrivacyMatrix) {
   if (m_named) {
-    expectSysDescr(get(m_target, singlePairCredentials()), pairLabel(m_named->auth, m_named->priv));
+    getAndRecord(m_target, singlePairCredentials(), pairLabel(m_named->auth, m_named->priv));
+    recordAllAuthAndPrivacySkipped("run named one user: " + m_named->name);
     return;
   }
-  expectSysDescr(get(m_target, credentials(noAuthRow, noPrivRow)), "noAuthNoPriv");
+  getAndRecord(m_target, credentials(noAuthRow, noPrivRow), "noAuthNoPriv");
   for (const auto& auth : authProtocols) {
-    expectSysDescr(get(m_target, credentials(auth, noPrivRow)), pairLabel(auth, noPrivRow));
+    getAndRecord(m_target, credentials(auth, noPrivRow), pairLabel(auth, noPrivRow));
     for (const auto& priv : privProtocols) {
-      expectSysDescr(get(m_target, credentials(auth, priv)), pairLabel(auth, priv));
+      getAndRecord(m_target, credentials(auth, priv), pairLabel(auth, priv));
     }
   }
 }
@@ -231,14 +253,20 @@ TEST_F(InteropV3, CoversTheAuthAndPrivacyMatrix) {
 // scheme being implemented at all.
 TEST_F(InteropV3, CoversBothKeyExtensions) {
   if (m_named) {
-    GTEST_SKIP() << "needs the four privsha1aes192/256(c) users, and this run named one user: "
-                 << m_named->name << " carrying " << pairLabel(m_named->auth, m_named->priv);
+    const std::string reason =
+        "needs the four privsha1aes192/256(c) users, and this run named one user: " +
+        m_named->name + " carrying " + pairLabel(m_named->auth, m_named->priv);
+    recordAllKeyExtensionsSkipped(reason);
+    GTEST_SKIP() << reason;
   }
   if (!envVar("SNMPIO_INTEROP_V3_KEY_EXTENSIONS")) {
-    GTEST_SKIP() << "needs SNMPIO_INTEROP_V3_KEY_EXTENSIONS and an Agent serving AES-192/256";
+    const std::string reason =
+        "needs SNMPIO_INTEROP_V3_KEY_EXTENSIONS and an Agent serving AES-192/256";
+    recordAllKeyExtensionsSkipped(reason);
+    GTEST_SKIP() << reason;
   }
   for (const auto& priv : keyExtensionProtocols) {
-    expectSysDescr(get(m_target, credentials(sha1Row, priv)), pairLabel(sha1Row, priv));
+    getAndRecord(m_target, credentials(sha1Row, priv), pairLabel(sha1Row, priv));
   }
 }
 

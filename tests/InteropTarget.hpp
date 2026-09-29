@@ -23,9 +23,10 @@
 // Where the interop suite's Agent is, and the one GET every half of the suite is built on.
 //
 // The Target comes from the environment rather than from a fixture constant because the Agent is
-// not ours -- it is a container CI starts, an `snmpd` on a workstation, or a switch on the bench,
-// and only whoever runs the suite knows which. With nothing set, every interop test skips: an
-// unconfigured checkout must not fail its test run over a Target that was never there.
+// not ours -- a container tests/interop/start-agent.sh starts, in CI or on a workstation, or a
+// switch on the bench -- and only whoever runs the suite knows which. With nothing set, every
+// interop test skips: an unconfigured checkout must not fail its test run over a Target that was
+// never there.
 namespace snmpio::test {
 
 inline const Oid sysDescr{1, 3, 6, 1, 2, 1, 1, 1, 0};

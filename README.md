@@ -81,7 +81,7 @@ Three things the compiler will not tell you:
 - **A Target is an address, not a hostname.** Choosing a resolver stays the caller's business
   (`CONTEXT.md`), so nothing here will quietly resolve one for you.
 
-To build and run them against the `snmpd` two sections down:
+To build and run them against the `snmpd` the [interop script](#interop-tests) starts:
 
 ```sh
 cmake --install build/default --prefix /tmp/prefix
@@ -238,13 +238,31 @@ socket. There is no Agent in a bare checkout, so those tests **skip** unless a T
 `-R Interop` selects exactly them, and every one of them needs an Agent — so a run filtered to
 `Interop` that reports all green really did reach one.
 
+One command starts any of CI's three Agents in a container — `snmpd`, `simulator` or
+`simulator-release` — on `127.0.0.1:16161`, waits until it answers, and prints the environment the
+suite needs for it. It is the command CI's interop jobs run, so a failure there reproduces here.
+It needs a `docker` on Linux (Podman's `docker` shim will do) and nothing else — the `snmpd`
+readiness check uses host networking, which Docker Desktop does not give. `snmpd` is built from a
+pinned Ubuntu image rather than taken from the workstation, whose `snmpd` is not CI's.
+
 ```sh
-export SNMPIO_INTEROP_TARGET=127.0.0.1
-export SNMPIO_INTEROP_PORT=16161                  # omit for 161
-export SNMPIO_INTEROP_V3_PASSWORD=snmpio-interop  # 8+ characters; omit to skip the v3 half
-export SNMPIO_INTEROP_V3_KEY_EXTENSIONS=1         # omit if the Agent lacks AES-192/256
-export SNMPIO_INTEROP_FAULTS=8080                 # the Simulator only; omit against any other Agent
+tests/interop/start-agent.sh snmpd > /tmp/snmpio-interop.env \
+  && export $(cat /tmp/snmpio-interop.env)        # bash, zsh and fish alike
 ctest --preset default -R Interop --output-on-failure
+docker rm -f snmpio-interop                       # when done; the next start replaces it anyway
+```
+
+What it prints, for `snmpd`, is what the harness reads — and what to set by hand against an Agent
+the script did not start:
+
+```sh
+SNMPIO_INTEROP_TARGET=127.0.0.1
+SNMPIO_INTEROP_PORT=16161                  # omit for 161
+SNMPIO_INTEROP_V3_PASSWORD=snmpio-interop  # 8+ characters; omit to skip the v3 half
+SNMPIO_INTEROP_V3_USM_REPORTS=1            # the capability flags, below; empty is unset
+SNMPIO_INTEROP_V3_KEY_EXTENSIONS=1
+SNMPIO_INTEROP_FAULTS=                     # the Simulators' control UI port
+SNMPIO_INTEROP_FAULTS_ENGINE_ID=
 ```
 
 `SNMPIO_INTEROP_TARGET` is the address the Agent answers at and `SNMPIO_INTEROP_PORT` the port,
@@ -253,13 +271,13 @@ gates the v3 tests: the Agent has to be running the configuration
 [`tests/interop/snmpd-conf.sh`](tests/interop/snmpd-conf.sh) or
 [`tests/interop/fault-agent-auth.sh`](tests/interop/fault-agent-auth.sh) prints, and a switch on
 the bench is not, so an unset variable skips rather than fails. One value configures the Agent and
-drives the suite, which is why it is not written down twice.
+drives the suite, which is why it is not written down twice: the script takes it from
+`SNMPIO_INTEROP_V3_PASSWORD` if that is set, and uses `snmpio-interop` if not.
 
 ### Two ways in
 
 The above is the first: the Agent is **ours to configure**, so the tests know the users by name and
-walk the whole matrix. It is what CI's three Agents run, and what an `snmpd` or Simulator started
-from the commands below runs.
+walk the whole matrix. It is what CI's three Agents run, and what the script starts.
 
 The second is for an Agent that is **not** ours — a switch on the bench, whose users and Community
 someone chose years ago and will not be changing for us. Name the one user it has and what that
@@ -301,14 +319,15 @@ them to describe.
 One password, used as both the authentication and the privacy secret. A Target whose user carries
 two different ones cannot be addressed this way yet.
 
-Verifying this way in needs no hardware. The `snmpd` below also carries `netops-legacy`, a user
+Verifying this way in needs no hardware. The script's `snmpd` also carries `netops-legacy`, a user
 deliberately named after nothing it holds, and `netops-ro`, a Community other than `public`. That
 is what a Target somebody else configured looks like:
 
 ```sh
-export SNMPIO_INTEROP_TARGET=127.0.0.1 SNMPIO_INTEROP_PORT=16161 SNMPIO_INTEROP_COMMUNITY=netops-ro
-export SNMPIO_INTEROP_V3_USER=netops-legacy SNMPIO_INTEROP_V3_AUTH=sha256
-export SNMPIO_INTEROP_V3_PRIV=aes SNMPIO_INTEROP_V3_PASSWORD=snmpio-interop
+tests/interop/start-agent.sh snmpd > /tmp/snmpio-interop.env \
+  && export $(cat /tmp/snmpio-interop.env)
+export SNMPIO_INTEROP_COMMUNITY=netops-ro SNMPIO_INTEROP_V3_USER=netops-legacy
+export SNMPIO_INTEROP_V3_AUTH=sha256 SNMPIO_INTEROP_V3_PRIV=aes
 ctest --preset default -R 'Interop(V2c|V3)' --output-on-failure
 ```
 
@@ -324,8 +343,9 @@ suite; only an unset one skips it, since a typo that skipped would report green 
 never reached.
 
 Two more variables say what the Agent at that Target can do, and each gates the tests that would
-otherwise be asserting on the Agent rather than on this library. Both are set by whoever starts the
-Agent, because nothing on the wire announces either:
+otherwise be asserting on the Agent rather than on this library. Each is set by whoever starts the
+Agent, because nothing on the wire announces it — for CI's three, that is the script, which is the
+one place their flags are said:
 
 | Variable | Set it when the Agent |
 |---|---|
@@ -340,42 +360,33 @@ carries, while this library **requires** it explicitly, and that divergence is d
 sides — a Client that silently downgraded `authPriv` would have a security hole, where a test Agent
 that accepts what arrives is merely convenient (ADR-0006).
 
-An `snmpd` on a spare port is two commands:
+Every Agent the script starts is pinned, so a commit is tested against the same Agents on every
+run of it. `snmpd` is Ubuntu 24.04's own package, built by
+[`tests/interop/snmpd.Dockerfile`](tests/interop/snmpd.Dockerfile) from a base pinned by digest and
+an archive pinned by snapshot. The [Simulator](https://github.com/lcmscheid/snmp-fault-agent) images
+are pinned by digest in the script, so a push to the Simulator's own repo cannot change what a
+commit was tested against. Moving any pin is a commit.
 
-```sh
-mkdir -p /tmp/snmp-persist
-tests/interop/snmpd-conf.sh > /tmp/snmpd.conf
-snmpd -f -Lo -C -c /tmp/snmpd.conf --persistentDir=/tmp/snmp-persist udp:127.0.0.1:16161
-```
+There are two Simulator images, and the older one is not redundant. `0.1.0` runs the
+authoritative-side timeliness check and answers a request whose boots/time it disagrees with by
+sending the usmStats Report, which is what a compliant Agent does; the earlier `sha-b300f60` stamps
+its own pair into an ordinary Response instead. Only that second shape reaches the Command
+Generator's own timeliness comparison — a Response of exactly that kind is what caught this Client
+reading RFC 3414 section 3.2 step 7a where 7b applies, and against the release image the same bug
+passes in silence. The release is pinned because it is what anyone else will run; the older image
+because it is the only Agent that makes the comparison observable at all.
 
-The [Simulator](https://github.com/lcmscheid/snmp-fault-agent) is one. `latest` is the tag to run
-here; CI names images by digest instead, so a push to the Simulator's own repo cannot change what a
-commit was tested against between two runs of it:
-
-```sh
-tests/interop/fault-agent-auth.sh > /tmp/auth.json
-docker run --rm -p 127.0.0.1:16161:1161/udp -p 127.0.0.1:8080:8080 \
-  -v /tmp/auth.json:/etc/snmpfault/auth.json:ro ghcr.io/lcmscheid/snmp-fault-agent:latest
-```
-
-CI pins two of them, and the older one is not redundant. `0.1.0` runs the authoritative-side
-timeliness check and answers a request whose boots/time it disagrees with by sending the
-usmStats Report, which is what a compliant Agent does; the earlier `sha-b300f60` stamps its own
-pair into an ordinary Response instead. Only that second shape reaches the Command Generator's own
-timeliness comparison — a Response of exactly that kind is what caught this Client reading RFC 3414
-section 3.2 step 7a where 7b applies, and against the release image the same bug passes in silence.
-The release is pinned because it is what anyone else will run; the older image because it is the
-only Agent that makes the comparison observable at all.
-
-The v3 users are a convention those two scripts and the tests share — `noauth`, `auth<hash>` per
+The v3 users are a convention the tests share with the two configuration generators the script runs,
+[`snmpd-conf.sh`](tests/interop/snmpd-conf.sh) and
+[`fault-agent-auth.sh`](tests/interop/fault-agent-auth.sh) — `noauth`, `auth<hash>` per
 authentication protocol, and `priv<hash><cipher>` per pair — because they are ours to create; the
 Simulator's own example configuration names them otherwise, which is why ours is mounted over it.
 The matrix is MD5, SHA-1 and the four SHA-2 hashes, each of them alone at `authNoPriv` and again
 over DES and AES-128 at `authPriv`. AES-192/256 under both Key Extensions are four more users, and
-both Agents carry them, so each scheme is read on every commit by an implementation that is not
-ours as well as by the Simulator, which is. The `snmpd` Debian, Ubuntu and Arch ship speaks all
-four (ADR-0006 records which versions). One built without net-snmp's `--enable-blumenthal-aes`
-does not, and fails those four rather than skipping them, so leave
+both Agents carry them, so each scheme is read on every commit by an implementation that is not ours
+as well as by the Simulator, which is. The `snmpd` Debian, Ubuntu and Arch ship — the script's
+included — speaks all four (ADR-0006 records which versions). One built without net-snmp's
+`--enable-blumenthal-aes` does not, and fails those four rather than skipping them, so leave
 `SNMPIO_INTEROP_V3_KEY_EXTENSIONS` unset against it. All four are paired with SHA-1 on purpose, for
 the reason `CoversBothKeyExtensions` in [`tests/TestInteropV3.cpp`](tests/TestInteropV3.cpp) gives.
 

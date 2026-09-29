@@ -16,13 +16,17 @@
 #
 # The password arrives in the environment rather than in this file: one value configures the Agent
 # and drives the suite, so the two cannot drift.
+#
+# The Communities answer any source. This Agent runs in a container (tests/interop/start-agent.sh),
+# where a request through the published port arrives from the runtime's gateway rather than from
+# 127.0.0.1 -- and the port is published on the loopback alone, which is the restriction.
 set -eu
 
 : "${SNMPIO_INTEROP_V3_PASSWORD:?set it to the password every interop user gets (8+ characters)}"
 
 cat <<CONF
-rocommunity public 127.0.0.1
-rocommunity netops-ro 127.0.0.1
+rocommunity public
+rocommunity netops-ro
 sysDescr snmpio interop Agent
 
 createUser noauth

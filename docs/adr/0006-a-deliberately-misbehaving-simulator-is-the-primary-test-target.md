@@ -44,12 +44,16 @@ vendor protocol range; its 3DES waits on the library, which no stage yet carries
 
 ## Amendment, 2026-09-29: `snmpd` reads both Key Extensions too
 
-The README and CI carried a premise that net-snmp needs a build flag Debian does not carry, and it
-was wrong. Debian has built net-snmp with `--enable-blumenthal-aes` since `5.9.1+dfsg-1`, and the
-one flag enables both Blumenthal (`AES192`, `AES256`) and Reeder (`AES192C`, `AES256C`). The stock
-`snmpd` that CI already runs speaks all four; the users were simply never created.
+The README, CI and the v3 interop suite's comments carried a premise that net-snmp needs a build
+flag Debian does not carry, and it was wrong. Debian has built net-snmp with
+`--enable-blumenthal-aes` since `5.9.1+dfsg-1`, Arch's `5.9.5.2` PKGBUILD passes the same flag,
+and the one flag enables both Blumenthal (`AES192`, `AES256`) and Reeder (`AES192C`, `AES256C`).
+The stock Ubuntu 24.04 `snmpd` (`5.9.4`) that CI already runs speaks all four; the users were
+simply never created.
 
 So both Key Extensions are now checked per commit against an implementation that is not ours as
-well as against the Simulator, which is. That settles whether an independent open-source reading
+well as against the simulator, which is. That settles whether an independent open-source reading
 agrees with ours. It does not settle whether a vendor's does, so Cisco's row stands for the same
-reason as before, and the Simulator stays the primary Target for the reason this ADR opens with.
+reason as before, iLO 6's stands for the widest vendor protocol range even though `snmpd` now reads
+all of that range but 3DES, and the simulator stays the primary target for the reason this ADR
+opens with.

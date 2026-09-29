@@ -33,3 +33,9 @@ On sequencing: our own production use is SNMPv3 authPriv with **AES-128**, which
 Extension at all. The Blumenthal/Reeder split is therefore a correctness requirement for other
 users' Cisco gear, not a blocker for ours, and it stays in its planned late stage rather than being
 pulled forward.
+
+## Amendment, 2026-09-29: `snmpd` exercises both Key Extensions too
+
+The Consequences above name only the Simulator. Both schemes are exercised in CI against the stock
+`snmpd` as well, which spoke both all along; ADR-0006's second amendment records why that was
+missed.

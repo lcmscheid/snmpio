@@ -98,9 +98,9 @@ jobs:
   # The only jobs that send a real datagram to an Agent nobody here wrote. Everything else in this
   # workflow talks to the Scripted Agent, which shares our own reading of the protocol, so a
   # misreading of RFC 3416 would pass every other job here. Agents that disagree with us are better
-  # evidence than one that agrees: `snmpd` unprivileged on a high port, and our own Simulator. Both
-  # speak AES-192/256 under either Key Extension scheme, so each scheme is read by an implementation
-  # that is not ours as well as by one that is (ADR-0006).
+  # evidence than one that agrees: `snmpd` unprivileged on a high port, and two images of our own
+  # Simulator. All three speak AES-192/256 under either Key Extension scheme, so each scheme is read
+  # by an implementation that is not ours as well as by one that is (ADR-0006).
   #
   # It runs compliant against all of them, and then -- against the Simulators alone -- misbehaving:
   # the boots/time comparison, the Walk's two guards and the decoder's refusal of malformed input
@@ -121,8 +121,8 @@ jobs:
     # announces either. Empty reads as unset (tests/InteropTarget.hpp), so each Agent is asked only
     # what it can answer: every Agent here speaks AES-192/256 under both Key Extensions, and only
     # `snmpd` answers a bad digest with the usmStats Report RFC 3414 leaves optional. The Key
-    # Extension flag no longer tells these rows apart, but it stays: it says what an Agent is, and
-    # a Target outside CI may not be one.
+    # Extension flag does not tell these rows apart, but it is set on each: it says what an Agent
+    # is, and a Target outside CI may not be one.
     strategy:
       fail-fast: false
       matrix:

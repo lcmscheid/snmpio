@@ -49,12 +49,12 @@ done
 
 # The Key Extension users, named and paired exactly as tests/interop/fault-agent-auth.sh names the
 # Simulator's: SHA-1 for all four, for the reason tests/TestInteropV3.cpp's CoversBothKeyExtensions
-# states. Debian's net-snmp speaks both schemes (ADR-0006), under the same `C` suffix for Reeder.
-for pair in aes192:AES192 aes256:AES256 aes192c:AES192C aes256c:AES256C; do
-  ours=${pair%:*}
-  netsnmp=${pair#*:}
+# states. The stock snmpd speaks all four (ADR-0006), spelled as the Simulator spells them, so ours
+# is net-snmp's spelling in lower case and there is no pair to write down.
+for netsnmp in AES192 AES256 AES192C AES256C; do
+  ours=$(printf %s "$netsnmp" | tr '[:upper:]' '[:lower:]')
   cat <<CONF
-createUser privsha1$ours SHA "$SNMPIO_INTEROP_V3_PASSWORD" $netsnmp "$SNMPIO_INTEROP_V3_PASSWORD"
-rouser privsha1$ours priv
+createUser privsha1${ours} SHA "$SNMPIO_INTEROP_V3_PASSWORD" $netsnmp "$SNMPIO_INTEROP_V3_PASSWORD"
+rouser privsha1${ours} priv
 CONF
 done

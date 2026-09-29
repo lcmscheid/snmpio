@@ -26,17 +26,18 @@ printf '{\n  "community": "public",\n  "users": [\n    {"username": "noauth"}'
 
 # The Simulator's spelling on the left of each pair, ours on the right.
 for pair in MD5:md5 SHA:sha1 SHA224:sha224 SHA256:sha256 SHA384:sha384 SHA512:sha512; do
-  netsnmp=${pair%:*}
+  theirs=${pair%:*}
   ours=${pair#*:}
-  user "auth$ours" "$netsnmp"
-  user "priv${ours}des" "$netsnmp" DES
-  user "priv${ours}aes" "$netsnmp" AES
+  user "auth$ours" "$theirs"
+  user "priv${ours}des" "$theirs" DES
+  user "priv${ours}aes" "$theirs" AES
 done
 
 # The Key Extension users. SHA-1 for all four, for the reason tests/TestInteropV3.cpp's
-# CoversBothKeyExtensions states.
-for pair in aes192:AES192 aes256:AES256 aes192c:AES192C aes256c:AES256C; do
-  user "privsha1${pair%:*}" SHA "${pair#*:}"
+# CoversBothKeyExtensions states. Ours is the Simulator's spelling in lower case.
+for theirs in AES192 AES256 AES192C AES256C; do
+  ours=$(printf %s "$theirs" | tr '[:upper:]' '[:lower:]')
+  user "privsha1${ours}" SHA "$theirs"
 done
 
 printf '\n  ]\n}\n'

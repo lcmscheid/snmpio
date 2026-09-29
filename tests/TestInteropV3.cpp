@@ -41,9 +41,8 @@ constexpr std::array<AuthRow, 6> authProtocols{{{AuthProtocol::Md5, "md5"},
                                                 {AuthProtocol::Sha384, "sha384"},
                                                 {AuthProtocol::Sha512, "sha512"}}};
 
-// What `snmpd` speaks. AES-192/256 under either Key Extension are not in it -- net-snmp needs a
-// build flag for them and Debian's does not carry it -- so they are the Simulator's job
-// (ADR-0006).
+// The privacy protocols the matrix crosses with every auth protocol. AES-192/256 are not in it:
+// they need a Key Extension, and they have their own test below.
 struct PrivRow {
   PrivProtocol protocol;
   const char* name;
@@ -51,7 +50,7 @@ struct PrivRow {
 constexpr std::array<PrivRow, 2> privProtocols{
     {{PrivProtocol::Des, "des"}, {PrivProtocol::Aes128, "aes"}}};
 
-// What the Simulator adds, and the reason it is in CI at all (ADR-0006).
+// AES-192/256 under both Key Extensions, which both `snmpd` and the Simulator serve (ADR-0006).
 constexpr std::array<PrivRow, 4> keyExtensionProtocols{{{PrivProtocol::Aes192, "aes192"},
                                                         {PrivProtocol::Aes256, "aes256"},
                                                         {PrivProtocol::Aes192C, "aes192c"},
@@ -241,10 +240,10 @@ TEST_F(InteropV3, CoversTheAuthAndPrivacyMatrix) {
   }
 }
 
-// Both Key Extension schemes, against the one Agent in CI that speaks either. Blumenthal and
-// Reeder are mutually incompatible, so a Client that guessed instead of choosing fails half of
-// these -- which is the whole point of running them on every commit rather than at pre-release
-// against a borrowed switch (ADR-0006).
+// Both Key Extension schemes, against every Agent in CI -- `snmpd`, whose reading of each is not
+// ours, and the Simulator, whose is. Blumenthal and Reeder are mutually incompatible, so a Client
+// that guessed instead of choosing fails half of these -- which is the whole point of running them
+// on every commit rather than at pre-release against a borrowed switch (ADR-0006).
 //
 // SHA-1 for all four, and not arbitrarily: both schemes derive `localizedKey || extension` and
 // truncate to the cipher's key length, so an auth hash already as long as the key discards the

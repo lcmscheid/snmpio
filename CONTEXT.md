@@ -106,10 +106,10 @@ _Avoid_: nonce, IV — the IV is derived from this, and is not this.
 The scheme used to stretch a Localized Key when the privacy protocol needs more key material than the
 hash produces — either **Blumenthal** or **Reeder**. Neither is standardised, the two are mutually
 incompatible, and Targets differ in which they expect, so it is always chosen explicitly and never
-guessed. Both schemes are exercised in CI against the Simulator. AES-128 uses no Key Extension at
-all, so the distinction only arises at 192 and 256 bits. Reeder is spelled with a **`C` suffix**
-(`AES192C`, `AES256C`) — the convention net-snmp, gosnmp and the Simulator all independently settled
-on; we follow it rather than invent a fourth spelling.
+guessed. Both schemes are exercised in CI against `snmpd` and the Simulator. AES-128 uses no Key
+Extension at all, so the distinction only arises at 192 and 256 bits. Reeder is spelled with a
+**`C` suffix** (`AES192C`, `AES256C`) — the convention net-snmp, gosnmp and the Simulator all
+independently settled on; we follow it rather than invent a fourth spelling.
 _Avoid_: key expansion, key stretching, "Cisco AES" as a protocol name
 
 ### Errors

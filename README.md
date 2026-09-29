@@ -242,6 +242,7 @@ socket. There is no Agent in a bare checkout, so those tests **skip** unless a T
 export SNMPIO_INTEROP_TARGET=127.0.0.1
 export SNMPIO_INTEROP_PORT=16161                  # omit for 161
 export SNMPIO_INTEROP_V3_PASSWORD=snmpio-interop  # 8+ characters; omit to skip the v3 half
+export SNMPIO_INTEROP_V3_KEY_EXTENSIONS=1         # snmpd or the Simulator, both from the scripts below
 export SNMPIO_INTEROP_FAULTS=8080                 # the Simulator only; omit against any other Agent
 ctest --preset default -R Interop --output-on-failure
 ```
@@ -369,13 +370,14 @@ only Agent that makes the comparison observable at all.
 The v3 users are a convention those two scripts and the tests share — `noauth`, `auth<hash>` per
 authentication protocol, and `priv<hash><cipher>` per pair — because they are ours to create; the
 Simulator's own example configuration names them otherwise, which is why ours is mounted over it.
-The matrix is everything `snmpd` speaks: MD5, SHA-1 and the four SHA-2 hashes, each of them alone
-at `authNoPriv` and again over DES and AES-128 at `authPriv`. AES-192/256 under either Key
-Extension are not in `snmpd` at all — net-snmp needs a build flag for them that Debian does not
-carry — so those four are the Simulator's, paired with SHA-1 on purpose: both schemes derive
-`localizedKey || extension` and truncate to the cipher's key length, so an auth hash already as
-long as the key discards the extension and Blumenthal and Reeder come out byte-identical
-(ADR-0006).
+The matrix is MD5, SHA-1 and the four SHA-2 hashes, each of them alone at `authNoPriv` and again
+over DES and AES-128 at `authPriv`. AES-192/256 under both Key Extensions are four more users, and
+both Agents carry them: Debian has built net-snmp with `--enable-blumenthal-aes` since
+`5.9.1+dfsg-1`, and that one flag enables Blumenthal and Reeder together. So each scheme is read on
+every commit by an implementation that is not ours as well as by the Simulator, which is (ADR-0006).
+All four are paired with SHA-1 on purpose: both schemes derive `localizedKey || extension` and
+truncate to the cipher's key length, so an auth hash already as long as the key discards the
+extension and Blumenthal and Reeder come out byte-identical.
 
 What the suite proves: a v2c GET of `sysDescr.0`, which it prints because no two Agents say the
 same thing; the eighteen v3 pairs above and the four Key Extension ones; that Engine Discovery
@@ -421,7 +423,7 @@ have none (its 2026-09-29 amendment).
 
 | Row | Gap it closes | Device and firmware | Protocols exercised | Last run |
 |---|---|---|---|---|
-| Cisco switch | Reeder (`aes192c`/`aes256c`) against an Engine we did not write. The Simulator catches a regression in the Reeder path on every commit, but the Simulator is also ours. It shares our reading of an expired draft, so agreeing with it proves consistency, not interop | — | — | — |
+| Cisco switch | Reeder (`aes192c`/`aes256c`) against a vendor's Engine. `snmpd` and the Simulator both check the Reeder path on every commit, and `snmpd`'s reading of the expired draft is independent of ours, but neither is the reading the vendors who actually ship Reeder made | — | — | — |
 | HPE iLO 6 | The widest protocol range of any vendor Agent on the bench, SHA-2 and AES-192/256 included, against an Engine that is neither `snmpd` nor ours. Its 3DES has to wait, because the library does not speak 3DES and no stage carries it yet | — | — | — |
 
 A dash means the run has not happened. Nothing goes into a row that a run did not print. **Device

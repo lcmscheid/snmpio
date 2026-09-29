@@ -98,9 +98,9 @@ jobs:
   # The only jobs that send a real datagram to an Agent nobody here wrote. Everything else in this
   # workflow talks to the Scripted Agent, which shares our own reading of the protocol, so a
   # misreading of RFC 3416 would pass every other job here. Agents that disagree with us are better
-  # evidence than one that agrees: `snmpd` unprivileged on a high port, and our own Simulator, which
-  # is the only Agent in CI that speaks AES-192/256 under either Key Extension scheme (ADR-0006) --
-  # net-snmp needs a build flag for them that Debian does not carry.
+  # evidence than one that agrees: `snmpd` unprivileged on a high port, and our own Simulator. Both
+  # speak AES-192/256 under either Key Extension scheme, so each scheme is read by an implementation
+  # that is not ours as well as by one that is (ADR-0006).
   #
   # It runs compliant against all of them, and then -- against the Simulators alone -- misbehaving:
   # the boots/time comparison, the Walk's two guards and the decoder's refusal of malformed input
@@ -119,8 +119,10 @@ jobs:
     runs-on: ubuntu-24.04
     # The capability flags say what each Agent is, not what it should be, since nothing on the wire
     # announces either. Empty reads as unset (tests/InteropTarget.hpp), so each Agent is asked only
-    # what it can answer: `snmpd` answers a bad digest with the usmStats Report RFC 3414 leaves
-    # optional and speaks no AES-192/256; the Simulator is the other way round.
+    # what it can answer: every Agent here speaks AES-192/256 under both Key Extensions, and only
+    # `snmpd` answers a bad digest with the usmStats Report RFC 3414 leaves optional. The Key
+    # Extension flag no longer tells these rows apart, but it stays: it says what an Agent is, and
+    # a Target outside CI may not be one.
     strategy:
       fail-fast: false
       matrix:
@@ -128,6 +130,7 @@ jobs:
           - agent: snmpd
             apt: snmpd
             usmReports: '1'
+            keyExtensions: '1'
           # Pinned by digest rather than by tag, so a push to the Simulator's own repo cannot
           # change what this library was tested against between two runs of the same commit.
           # Moving a pin is a commit here, which is where a Simulator change that breaks us

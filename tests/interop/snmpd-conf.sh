@@ -2,10 +2,11 @@
 # Prints the snmpd configuration the interop suite expects, to stdout.
 #
 # The v3 users are a convention shared with tests/TestInteropV3.cpp: one per auth protocol at
-# authNoPriv, and one per (auth, privacy) pair at authPriv, named after what they carry. They are
-# ours to create, which is why the suite can name them. An Agent running someone else's
-# configuration is addressed the other way in -- SNMPIO_INTEROP_V3_USER names the one user it has,
-# and the matrix covers the pair that user serves.
+# authNoPriv, one per (auth, privacy) pair at authPriv, and the four Key Extension users, all
+# named after what they carry. They are ours to create, which is why the suite can name them. An
+# Agent running someone else's configuration is addressed the other way in --
+# SNMPIO_INTEROP_V3_USER names the one user it has, and the matrix covers the pair that user
+# serves.
 #
 # `netops-legacy` below is that second way in, made reachable without a switch on the bench: one
 # user whose name says nothing about what it carries, which is what a Target we did not configure
@@ -43,5 +44,17 @@ createUser priv${ours}des $netsnmp "$SNMPIO_INTEROP_V3_PASSWORD" DES "$SNMPIO_IN
 rouser priv${ours}des priv
 createUser priv${ours}aes $netsnmp "$SNMPIO_INTEROP_V3_PASSWORD" AES "$SNMPIO_INTEROP_V3_PASSWORD"
 rouser priv${ours}aes priv
+CONF
+done
+
+# The Key Extension users, named and paired exactly as tests/interop/fault-agent-auth.sh names the
+# Simulator's: SHA-1 for all four, for the reason tests/TestInteropV3.cpp's CoversBothKeyExtensions
+# states. Debian's net-snmp speaks both schemes (ADR-0006), under the same `C` suffix for Reeder.
+for pair in aes192:AES192 aes256:AES256 aes192c:AES192C aes256c:AES256C; do
+  ours=${pair%:*}
+  netsnmp=${pair#*:}
+  cat <<CONF
+createUser privsha1$ours SHA "$SNMPIO_INTEROP_V3_PASSWORD" $netsnmp "$SNMPIO_INTEROP_V3_PASSWORD"
+rouser privsha1$ours priv
 CONF
 done

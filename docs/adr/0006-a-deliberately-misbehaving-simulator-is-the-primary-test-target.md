@@ -41,3 +41,15 @@ A device earns a row only by closing a gap the automated matrix leaves, since a 
 none is one nobody re-runs. iLO 5 and Meinberg NTP servers were named in the fleet above without a
 gap assigned, so the README checklist carries no row for either. iLO 6 keeps its row for the widest
 vendor protocol range; its 3DES waits on the library, which no stage yet carries (ADR-0005).
+
+## Amendment, 2026-09-29: `snmpd` reads both Key Extensions too
+
+The README and CI carried a premise that net-snmp needs a build flag Debian does not carry, and it
+was wrong. Debian has built net-snmp with `--enable-blumenthal-aes` since `5.9.1+dfsg-1`, and the
+one flag enables both Blumenthal (`AES192`, `AES256`) and Reeder (`AES192C`, `AES256C`). The stock
+`snmpd` that CI already runs speaks all four; the users were simply never created.
+
+So both Key Extensions are now checked per commit against an implementation that is not ours as
+well as against the Simulator, which is. That settles whether an independent open-source reading
+agrees with ours. It does not settle whether a vendor's does, so Cisco's row stands for the same
+reason as before, and the Simulator stays the primary Target for the reason this ADR opens with.

@@ -273,6 +273,10 @@ export SNMPIO_INTEROP_V3_PASSWORD=bench-secret-123 # both secrets; omit only at 
 ctest --preset default -R Interop --output-on-failure
 ```
 
+That answers whether the run passed. To record it in the
+[pre-release checklist](#pre-release-hardware-checklist), run the test binary instead, as that
+section shows, because `ctest` splits the run summary into pieces.
+
 One user is enough to be useful, because a Target typically has exactly one. The matrix test then
 covers the single pair that user can serve, and the Key Extension test skips, since it needs four
 users of its own. The other two v3 tests in that file — Engine Discovery and the wrong-password Report — run against the named
@@ -395,6 +399,73 @@ error would let anyone able to send this Client one junk datagram end a request 
 
 Each case has a counterpart against the Scripted Agent, for the reason
 [`tests/TestInteropFaults.cpp`](tests/TestInteropFaults.cpp) opens with.
+
+## Pre-release hardware checklist
+
+**CI does not run this, and never will.** Everything under [Interop tests](#interop-tests) runs on
+every push against three Agents CI starts for itself. The rows below are real equipment on a bench,
+run by hand before a release. A row's date is the last time someone did that; the library has not
+been checked against that hardware since then.
+
+Each row is there because the automated matrix leaves a gap that only that equipment can close.
+ADR-0006 assigns those gaps. Hardware that would close no gap gets no row, because nobody would ever
+re-run it. ADR-0006 also lists iLO 5 and Meinberg NTP servers as part of the fleet, but it assigns
+neither of them a gap. They are left out until someone can say what they would prove.
+
+| Row | Gap it closes | Device and firmware | Protocols exercised | Last run |
+|---|---|---|---|---|
+| Cisco switch | Reeder (`aes192c`/`aes256c`) against an Engine we did not write. The Simulator catches a regression in the Reeder path on every commit, but the Simulator is also ours. It shares our reading of an expired draft, so agreeing with it proves consistency, not interop. ADR-0006 assigns the independent check to Cisco | — | — | — |
+| HPE iLO 6 | The widest protocol range of any vendor Agent on the bench, SHA-2 and AES-192/256 included, against an Engine that is neither `snmpd` nor ours. Its 3DES has to wait, because the library does not speak 3DES and no stage carries it yet | — | — | — |
+
+A dash means the run has not happened. Nothing goes into a row that a run did not print. **Device
+and firmware** is whatever `sysDescr.0` says, verbatim. If a vendor leaves the firmware version out
+of it, the row leaves it out too, rather than adding it from memory.
+
+### Running it against a switch
+
+A switch on the bench carries users someone else named, so it is always addressed the
+[second way in](#two-ways-to-name-a-v3-user): name the one user and the protocols it carries. Do not
+set up the `noauth`/`auth<hash>`/`priv<hash><cipher>` convention that CI's Agents use.
+
+Of the [capability variables](#everything-else-the-harness-reads), leave `SNMPIO_INTEROP_FAULTS` and
+`_FAULTS_ENGINE_ID` unset, because a correct Agent cannot misbehave on request. Set
+`SNMPIO_INTEROP_V3_USM_REPORTS` only if the Target answers a bad digest with a usmStats Report. That
+Report is optional behaviour RFC 3414 allows a correct Agent, and a Target that sends it can prove
+the wrong-password test. `SNMPIO_INTEROP_V3_KEY_EXTENSIONS` does nothing here, because that test
+needs four users and a named run has one.
+
+`ctest` is fine for checking whether the run passed. To fill in a row, run the test binary instead.
+`ctest` starts every test as a separate process, so the summary comes out in pieces, one per test,
+and it only shows a passing test's output under `-V`. The binary runs the whole interop suite in one
+process and ends with one summary:
+
+```sh
+export SNMPIO_INTEROP_TARGET=10.0.0.7
+export SNMPIO_INTEROP_V3_USER=netops-legacy SNMPIO_INTEROP_V3_AUTH=sha1
+export SNMPIO_INTEROP_V3_PRIV=aes256c SNMPIO_INTEROP_V3_PASSWORD=bench-secret-123
+./build/default/tests/snmpio_tests --gtest_filter='Interop*'
+```
+
+```text
+== snmpio interop run summary ==
+Device/firmware: <the Target's sysDescr.0, verbatim>
+Date: <YYYY-MM-DD>
+
+Protocols exercised:
+  ok   v2c/public
+  ok   authPriv/sha1/aes256c
+  skip noAuthNoPriv  -- run named one user: netops-legacy
+  ...
+```
+
+Every column in the table that a run fills comes from one line of that output. Copy the
+`Device/firmware:` line into **Device and firmware**, the `ok` lines into **Protocols exercised**,
+and the `Date:` line into **Last run**. `skip` lines stay out of the row, because they are protocol
+pairs the run never reached. A `fail` line means there is no row to fill. That run found a bug, not
+a release.
+
+A Target whose users carry more than one protocol pair needs one run per user. Record one row per
+run, each copied from its own summary, rather than merging several runs from memory into one row.
 
 ## Fuzzing
 

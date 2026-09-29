@@ -11,6 +11,7 @@
 
 #include <snmpio/Client.hpp>
 
+#include "InteropCredentials.hpp"
 #include "InteropRelay.hpp"
 #include "InteropTarget.hpp"
 #include "SimulatorFaults.hpp"
@@ -25,11 +26,14 @@
 namespace snmpio {
 namespace {
 
+using test::aes128Row;
 using test::CountingRelay;
+using test::credentialsFor;
 using test::envPort;
 using test::envVar;
 using test::get;
 using test::makeInteropTarget;
+using test::sha256Row;
 using test::SimulatorFaults;
 using test::sysDescr;
 
@@ -63,8 +67,7 @@ class InteropFaults : public ::testing::Test {
   // gates only the tests that spend it. Written out at each call site because GTEST_SKIP in a
   // helper skips the helper and lets the test carry on.
   [[nodiscard]] Credentials credentials() const {
-    return Credentials{"privsha256aes", SecurityLevel::AuthPriv, AuthProtocol::Sha256,
-                       m_password,      PrivProtocol::Aes128,    m_password};
+    return credentialsFor(sha256Row, aes128Row, m_password);
   }
 
   Target m_target;

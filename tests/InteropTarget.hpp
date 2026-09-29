@@ -76,19 +76,28 @@ struct GetResult {
   Response response;
 };
 
-template <typename Auth>
-GetResult get(const Target& target, const Auth& auth) {
+// One request on a Client of its own, run to completion. `initiate(client, handler)` starts the
+// request; whichever operation it is, it completes as void(ErrorCode, Response).
+template <typename Initiate>
+GetResult exchange(Initiate initiate) {
   net::IoContext io;
   Client client(io.get_executor());
   GetResult result;
 
-  client.asyncGet(target, auth, {sysDescr}, [&](net::ErrorCode ec, Response response) {
+  initiate(client, [&](net::ErrorCode ec, Response response) {
     result.ec = ec;
     result.response = std::move(response);
     client.stop();
   });
   io.run();
   return result;
+}
+
+template <typename Auth>
+GetResult get(const Target& target, const Auth& auth) {
+  return exchange([&](Client& client, auto handler) {
+    client.asyncGet(target, auth, {sysDescr}, std::move(handler));
+  });
 }
 
 // Assert that `result` is a successful sysDescr.0 response, and record its OCTET STRING value as

@@ -10,6 +10,8 @@
 
 #include <snmpio/Client.hpp>
 
+#include "InteropCredentials.hpp"
+#include "InteropOperations.hpp"
 #include "InteropRelay.hpp"
 #include "InteropSummary.hpp"
 #include "InteropTarget.hpp"
@@ -17,125 +19,61 @@
 namespace snmpio {
 namespace {
 
+using test::aes128Row;
+using test::authProtocols;
+using test::AuthRow;
 using test::CountingRelay;
+using test::credentialsFor;
 using test::envPort;
 using test::envVar;
+using test::findAuth;
+using test::findPriv;
 using test::get;
 using test::getAndRecord;
+using test::getBulkAndRecord;
+using test::getNextAndRecord;
+using test::keyExtensionAuthRow;
+using test::keyExtensionProtocols;
+using test::keyExtensionsUnset;
 using test::makeInteropTarget;
+using test::NamedUser;
+using test::noAuthRow;
+using test::noPrivRow;
+using test::operationLabel;
+using test::pairLabel;
+using test::privProtocols;
+using test::PrivRow;
+using test::recordAuthAndPrivacyMatrixSkipped;
+using test::recordKeyExtensionsSkipped;
 using test::recordSkip;
+using test::securityLevelPairs;
+using test::sha256Row;
+using test::successorsUncheckable;
 using test::sysDescr;
 
-// The users tests/interop/snmpd-conf.sh creates, named after what they carry: `noauth`, `authX`
-// per auth protocol, and `privXY` per (auth, privacy) pair. Naming them here is only possible
-// because they are ours to create -- so an Agent running someone else's configuration is
-// addressed the other way in, by SNMPIO_INTEROP_V3_USER below.
-struct AuthRow {
-  AuthProtocol protocol;
-  const char* name;
-};
-constexpr std::array<AuthRow, 6> authProtocols{{{AuthProtocol::Md5, "md5"},
-                                                {AuthProtocol::Sha1, "sha1"},
-                                                {AuthProtocol::Sha224, "sha224"},
-                                                {AuthProtocol::Sha256, "sha256"},
-                                                {AuthProtocol::Sha384, "sha384"},
-                                                {AuthProtocol::Sha512, "sha512"}}};
-
-// The privacy protocols the matrix crosses with every auth protocol. AES-192/256 are not in it:
-// they need a Key Extension, and they have their own test below.
-struct PrivRow {
-  PrivProtocol protocol;
-  const char* name;
-};
-constexpr std::array<PrivRow, 2> privProtocols{
-    {{PrivProtocol::Des, "des"}, {PrivProtocol::Aes128, "aes"}}};
-
-// AES-192/256 under both Key Extensions, which both `snmpd` and the Simulator serve (ADR-0006).
-constexpr std::array<PrivRow, 4> keyExtensionProtocols{{{PrivProtocol::Aes192, "aes192"},
-                                                        {PrivProtocol::Aes256, "aes256"},
-                                                        {PrivProtocol::Aes192C, "aes192c"},
-                                                        {PrivProtocol::Aes256C, "aes256c"}}};
-
-// Carrying neither, which is a row of the matrix like any other: the unauthenticated user.
-constexpr AuthRow noAuthRow{AuthProtocol::None, "none"};
-constexpr PrivRow noPrivRow{PrivProtocol::None, "none"};
-
-// What the tests that want one pair rather than the whole matrix reach for. Named rather than
-// indexed off the tables above, so that reordering those cannot silently retarget a test.
-constexpr AuthRow sha1Row{AuthProtocol::Sha1, "sha1"};
-constexpr AuthRow sha256Row{AuthProtocol::Sha256, "sha256"};
-constexpr PrivRow aes128Row{PrivProtocol::Aes128, "aes"};
-
-// The Security Level a pair adds up to. Said once, because the label, the user name and the
-// Credentials all ask the same question of the same pair and must not answer it three ways.
-SecurityLevel securityLevel(const AuthRow& auth, const PrivRow& priv) {
-  if (auth.protocol == AuthProtocol::None) return SecurityLevel::NoAuthNoPriv;
-  if (priv.protocol == PrivProtocol::None) return SecurityLevel::AuthNoPriv;
-  return SecurityLevel::AuthPriv;
-}
-
-// The pair, said the way a failure message wants to read it.
-std::string pairLabel(const AuthRow& auth, const PrivRow& priv) {
-  if (auth.protocol == AuthProtocol::None) return "noAuthNoPriv";
-  if (priv.protocol == PrivProtocol::None) return std::string("authNoPriv/") + auth.name;
-  return std::string("authPriv/") + auth.name + "/" + priv.name;
-}
-
-// The user our own configuration creates for a pair, which is the pair spelled out.
-std::string conventionalUser(const AuthRow& auth, const PrivRow& priv) {
-  if (auth.protocol == AuthProtocol::None) return "noauth";
-  if (priv.protocol == PrivProtocol::None) return std::string("auth") + auth.name;
-  return std::string("priv") + auth.name + priv.name;
-}
-
-[[nodiscard]] const AuthRow* findAuth(std::string_view name) {
-  if (name == noAuthRow.name) return &noAuthRow;
-  for (const auto& row : authProtocols) {
-    if (name == row.name) return &row;
-  }
-  return nullptr;
-}
-
-[[nodiscard]] const PrivRow* findPriv(std::string_view name) {
-  if (name == noPrivRow.name) return &noPrivRow;
-  for (const auto& row : privProtocols) {
-    if (name == row.name) return &row;
-  }
-  for (const auto& row : keyExtensionProtocols) {
-    if (name == row.name) return &row;
-  }
-  return nullptr;
-}
-
-// A v3 user this suite did not create. A switch on the bench carries whatever user someone set up
-// on it years ago, so the run says what that user is called and what it carries, and the tests
-// address it instead of the convention. One is enough to be useful -- a Target typically has
-// exactly one -- and the matrix then covers the single pair it can serve and says which pairs it
-// could not.
-struct NamedUser {
-  std::string name;
-  AuthRow auth;
-  PrivRow priv;
-};
-
-// Record that every v3 matrix row was skipped for the same reason. Called from SetUp when the
-// Target is configured but the run did not name any v3 way in, and from the matrix test when the
-// run named a single user instead of the conventional fleet.
-void recordAllAuthAndPrivacySkipped(const std::string& reason) {
-  recordSkip("noAuthNoPriv", reason);
-  for (const auto& auth : authProtocols) {
-    recordSkip(pairLabel(auth, noPrivRow), reason);
-    for (const auto& priv : privProtocols) {
-      recordSkip(pairLabel(auth, priv), reason);
-    }
+// Record that an operation's row at every Security Level was skipped for the same reason.
+void recordSecurityLevelsSkipped(const char* operation, const std::string& reason) {
+  for (const auto& [auth, priv] : securityLevelPairs) {
+    recordSkip(operationLabel(operation, pairLabel(auth, priv)), reason);
   }
 }
 
-// Record that all four Key Extension rows were skipped for the same reason.
-void recordAllKeyExtensionsSkipped(const std::string& reason) {
-  for (const auto& priv : keyExtensionProtocols) {
-    recordSkip(pairLabel(sha1Row, priv), reason);
+// Record that GETBULK's row under every privacy protocol was skipped for the same reason.
+void recordBulkPrivacySkipped(const std::string& reason) {
+  for (const auto& priv : privProtocols) {
+    recordSkip(operationLabel("GETBULK", pairLabel(sha256Row, priv)), reason);
   }
+  recordKeyExtensionsSkipped(reason, operationLabel("GETBULK", ""));
+}
+
+// Record that every v3 row was skipped for the same reason. Called from SetUp when the Target is
+// configured but the run did not name any v3 way in, so the summary still lists every row.
+void recordEveryRowSkipped(const std::string& reason) {
+  recordAuthAndPrivacyMatrixSkipped(reason);
+  recordKeyExtensionsSkipped(reason);
+  recordSecurityLevelsSkipped("GETNEXT", reason);
+  recordSecurityLevelsSkipped("GETBULK", reason);
+  recordBulkPrivacySkipped(reason);
 }
 
 // The Target and the password every test here needs, or a skip -- plus, optionally, the one user
@@ -166,8 +104,7 @@ class InteropV3 : public ::testing::Test {
       const std::string reason =
           "needs either SNMPIO_INTEROP_V3_PASSWORD for the conventional users or "
           "SNMPIO_INTEROP_V3_USER for a named user";
-      recordAllAuthAndPrivacySkipped(reason);
-      recordAllKeyExtensionsSkipped(reason);
+      recordEveryRowSkipped(reason);
       GTEST_SKIP() << "needs either SNMPIO_INTEROP_V3_PASSWORD for the users our own configuration "
                       "creates or SNMPIO_INTEROP_V3_USER for one the Agent already had";
     }
@@ -200,12 +137,7 @@ class InteropV3 : public ::testing::Test {
   // The user to send for one pair: the one this run named, or the conventional one that says what
   // it carries. Callers filter first -- a named user serves its own pair and no other.
   [[nodiscard]] Credentials credentials(const AuthRow& auth, const PrivRow& priv) const {
-    return Credentials{m_named ? m_named->name : conventionalUser(auth, priv),
-                       securityLevel(auth, priv),
-                       auth.protocol,
-                       auth.protocol == AuthProtocol::None ? std::string() : m_password,
-                       priv.protocol,
-                       priv.protocol == PrivProtocol::None ? std::string() : m_password};
+    return credentialsFor(auth, priv, m_password, m_named ? &*m_named : nullptr);
   }
 
   // The pair the tests that want one reach for: the named user's, or SHA-256 over AES-128.
@@ -228,7 +160,7 @@ class InteropV3 : public ::testing::Test {
 TEST_F(InteropV3, CoversTheAuthAndPrivacyMatrix) {
   if (m_named) {
     getAndRecord(m_target, singlePairCredentials(), pairLabel(m_named->auth, m_named->priv));
-    recordAllAuthAndPrivacySkipped("run named one user: " + m_named->name);
+    recordAuthAndPrivacyMatrixSkipped("run named one user: " + m_named->name);
     return;
   }
   getAndRecord(m_target, credentials(noAuthRow, noPrivRow), "noAuthNoPriv");
@@ -255,17 +187,73 @@ TEST_F(InteropV3, CoversBothKeyExtensions) {
     const std::string reason =
         "needs the four privsha1aes192/256(c) users, and this run named one user: " +
         m_named->name + " carrying " + pairLabel(m_named->auth, m_named->priv);
-    recordAllKeyExtensionsSkipped(reason);
+    recordKeyExtensionsSkipped(reason);
     GTEST_SKIP() << reason;
   }
   if (!envVar("SNMPIO_INTEROP_V3_KEY_EXTENSIONS")) {
-    const std::string reason =
-        "needs SNMPIO_INTEROP_V3_KEY_EXTENSIONS and an Agent serving AES-192/256";
-    recordAllKeyExtensionsSkipped(reason);
-    GTEST_SKIP() << reason;
+    recordKeyExtensionsSkipped(keyExtensionsUnset);
+    GTEST_SKIP() << keyExtensionsUnset;
   }
   for (const auto& priv : keyExtensionProtocols) {
-    getAndRecord(m_target, credentials(sha1Row, priv), pairLabel(sha1Row, priv));
+    getAndRecord(m_target, credentials(keyExtensionAuthRow, priv),
+                 pairLabel(keyExtensionAuthRow, priv));
+  }
+}
+
+// GETNEXT and GETBULK at every Security Level, on the representative pair: an operation-specific
+// bug in how a Scoped PDU is built or read would hide behind a GET that works. A named user is one
+// pair, and the operations run as that pair instead.
+TEST_F(InteropV3, GetNextAndGetBulkAtEverySecurityLevel) {
+  if (const auto reason = successorsUncheckable()) {
+    if (m_named) {
+      const auto label = pairLabel(m_named->auth, m_named->priv);
+      recordSkip(operationLabel("GETNEXT", label), *reason);
+      recordSkip(operationLabel("GETBULK", label), *reason);
+    }
+    recordSecurityLevelsSkipped("GETNEXT", *reason);
+    recordSecurityLevelsSkipped("GETBULK", *reason);
+    GTEST_SKIP() << *reason;
+  }
+  if (m_named) {
+    const auto label = pairLabel(m_named->auth, m_named->priv);
+    getNextAndRecord(m_target, singlePairCredentials(), label);
+    getBulkAndRecord(m_target, singlePairCredentials(), label);
+    const std::string reason = "run named one user: " + m_named->name;
+    recordSecurityLevelsSkipped("GETNEXT", reason);
+    recordSecurityLevelsSkipped("GETBULK", reason);
+    return;
+  }
+  for (const auto& [auth, priv] : securityLevelPairs) {
+    getNextAndRecord(m_target, credentials(auth, priv), pairLabel(auth, priv));
+    getBulkAndRecord(m_target, credentials(auth, priv), pairLabel(auth, priv));
+  }
+}
+
+// GETBULK under every privacy protocol the Agent speaks. A sysDescr reply is a block or two; a
+// GETBULK Response runs to many, so this is where DES padding and the AES-CFB tail are exercised
+// on data an Agent nobody here wrote encrypted. The Key Extension rows are gated as the GET ones
+// are, and on SHA-1 for the same reason.
+TEST_F(InteropV3, GetBulkUnderEveryPrivacyProtocol) {
+  if (const auto reason = successorsUncheckable()) {
+    recordBulkPrivacySkipped(*reason);
+    GTEST_SKIP() << *reason;
+  }
+  if (m_named) {
+    const std::string reason = "run named one user: " + m_named->name + " carrying " +
+                               pairLabel(m_named->auth, m_named->priv);
+    recordBulkPrivacySkipped(reason);
+    GTEST_SKIP() << reason;
+  }
+  for (const auto& priv : privProtocols) {
+    getBulkAndRecord(m_target, credentials(sha256Row, priv), pairLabel(sha256Row, priv));
+  }
+  if (!envVar("SNMPIO_INTEROP_V3_KEY_EXTENSIONS")) {
+    recordKeyExtensionsSkipped(keyExtensionsUnset, operationLabel("GETBULK", ""));
+    return;
+  }
+  for (const auto& priv : keyExtensionProtocols) {
+    getBulkAndRecord(m_target, credentials(keyExtensionAuthRow, priv),
+                     pairLabel(keyExtensionAuthRow, priv));
   }
 }
 

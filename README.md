@@ -263,6 +263,7 @@ SNMPIO_INTEROP_V3_USM_REPORTS=1            # the capability flags, below; empty 
 SNMPIO_INTEROP_V3_KEY_EXTENSIONS=1
 SNMPIO_INTEROP_FAULTS=                     # the Simulators' control UI port
 SNMPIO_INTEROP_FAULTS_ENGINE_ID=
+SNMPIO_INTEROP_BROKEN_SUCCESSORS=
 ```
 
 `SNMPIO_INTEROP_TARGET` is the address the Agent answers at and `SNMPIO_INTEROP_PORT` the port,
@@ -301,7 +302,9 @@ section shows, because `ctest` splits the run summary into pieces.
 One user is enough to be useful, because a Target typically has exactly one. The matrix test then
 covers the single pair that user can serve, and the Key Extension test skips, since it needs four
 users of its own. The other two v3 tests in that file — Engine Discovery and the wrong-password Report — run against the named
-user rather than against the conventional one.
+user rather than against the conventional one. GETNEXT and GETBULK run as that user's pair in place
+of one pair per Security Level, and the GETBULK pass across every privacy protocol skips, since it
+needs a user per cipher.
 
 The v2c half has the same two ways in. It sends the Community `public`, which is what every Agent
 we configure answers to, unless `SNMPIO_INTEROP_COMMUNITY` names another. A Community is the whole
@@ -342,7 +345,7 @@ rejected outright rather than quietly resolved. A variable that is set but unusa
 suite; only an unset one skips it, since a typo that skipped would report green for an Agent it
 never reached.
 
-Two more variables say what the Agent at that Target can do, and each gates the tests that would
+The variables below say what the Agent at that Target can do, and each gates the tests that would
 otherwise be asserting on the Agent rather than on this library. Each is set by whoever starts the
 Agent, because nothing on the wire announces it — for CI's three, that is the script, which is the
 one place their flags are said:
@@ -353,6 +356,11 @@ one place their flags are said:
 | `SNMPIO_INTEROP_V3_USM_REPORTS` | answers a bad digest with a usmStats Report, which RFC 3414 leaves optional |
 | `SNMPIO_INTEROP_FAULTS` | can be **told to misbehave** — the port the Simulator's control UI is on |
 | `SNMPIO_INTEROP_FAULTS_ENGINE_ID` | offers the `engineIDChange` fault, which the older pinned image does not |
+| `SNMPIO_INTEROP_BROKEN_SUCCESSORS` | answers a GETNEXT or GETBULK carrying several Varbinds from the wrong requested OIDs, as both pinned Simulator images do ([snmp-fault-agent#11](https://github.com/lcmscheid/snmp-fault-agent/issues/11)) |
+
+The last one is the only flag that names a defect rather than an ability, so that a Target nobody
+described is held to RFC 3416 like `snmpd`. With it set, the GETNEXT and GETBULK tests skip and say
+why, rather than assert what a broken Agent sends.
 
 CI runs three Agents, one job each, and between them they cover every v3 case above. Neither gate is
 a Security Level being negotiated: the Simulator **infers** the level from which protocols a user
@@ -380,10 +388,15 @@ included — speaks all four (ADR-0006 records which versions). One built withou
 the reason `CoversBothKeyExtensions` in [`tests/TestInteropV3.cpp`](tests/TestInteropV3.cpp) gives.
 
 What the suite proves: a v2c GET of `sysDescr.0`, which it prints because no two Agents say the
-same thing; the eighteen v3 pairs above and the four Key Extension ones; that Engine Discovery
-costs the extra round trips exactly once, counted off the wire by a relay between Client and Agent,
-since the API deliberately never surfaces it; and that a wrong password comes back as the Report
-the Engine sent rather than as a timeout.
+same thing; the eighteen v3 pairs above and the four Key Extension ones; GETNEXT and GETBULK over
+v2c and at each Security Level on SHA-256 with AES-128, and GETBULK again under every privacy
+protocol, since a Response of many cipher blocks is where padding and the cipher's tail are
+exercised. Those two assert successor semantics without pinning any MIB contents: GETNEXT of
+`system` is `sysDescr.0`, which every Agent here already has, and a GETBULK's column from `system`
+is its column from `sysDescr.0` one row late, strictly increasing until it reaches `endOfMibView`.
+It also proves that Engine Discovery costs the extra round trips exactly once, counted off the wire
+by a relay between Client and Agent, since the API deliberately never surfaces it; and that a wrong
+password comes back as the Report the Engine sent rather than as a timeout.
 
 ### The misbehaviour suite
 
@@ -438,7 +451,8 @@ carries. Do not set up the `noauth`/`auth<hash>`/`priv<hash><cipher>` convention
 use.
 
 Of the [capability variables](#everything-else-the-harness-reads), leave `SNMPIO_INTEROP_FAULTS` and
-`_FAULTS_ENGINE_ID` unset, because a correct Agent cannot misbehave on request. Set
+`_FAULTS_ENGINE_ID` unset, because a correct Agent cannot misbehave on request, and
+`SNMPIO_INTEROP_BROKEN_SUCCESSORS` unset, so that GETNEXT and GETBULK are held to RFC 3416. Set
 `SNMPIO_INTEROP_V3_USM_REPORTS` only if the Target answers a bad digest with a usmStats Report. That
 Report is optional behaviour RFC 3414 allows a correct Agent, and a Target that sends it can prove
 the wrong-password test. `SNMPIO_INTEROP_V3_KEY_EXTENSIONS` does nothing here, because that test

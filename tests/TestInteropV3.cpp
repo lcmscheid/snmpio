@@ -2,6 +2,7 @@
 
 #include <array>
 #include <cstddef>
+#include <initializer_list>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -15,6 +16,7 @@
 #include "InteropRelay.hpp"
 #include "InteropSummary.hpp"
 #include "InteropTarget.hpp"
+#include "InteropWalk.hpp"
 
 namespace snmpio {
 namespace {
@@ -50,23 +52,34 @@ using test::recordSkip;
 using test::securityLevelPairs;
 using test::sha256Row;
 using test::sysDescr;
+using test::walkBothModesAndRecord;
 
-// Record that GETNEXT's and GETBULK's rows at every Security Level were skipped for the same
-// reason.
-void recordSecurityLevelsSkipped(const std::string& reason) {
-  for (const auto operation : {Operation::GetNext, Operation::GetBulk}) {
+// The operations run at every Security Level, and the ones run again under every privacy
+// protocol: GETBULK and Walk, whose Responses are large enough to cross many cipher blocks.
+constexpr std::initializer_list<Operation> getNextAndGetBulk{Operation::GetNext,
+                                                             Operation::GetBulk};
+constexpr std::initializer_list<Operation> walkModes{Operation::WalkGetNext,
+                                                     Operation::WalkGetBulk};
+
+// Record that the rows of `operations` at every Security Level were skipped for the same reason.
+void recordSecurityLevelsSkipped(std::initializer_list<Operation> operations,
+                                 const std::string& reason) {
+  for (const auto operation : operations) {
     for (const auto& [auth, priv] : securityLevelPairs) {
       recordSkip(operationLabel(operation, pairLabel(auth, priv)), reason);
     }
   }
 }
 
-// Record that GETBULK's row under every privacy protocol was skipped for the same reason.
-void recordBulkPrivacySkipped(const std::string& reason) {
-  for (const auto& priv : privProtocols) {
-    recordSkip(operationLabel(Operation::GetBulk, pairLabel(sha256Row, priv)), reason);
+// Record that the rows of `operations` under every privacy protocol were skipped for the same
+// reason.
+void recordPrivacySkipped(std::initializer_list<Operation> operations, const std::string& reason) {
+  for (const auto operation : operations) {
+    for (const auto& priv : privProtocols) {
+      recordSkip(operationLabel(operation, pairLabel(sha256Row, priv)), reason);
+    }
+    recordKeyExtensionsSkipped(operation, reason);
   }
-  recordKeyExtensionsSkipped(Operation::GetBulk, reason);
 }
 
 // Record that every v3 row was skipped for the same reason. Called from SetUp when the Target is
@@ -74,8 +87,10 @@ void recordBulkPrivacySkipped(const std::string& reason) {
 void recordEveryRowSkipped(const std::string& reason) {
   recordAuthAndPrivacyMatrixSkipped(reason);
   recordKeyExtensionsSkipped(Operation::Get, reason);
-  recordSecurityLevelsSkipped(reason);
-  recordBulkPrivacySkipped(reason);
+  recordSecurityLevelsSkipped(getNextAndGetBulk, reason);
+  recordSecurityLevelsSkipped(walkModes, reason);
+  recordPrivacySkipped({Operation::GetBulk}, reason);
+  recordPrivacySkipped(walkModes, reason);
 }
 
 // The Target and the password every test here needs, or a skip -- plus, optionally, the one user
@@ -213,7 +228,7 @@ TEST_F(InteropV3, GetNextAndGetBulkAtEverySecurityLevel) {
   if (m_named) {
     getNextAndGetBulkAndRecord(m_target, singlePairCredentials(),
                                pairLabel(m_named->auth, m_named->priv));
-    recordSecurityLevelsSkipped(namedUserOnly());
+    recordSecurityLevelsSkipped(getNextAndGetBulk, namedUserOnly());
     return;
   }
   for (const auto& [auth, priv] : securityLevelPairs) {
@@ -228,7 +243,7 @@ TEST_F(InteropV3, GetNextAndGetBulkAtEverySecurityLevel) {
 TEST_F(InteropV3, GetBulkUnderEveryPrivacyProtocol) {
   if (m_named) {
     const auto reason = namedUserOnly();
-    recordBulkPrivacySkipped(reason);
+    recordPrivacySkipped({Operation::GetBulk}, reason);
     GTEST_SKIP() << reason;
   }
   for (const auto& priv : privProtocols) {
@@ -241,6 +256,44 @@ TEST_F(InteropV3, GetBulkUnderEveryPrivacyProtocol) {
   for (const auto& priv : keyExtensionProtocols) {
     getBulkAndRecord(m_target, credentials(keyExtensionAuthRow, priv),
                      pairLabel(keyExtensionAuthRow, priv));
+  }
+}
+
+// A Walk that needs several batches, in both modes, each streaming and collecting, at every
+// Security Level on the representative pair -- or as the named user's pair, which is the one it
+// serves.
+TEST_F(InteropV3, WalksSeveralBatchesAtEverySecurityLevel) {
+  if (m_named) {
+    walkBothModesAndRecord(m_target, singlePairCredentials(),
+                           pairLabel(m_named->auth, m_named->priv));
+    recordSecurityLevelsSkipped(walkModes, namedUserOnly());
+    return;
+  }
+  for (const auto& [auth, priv] : securityLevelPairs) {
+    walkBothModesAndRecord(m_target, credentials(auth, priv), pairLabel(auth, priv));
+  }
+}
+
+// The same Walks under every privacy protocol the Agent speaks: a Subtree several batches long is
+// many encrypted Responses, each running to many cipher blocks, where
+// GetBulkUnderEveryPrivacyProtocol is one. Gated and paired as that test is, for the same reasons.
+TEST_F(InteropV3, WalksSeveralBatchesUnderEveryPrivacyProtocol) {
+  if (m_named) {
+    const auto reason = namedUserOnly();
+    recordPrivacySkipped(walkModes, reason);
+    GTEST_SKIP() << reason;
+  }
+  for (const auto& priv : privProtocols) {
+    walkBothModesAndRecord(m_target, credentials(sha256Row, priv), pairLabel(sha256Row, priv));
+  }
+  if (!envVar("SNMPIO_INTEROP_V3_KEY_EXTENSIONS")) {
+    for (const auto operation : walkModes)
+      recordKeyExtensionsSkipped(operation, keyExtensionsUnset);
+    return;
+  }
+  for (const auto& priv : keyExtensionProtocols) {
+    walkBothModesAndRecord(m_target, credentials(keyExtensionAuthRow, priv),
+                           pairLabel(keyExtensionAuthRow, priv));
   }
 }
 

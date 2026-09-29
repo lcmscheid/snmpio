@@ -302,9 +302,9 @@ section shows, because `ctest` splits the run summary into pieces.
 One user is enough to be useful, because a Target typically has exactly one. The matrix test then
 covers the single pair that user can serve, and the Key Extension test skips, since it needs four
 users of its own. The other two v3 tests in that file — Engine Discovery and the wrong-password Report — run against the named
-user rather than against the conventional one. GETNEXT and GETBULK run as that user's pair in place
-of one pair per Security Level, and the GETBULK pass across every privacy protocol skips, since it
-needs a user per cipher.
+user rather than against the conventional one. GETNEXT, GETBULK and the Walks run as that user's
+pair in place of one pair per Security Level, and the GETBULK and Walk passes across every privacy
+protocol skip, since they need a user per cipher.
 
 The v2c half has the same two ways in. It sends the Community `public`, which is what every Agent
 we configure answers to, unless `SNMPIO_INTEROP_COMMUNITY` names another. A Community is the whole
@@ -378,6 +378,10 @@ The v3 users are a convention the tests share with the two configuration generat
 [`fault-agent-auth.sh`](tests/interop/fault-agent-auth.sh) — `noauth`, `auth<hash>` per
 authentication protocol, and `priv<hash><cipher>` per pair — because they are ours to create; the
 Simulator's own example configuration names them otherwise, which is why ours is mounted over it.
+What the Simulator serves is ours too:
+[`fault-agent-values.sh`](tests/interop/fault-agent-values.sh) writes the `values.json` mounted
+beside it, with a fifty-row `interfaces` group for the Walks and the writable and read-only entries
+a SET needs.
 The matrix is MD5, SHA-1 and the four SHA-2 hashes, each of them alone at `authNoPriv` and again
 over DES and AES-128 at `authPriv`. AES-192/256 under both Key Extensions are four more users, and
 both Agents carry them, so each scheme is read on every commit by an implementation that is not ours
@@ -393,7 +397,12 @@ v2c and at each Security Level on SHA-256 with AES-128, and GETBULK again under 
 protocol. Those two assert successor semantics without pinning any MIB contents: GETNEXT of
 `system` is `sysDescr.0`, which every Agent here already has; a GETBULK's column from `system` is
 its column from `sysDescr.0` one row late, strictly increasing until it reaches `endOfMibView`; and
-GETNEXT of `sysDescr.0` is where that second column starts.
+GETNEXT of `sysDescr.0` is where that second column starts. And a Walk of `interfaces`, several
+batches long on every Agent, in GETNEXT mode and in GETBULK mode, each streaming and collecting,
+over v2c, at each Security Level and under every privacy protocol. Those assert structure alone —
+every OID inside the Subtree, strictly increasing, a clean end, more than one batch — and hold the
+four Walks to one OID list, so the Agent supplies the expected answer; values are not compared,
+since counters move between Walks.
 It also proves that Engine Discovery costs the extra round trips exactly once, counted off the wire
 by a relay between Client and Agent, since the API deliberately never surfaces it; and that a wrong
 password comes back as the Report the Engine sent rather than as a timeout.

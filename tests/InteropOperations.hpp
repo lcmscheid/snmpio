@@ -36,8 +36,9 @@ inline const Oid systemGroup{1, 3, 6, 1, 2, 1, 1};
 inline constexpr std::int32_t bulkRepetitions = 20;
 
 // What a summary row says was sent. GET's rows are the pair or Community alone, which is how the
-// matrix was labelled before any other operation reached an Agent; the rest say their name first.
-enum class Operation : std::uint8_t { Get, GetNext, GetBulk };
+// matrix was labelled before any other operation reached an Agent; the rest say their name first,
+// and a Walk's says which mode it traversed in.
+enum class Operation : std::uint8_t { Get, GetNext, GetBulk, WalkGetNext, WalkGetBulk };
 
 [[nodiscard]] inline std::string operationLabel(Operation operation, const std::string& label) {
   switch (operation) {
@@ -45,6 +46,10 @@ enum class Operation : std::uint8_t { Get, GetNext, GetBulk };
       return "GETNEXT " + label;
     case Operation::GetBulk:
       return "GETBULK " + label;
+    case Operation::WalkGetNext:
+      return "GETNEXT Walk " + label;
+    case Operation::WalkGetBulk:
+      return "GETBULK Walk " + label;
     case Operation::Get:
       break;
   }

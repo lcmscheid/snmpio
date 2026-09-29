@@ -68,11 +68,15 @@ brokenGetNext=''
 # only Agent that makes the comparison observable at all.
 #
 # Each Agent says here how it is fetched, how its configuration is written and where that is
-# mounted, and how to tell it is answering.
+# mounted, and how to tell it is answering. `mounts` lists where each configuration file goes in
+# the container, and `configure` writes each into $configDir under the same base name.
 useSimulator() {
   image=$1
-  mount=/etc/snmpfault/auth.json
-  configure() { "$here/fault-agent-auth.sh"; }
+  mounts='/etc/snmpfault/auth.json /etc/snmpfault/values.json'
+  configure() {
+    "$here/fault-agent-auth.sh" > "$configDir/auth.json"
+    "$here/fault-agent-values.sh" > "$configDir/values.json"
+  }
   faults=$faultsPort
   brokenGetNext=1
   fetch() { docker pull -q "$image"; }
@@ -83,11 +87,11 @@ useSimulator() {
 case $agent in
   snmpd)
     image=snmpio-interop-snmpd
-    mount=/etc/snmpio/snmpd.conf
+    mounts=/etc/snmpio/snmpd.conf
     # `default` is any source. A request through the published port arrives from the runtime's
     # gateway rather than from 127.0.0.1, and the port is published on the loopback alone, which is
     # the restriction.
-    configure() { "$here/snmpd-conf.sh" default; }
+    configure() { "$here/snmpd-conf.sh" default > "$configDir/snmpd.conf"; }
     usmReports=1
     fetch() { docker build -q -t "$image" -f "$here/snmpd.Dockerfile" "$here"; }
     # A real request, through the published port, from the same image so the workstation needs no
@@ -128,18 +132,21 @@ trap 'status=$?; [ $status -eq 0 ] || failed' EXIT
 # reads it for as long as it runs.
 configDir=${RUNNER_TEMP:-${TMPDIR:-/tmp}}/snmpio-interop
 mkdir -p "$configDir"
-configFile=$configDir/${mount##*/}
 
 docker rm -f "$container" >/dev/null 2>&1 || true
 fetch >&2
-(export SNMPIO_INTEROP_V3_PASSWORD="$password"; configure) > "$configFile"
+(export SNMPIO_INTEROP_V3_PASSWORD="$password"; configure)
 # The Simulator's image carries its own example configuration; ours is mounted over it so the
 # suite's `auth<hash>` / `priv<hash><cipher>` convention holds against every Agent here and there
-# is no second table saying the same thing. `z` relabels it for an SELinux host, and is ignored
-# elsewhere.
+# is no second table saying the same thing, and so it serves the Subtree the Walk tests need.
+# `z` relabels each file for an SELinux host, and is ignored elsewhere.
+set --
+for mount in $mounts; do
+  set -- "$@" -v "$configDir/${mount##*/}:$mount:ro,z"
+done
 docker run -d --name "$container" -p "127.0.0.1:$port:1161/udp" \
   ${faults:+-p "127.0.0.1:$faultsPort:$simulatorUiPort"} \
-  -v "$configFile:$mount:ro,z" "$image" >&2
+  "$@" "$image" >&2
 
 # Up to 30 seconds, or not at all once the Agent has exited. A deadline rather than a count of
 # tries, because one `snmpget` readiness check is itself a container start.

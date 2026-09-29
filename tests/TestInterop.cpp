@@ -6,6 +6,7 @@
 
 #include "InteropOperations.hpp"
 #include "InteropTarget.hpp"
+#include "InteropWalk.hpp"
 
 namespace snmpio {
 namespace {
@@ -15,6 +16,7 @@ using test::envVar;
 using test::getAndRecord;
 using test::getNextAndGetBulkAndRecord;
 using test::makeInteropTarget;
+using test::walkBothModesAndRecord;
 
 // A live Agent that is not ours -- not the Scripted Agent of ScriptedAgent.hpp and not the
 // Simulator either, but whatever answers at the Target, correct or not -- and a Response from it
@@ -60,6 +62,14 @@ TEST_F(InteropV2c, GetsSysDescrFromALiveAgent) {
 // against someone else's decoder.
 TEST_F(InteropV2c, GetNextAndGetBulkReturnEachOidsSuccessor) {
   getNextAndGetBulkAndRecord(m_target, m_community, m_label);
+}
+
+// A Walk that needs several batches, in GETNEXT mode and in GETBULK mode, each streaming and
+// collecting, against an Agent that is not misbehaving -- the misbehaviour suite is the only other
+// place a Walk reaches a live Agent, and there it is told to go wrong. The two modes' OID lists
+// are held to each other, so the Agent supplies the expected answer.
+TEST_F(InteropV2c, WalksSeveralBatchesInBothModes) {
+  walkBothModesAndRecord(m_target, m_community, m_label);
 }
 
 }  // namespace

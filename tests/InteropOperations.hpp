@@ -36,26 +36,34 @@ inline const Oid systemGroup{1, 3, 6, 1, 2, 1, 1};
 // and the AES-CFB tail are exercised, and well inside what any Agent fits in one datagram.
 inline constexpr std::int32_t bulkRepetitions = 20;
 
-// What a summary row says was sent. GET's rows are the pair or Community alone, which is how the
-// matrix was labelled before any other operation reached an Agent; the rest say their name first.
-// A Walk is two operations, one per traversal mode, because the mode is what its row reports and
-// what tests/InteropWalk.hpp sends it in.
+// What a summary row says was sent. A Walk is recorded as two operations, one per traversal mode,
+// because the mode is what its row reports and what tests/InteropWalk.hpp sends it in.
 enum class Operation : std::uint8_t { Get, GetNext, GetBulk, WalkGetNext, WalkGetBulk };
 
-[[nodiscard]] inline std::string operationLabel(Operation operation, const std::string& label) {
+[[nodiscard]] inline bool isWalk(Operation operation) {
+  return operation == Operation::WalkGetNext || operation == Operation::WalkGetBulk;
+}
+
+// The PDU an operation sends, which for a Walk is its mode.
+[[nodiscard]] inline std::string pduName(Operation operation) {
   switch (operation) {
-    case Operation::GetNext:
-      return "GETNEXT " + label;
-    case Operation::GetBulk:
-      return "GETBULK " + label;
-    case Operation::WalkGetNext:
-      return "GETNEXT Walk " + label;
-    case Operation::WalkGetBulk:
-      return "GETBULK Walk " + label;
     case Operation::Get:
-      break;
+      return "GET";
+    case Operation::GetNext:
+    case Operation::WalkGetNext:
+      return "GETNEXT";
+    case Operation::GetBulk:
+    case Operation::WalkGetBulk:
+      return "GETBULK";
   }
-  return label;
+  return {};
+}
+
+// GET's rows are the pair or Community alone, which is how the matrix was labelled before any
+// other operation reached an Agent; the rest say their PDU first, and a Walk says so after it.
+[[nodiscard]] inline std::string operationLabel(Operation operation, const std::string& label) {
+  if (operation == Operation::Get) return label;
+  return pduName(operation) + (isWalk(operation) ? " Walk " : " ") + label;
 }
 
 // How many Varbinds a GETNEXT carries. Several is the whole check: each answered from its own
@@ -104,11 +112,6 @@ inline constexpr std::size_t columnFromSysDescr = 1;
 // A Varbind as a failure message wants it: its OID, or the exception that stands in for one.
 [[nodiscard]] inline std::string describe(const Varbind& varbind) {
   return isException(varbind) ? std::string(toString(varbind.val)) : varbind.name.toString();
-}
-
-// An operation's failed completion as a summary row and a failure message both say it.
-[[nodiscard]] inline std::string errorText(const net::ErrorCode& ec) {
-  return std::string(ec.category().name()) + ": " + ec.message();
 }
 
 // The first thing wrong with a result, or empty when there is nothing.

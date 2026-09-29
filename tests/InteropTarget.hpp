@@ -92,6 +92,11 @@ ExchangeResult exchange(Initiate initiate) {
   return result;
 }
 
+// An operation's failed completion as a summary row and a failure message both say it.
+[[nodiscard]] inline std::string errorText(const net::ErrorCode& ec) {
+  return std::string(ec.category().name()) + ": " + ec.message();
+}
+
 // The one GET every half of the suite is built on.
 template <typename Auth>
 ExchangeResult get(const Target& target, const Auth& auth) {
@@ -103,8 +108,7 @@ ExchangeResult get(const Target& target, const Auth& auth) {
 // Assert that `result` is a successful sysDescr.0 response, and record its OCTET STRING value as
 // what identifies the Agent in the run summary.
 inline void expectSysDescr(const ExchangeResult& result, const std::string& what) {
-  ASSERT_FALSE(result.ec) << what << ": " << result.ec.category().name() << ": "
-                          << result.ec.message();
+  ASSERT_FALSE(result.ec) << what << ": " << errorText(result.ec);
   ASSERT_EQ(result.response.varbinds.size(), 1U) << what;
   EXPECT_EQ(result.response.varbinds[0].name, sysDescr) << what;
 
@@ -123,7 +127,7 @@ inline void expectSysDescr(const ExchangeResult& result, const std::string& what
 template <typename Auth>
 void getAndRecord(const Target& target, const Auth& auth, const std::string& label) {
   const auto result = get(target, auth);
-  recordPair(label, !result.ec, result.ec ? result.ec.message() : std::string());
+  recordPair(label, !result.ec, result.ec ? errorText(result.ec) : std::string());
   expectSysDescr(result, label);
 }
 

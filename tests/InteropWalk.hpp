@@ -4,8 +4,10 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <initializer_list>
 #include <optional>
 #include <span>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
@@ -27,16 +29,22 @@
 // Values are not compared: counters and sysUpTime move between the two.
 namespace snmpio::test {
 
-// The Walk's Subtree, on every Agent. Several batches long anywhere: `snmpd` in a container has a
-// loopback and an Ethernet interface, 22 columns each; a switch on the bench has dozens of ports;
-// and tests/interop/fault-agent-values.sh gives the Simulator fifty instances under it, since the
-// image's own configuration has two.
+// The Walk's Subtree, on every Agent. Several batches long on the three CI starts: `snmpd` in a
+// container has a loopback and an Ethernet interface, 22 columns each, and
+// tests/interop/fault-agent-values.sh gives the Simulator fifty instances under it, since the
+// image's own configuration has two. Most other Targets have ports enough too; on one with too
+// few interfaces the Walks fail rather than pass on a single batch.
 inline const Oid interfacesGroup{1, 3, 6, 1, 2, 1, 2};
 
-// A Walk's mode is its Operation, WalkGetNext or WalkGetBulk. Zero max-repetitions is GETNEXT
-// mode, what a Target that mishandles GETBULK depends on; GETBULK mode is the library's default,
-// at its default max-repetitions.
+// A Walk's mode is its Operation, and these are the two, in the order they are walked.
+inline constexpr std::initializer_list<Operation> walkModes{Operation::WalkGetNext,
+                                                            Operation::WalkGetBulk};
+
+// Zero max-repetitions is GETNEXT mode, what a Target that mishandles GETBULK depends on; GETBULK
+// mode is the library's default, at its default max-repetitions. Only a Walk has a mode, so any
+// other Operation here is a mistake in the suite rather than a GETBULK-mode Walk.
 [[nodiscard]] inline std::int32_t walkRepetitions(Operation mode) {
+  if (!isWalk(mode)) throw std::invalid_argument(operationLabel(mode, "is not a Walk"));
   return mode == Operation::WalkGetNext ? 0 : WalkOptions{}.maxRepetitions;
 }
 
@@ -142,8 +150,7 @@ struct Walked {
 
 // A Walk as a failure message names it: `the GETBULK-mode collecting Walk`.
 [[nodiscard]] inline std::string walkName(const Walked& walked) {
-  return std::string("the ") + (walked.mode == Operation::WalkGetNext ? "GETNEXT" : "GETBULK") +
-         "-mode " + shapeName(walked.shape) + " Walk";
+  return "the " + pduName(walked.mode) + "-mode " + shapeName(walked.shape) + " Walk";
 }
 
 [[nodiscard]] inline bool isSound(const Walked& walked) {
@@ -161,28 +168,28 @@ struct Walked {
   return {};
 }
 
-// Four Walks of interfacesGroup -- GETNEXT mode and GETBULK mode, each streaming and collecting --
-// recorded as `GETNEXT Walk <label>` and `GETBULK Walk <label>`, each row failing on the first
-// thing wrong with either of its mode's two Walks. Run together because they are held to one OID
-// list.
-template <typename Auth>
-void walkBothModesAndRecord(const Target& target, const Auth& auth, const std::string& label) {
-  std::vector<Walked> walks;
-  for (const auto mode : {Operation::WalkGetNext, Operation::WalkGetBulk}) {
-    for (const auto shape : {WalkShape::Streaming, WalkShape::Collecting}) {
-      walks.push_back({mode, shape, walk(target, auth, mode, shape)});
-    }
-  }
-  // The list is the first sound Walk's: the GETNEXT-mode streaming Walk's, unless that one failed,
-  // when the next sound one stands in so the rest are still compared with something. Only a sound
-  // Walk reaches the comparison, so when none is sound, what stands in is never read.
+// What one mode's summary row says: the first thing wrong with either of its two Walks, and what
+// an ok row was held to when that was not the first Walk.
+struct ModeOutcome {
+  Operation mode;
+  std::string problem;
+  std::string note;
+};
+
+// Four Walks in walkBothModesAndRecord's order, judged per mode against one OID list: the first
+// sound Walk's. That is the GETNEXT-mode streaming Walk's unless that one failed, when the next
+// sound one stands in so the rest are still compared with something. The reference is compared
+// with itself too, which is harmless. Only a sound Walk reaches the comparison, so when none is
+// sound, what stands in is never read.
+[[nodiscard]] inline std::vector<ModeOutcome> modeOutcomes(const std::vector<Walked>& walks) {
   const auto sound = std::ranges::find_if(walks, isSound);
   const Walked& reference = sound == walks.end() ? walks.front() : *sound;
+  const bool standIn = sound != walks.begin() && sound != walks.end();
   const std::string note =
-      &reference == &walks.front()
-          ? std::string()
-          : "held to " + walkName(reference) + ", since " + walkName(walks.front()) + " failed";
-  for (const auto mode : {Operation::WalkGetNext, Operation::WalkGetBulk}) {
+      standIn ? "held to " + walkName(*sound) + ", since " + walkName(walks.front()) + " failed"
+              : std::string();
+  std::vector<ModeOutcome> outcomes;
+  for (const auto mode : walkModes) {
     std::string problem;
     for (const auto& walked : walks) {
       if (walked.mode != mode) continue;
@@ -192,7 +199,24 @@ void walkBothModesAndRecord(const Target& target, const Auth& auth, const std::s
         break;
       }
     }
-    recordOutcome(operationLabel(mode, label), problem, note);
+    outcomes.push_back({mode, std::move(problem), note});
+  }
+  return outcomes;
+}
+
+// Four Walks of interfacesGroup -- GETNEXT mode and GETBULK mode, each streaming and collecting --
+// recorded as `GETNEXT Walk <label>` and `GETBULK Walk <label>`. Run together because they are
+// held to one OID list.
+template <typename Auth>
+void walkBothModesAndRecord(const Target& target, const Auth& auth, const std::string& label) {
+  std::vector<Walked> walks;
+  for (const auto mode : walkModes) {
+    for (const auto shape : {WalkShape::Streaming, WalkShape::Collecting}) {
+      walks.push_back({mode, shape, walk(target, auth, mode, shape)});
+    }
+  }
+  for (const auto& outcome : modeOutcomes(walks)) {
+    recordOutcome(operationLabel(outcome.mode, label), outcome.problem, outcome.note);
   }
 }
 

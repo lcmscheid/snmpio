@@ -2,6 +2,8 @@
 
 #include <cstdint>
 #include <optional>
+#include <stdexcept>
+#include <string>
 #include <vector>
 
 #include <snmpio/Error.hpp>
@@ -16,11 +18,14 @@ namespace snmpio {
 namespace {
 
 using test::interfacesGroup;
+using test::modeOutcomes;
 using test::Operation;
 using test::sameOidsProblem;
+using test::Walked;
 using test::walkProblem;
 using test::walkRepetitions;
 using test::WalkRun;
+using test::WalkShape;
 
 // The max-repetitions each mode's Walk is sent with.
 const std::int32_t bulkModeRepetitions = walkRepetitions(Operation::WalkGetBulk);
@@ -105,6 +110,94 @@ TEST(InteropWalk, ComparesTwoWalksOidForOid) {
   auto other = ifOids(25);
   other[12] = ifEntry(9, 9);
   EXPECT_NE(sameOidsProblem(ifOids(25), other), "");
+}
+
+// Only a Walk has a mode. Anything else asked for one is a mistake in the suite, not a GETBULK-mode
+// Walk.
+TEST(InteropWalk, GivesMaxRepetitionsOnlyToAWalk) {
+  EXPECT_EQ(nextModeRepetitions, 0);
+  EXPECT_GT(bulkModeRepetitions, 0);
+  EXPECT_THROW((void)walkRepetitions(Operation::GetBulk), std::invalid_argument);
+  EXPECT_THROW((void)walkRepetitions(Operation::GetNext), std::invalid_argument);
+  EXPECT_THROW((void)walkRepetitions(Operation::Get), std::invalid_argument);
+}
+
+// The four Walks walkBothModesAndRecord runs, in its order, each sound and listing the same OIDs.
+std::vector<Walked> fourSoundWalks() {
+  return {
+      {Operation::WalkGetNext, WalkShape::Streaming, streamed(ifOids(25), 25)},
+      {Operation::WalkGetNext, WalkShape::Collecting, collected(ifOids(25))},
+      {Operation::WalkGetBulk, WalkShape::Streaming, streamed(ifOids(25), 3)},
+      {Operation::WalkGetBulk, WalkShape::Collecting, collected(ifOids(25))},
+  };
+}
+
+void timeOut(Walked& walked) {
+  walked.run.ec = make_error_code(Errc::Timeout);
+}
+
+bool mentions(const std::string& text, const std::string& part) {
+  return text.find(part) != std::string::npos;
+}
+
+TEST(InteropWalk, PassesFourWalksThatListTheSameOids) {
+  const auto outcomes = modeOutcomes(fourSoundWalks());
+  ASSERT_EQ(outcomes.size(), 2U);
+  EXPECT_EQ(outcomes[0].mode, Operation::WalkGetNext);
+  EXPECT_EQ(outcomes[1].mode, Operation::WalkGetBulk);
+  for (const auto& outcome : outcomes) {
+    EXPECT_EQ(outcome.problem, "");
+    EXPECT_EQ(outcome.note, "");
+  }
+}
+
+TEST(InteropWalk, HoldsEveryWalkToTheGetNextModeStreamingOne) {
+  auto walks = fourSoundWalks();
+  walks[3].run.oids.pop_back();
+  const auto outcomes = modeOutcomes(walks);
+  EXPECT_EQ(outcomes[0].problem, "");
+  EXPECT_TRUE(mentions(outcomes[1].problem, "collecting"));
+  EXPECT_TRUE(mentions(outcomes[1].problem, "against the GETNEXT-mode streaming Walk"));
+}
+
+// The fallback: a failed first Walk fails its own row, and the next sound one stands in, so the
+// other mode is still compared with something -- and its ok row says what with.
+TEST(InteropWalk, HoldsTheRestToTheNextSoundWalkWhenTheFirstFails) {
+  auto walks = fourSoundWalks();
+  timeOut(walks[0]);
+  const auto outcomes = modeOutcomes(walks);
+  EXPECT_TRUE(mentions(outcomes[0].problem, "streaming"));
+  EXPECT_EQ(outcomes[1].problem, "");
+  EXPECT_EQ(
+      outcomes[1].note,
+      "held to the GETNEXT-mode collecting Walk, since the GETNEXT-mode streaming Walk failed");
+}
+
+TEST(InteropWalk, FailsAWalkThatDisagreesWithTheStandIn) {
+  auto walks = fourSoundWalks();
+  timeOut(walks[0]);
+  walks[2].run.oids.pop_back();
+  const auto outcomes = modeOutcomes(walks);
+  EXPECT_TRUE(mentions(outcomes[1].problem, "against the GETNEXT-mode collecting Walk"));
+}
+
+// With both GETNEXT-mode Walks failed, the GETBULK-mode ones are still held to each other.
+TEST(InteropWalk, HoldsTheGetBulkModeWalksToEachOtherWhenNeitherGetNextOneIsSound) {
+  auto walks = fourSoundWalks();
+  timeOut(walks[0]);
+  timeOut(walks[1]);
+  walks[3].run.oids.pop_back();
+  const auto outcomes = modeOutcomes(walks);
+  EXPECT_NE(outcomes[0].problem, "");
+  EXPECT_TRUE(mentions(outcomes[1].problem, "against the GETBULK-mode streaming Walk"));
+}
+
+TEST(InteropWalk, FailsBothRowsWhenNoWalkIsSound) {
+  auto walks = fourSoundWalks();
+  for (auto& walked : walks) timeOut(walked);
+  const auto outcomes = modeOutcomes(walks);
+  EXPECT_NE(outcomes[0].problem, "");
+  EXPECT_NE(outcomes[1].problem, "");
 }
 
 }  // namespace

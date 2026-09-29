@@ -53,13 +53,12 @@ using test::securityLevelPairs;
 using test::sha256Row;
 using test::sysDescr;
 using test::walkBothModesAndRecord;
+using test::walkModes;
 
-// The operations run at every Security Level, and the ones run again under every privacy
-// protocol: GETBULK and Walk, whose Responses are large enough to cross many cipher blocks.
+// The operations run at every Security Level besides GET and test::walkModes. GETBULK and the
+// Walks run again under every privacy protocol, since their Responses cross many cipher blocks.
 constexpr std::initializer_list<Operation> getNextAndGetBulk{Operation::GetNext,
                                                              Operation::GetBulk};
-constexpr std::initializer_list<Operation> walkModes{Operation::WalkGetNext,
-                                                     Operation::WalkGetBulk};
 
 // Record that the rows of `operations` at every Security Level were skipped for the same reason.
 void recordSecurityLevelsSkipped(std::initializer_list<Operation> operations,
@@ -171,13 +170,15 @@ class InteropV3 : public ::testing::Test {
   // The pairs the privacy-protocol tests cover: every privacy protocol on SHA-256, then the Key
   // Extension rows on SHA-1 when the run says the Agent serves them. `send(credentials, label)`
   // runs once per pair, and the rows of `operations` it does not reach are recorded as skipped --
-  // all of them for a named user, which is one user and so one cipher.
+  // all of them for a named user, which is one user and so one cipher. Returns why the whole test
+  // skips, for the caller to skip on: GTEST_SKIP here would return from this, not from the test.
   template <typename Send>
-  void underEveryPrivacyProtocol(std::initializer_list<Operation> operations, Send send) {
+  [[nodiscard]] std::optional<std::string> underEveryPrivacyProtocol(
+      std::initializer_list<Operation> operations, Send send) {
     if (m_named) {
-      const auto reason = namedUserOnly();
+      auto reason = namedUserOnly();
       recordPrivacySkipped(operations, reason);
-      GTEST_SKIP() << reason;
+      return reason;
     }
     for (const auto& priv : privProtocols) {
       send(credentials(sha256Row, priv), pairLabel(sha256Row, priv));
@@ -186,11 +187,12 @@ class InteropV3 : public ::testing::Test {
       for (const auto operation : operations) {
         recordKeyExtensionsSkipped(operation, keyExtensionsUnset);
       }
-      return;
+      return std::nullopt;
     }
     for (const auto& priv : keyExtensionProtocols) {
       send(credentials(keyExtensionAuthRow, priv), pairLabel(keyExtensionAuthRow, priv));
     }
+    return std::nullopt;
   }
 
   Target m_target;
@@ -266,10 +268,11 @@ TEST_F(InteropV3, GetNextAndGetBulkAtEverySecurityLevel) {
 // test's authPriv row again, and test::replaces says which of the two the summary keeps. The Key
 // Extension rows are gated as the GET ones are, and on SHA-1 for the same reason.
 TEST_F(InteropV3, GetBulkUnderEveryPrivacyProtocol) {
-  underEveryPrivacyProtocol({Operation::GetBulk},
-                            [&](const Credentials& user, const std::string& label) {
-                              getBulkAndRecord(m_target, user, label);
-                            });
+  const auto skipped = underEveryPrivacyProtocol(
+      {Operation::GetBulk}, [&](const Credentials& credentials, const std::string& label) {
+        getBulkAndRecord(m_target, credentials, label);
+      });
+  if (skipped) GTEST_SKIP() << *skipped;
 }
 
 // A Walk that needs several batches, in both modes, each streaming and collecting, at every
@@ -291,9 +294,11 @@ TEST_F(InteropV3, WalksSeveralBatchesAtEverySecurityLevel) {
 // many encrypted Responses, each running to many cipher blocks, where
 // GetBulkUnderEveryPrivacyProtocol is one. The same pairs as that test, gated the same way.
 TEST_F(InteropV3, WalksSeveralBatchesUnderEveryPrivacyProtocol) {
-  underEveryPrivacyProtocol(walkModes, [&](const Credentials& user, const std::string& label) {
-    walkBothModesAndRecord(m_target, user, label);
-  });
+  const auto skipped = underEveryPrivacyProtocol(
+      walkModes, [&](const Credentials& credentials, const std::string& label) {
+        walkBothModesAndRecord(m_target, credentials, label);
+      });
+  if (skipped) GTEST_SKIP() << *skipped;
 }
 
 // The Engine Discovery criterion, stated the way it is observable: the first request against an
@@ -367,13 +372,13 @@ TEST_F(InteropV3, SurfacesAWrongPasswordAsAReport) {
   wrong.authPassword += "-and-then-some";
   const auto wrongResult = get(m_target, wrong);
   EXPECT_EQ(wrongResult.ec, make_error_code(Errc::AuthFailed))
-      << "got " << wrongResult.ec.category().name() << ": " << wrongResult.ec.message();
+      << "got " << test::errorText(wrongResult.ec);
 
   Credentials nobody = wrong;  // the password is irrelevant to a user the Agent has not got
   nobody.userName = "nobody-by-that-name";
   const auto unknown = get(m_target, nobody);
   EXPECT_EQ(unknown.ec, make_error_code(Errc::UnknownUserName))
-      << "got " << unknown.ec.category().name() << ": " << unknown.ec.message();
+      << "got " << test::errorText(unknown.ec);
 }
 
 }  // namespace

@@ -53,7 +53,7 @@ enum class Operation : std::uint8_t { Get, GetNext, GetBulk };
 
 // How many Varbinds a GETNEXT carries. Several is the whole check: each answered from its own
 // requested OID. One is what an Agent with the defect below can still be held to.
-enum class GetNextShape : std::uint8_t { SeveralVarbinds, OneVarbind };
+enum class GetNextVarbinds : std::uint8_t { Several, One };
 
 // Why this Agent is sent one Varbind per GETNEXT, or nothing when it can take several. Both pinned
 // Simulator images answer a GETNEXT carrying several Varbinds from the last requested OID
@@ -69,18 +69,25 @@ enum class GetNextShape : std::uint8_t { SeveralVarbinds, OneVarbind };
 }
 
 // GETNEXT asks for {system, sysDescr.0}, or {system}.
-[[nodiscard]] inline std::vector<Oid> getNextRequest(GetNextShape shape) {
-  if (shape == GetNextShape::OneVarbind) return {systemGroup};
+[[nodiscard]] inline std::vector<Oid> getNextRequest(GetNextVarbinds count) {
+  if (count == GetNextVarbinds::One) return {systemGroup};
   return {systemGroup, sysDescr};
 }
 
-// GETBULK asks for {system | system, sysDescr.0}: one non-repeater, then two repeating columns.
-inline constexpr std::size_t bulkNonRepeaters = 1;
-inline constexpr std::size_t bulkColumns = 2;
+// GETBULK asks for {system | system, sysDescr.0}: `system` as its one non-repeater, then a column
+// from each of these.
+inline const std::vector<Oid> bulkColumns{systemGroup, sysDescr};
+inline constexpr std::size_t columnFromSysDescr = 1;
+
+[[nodiscard]] inline std::vector<Oid> getBulkRequest() {
+  std::vector<Oid> request{systemGroup};
+  request.insert(request.end(), bulkColumns.begin(), bulkColumns.end());
+  return request;
+}
 
 // The GETBULK Varbind in `row` of `column`, counted past the non-repeater.
 [[nodiscard]] inline std::size_t bulkIndex(std::size_t row, std::size_t column) {
-  return bulkNonRepeaters + (row * bulkColumns) + column;
+  return 1 + (row * bulkColumns.size()) + column;
 }
 
 [[nodiscard]] inline bool isException(const Varbind& varbind) {
@@ -99,15 +106,23 @@ inline constexpr std::size_t bulkColumns = 2;
   return std::string(result.ec.category().name()) + ": " + result.ec.message();
 }
 
+// What GETBULK's column from sysDescr.0 starts with -- its answer for the successor of sysDescr.0
+// -- or nothing when that GETBULK failed or stopped short of it, which fails its own row.
+[[nodiscard]] inline std::optional<Varbind> bulkSuccessorOfSysDescr(const ExchangeResult& bulk) {
+  const auto index = bulkIndex(0, columnFromSysDescr);
+  if (bulk.ec || bulk.response.varbinds.size() <= index) return std::nullopt;
+  return bulk.response.varbinds[index];
+}
+
 // GETNEXT of {system, sysDescr.0}: the first comes back as sysDescr.0, its immediate successor.
-// What the second's immediate successor is, no pinned MIB content says -- so it is held to what
-// GETBULK's column from sysDescr.0 starts with, the same successor asked through another PDU.
-// With one Varbind, only the first.
-[[nodiscard]] inline std::string getNextProblem(const ExchangeResult& next, GetNextShape shape,
-                                                const ExchangeResult& bulk) {
+// What the second's immediate successor is, no pinned MIB content says -- so it is held to
+// `fromBulk`, the same successor asked through another PDU, when there is one. With one Varbind,
+// only the first.
+[[nodiscard]] inline std::string getNextProblem(const ExchangeResult& next, GetNextVarbinds count,
+                                                const std::optional<Varbind>& fromBulk) {
   if (auto problem = transportProblem(next); !problem.empty()) return problem;
   const auto& varbinds = next.response.varbinds;
-  const auto requested = getNextRequest(shape);
+  const auto requested = getNextRequest(count);
   if (varbinds.size() != requested.size()) {
     return "asked for " + std::to_string(requested.size()) + " successors, got " +
            std::to_string(varbinds.size());
@@ -120,18 +135,13 @@ inline constexpr std::size_t bulkColumns = 2;
       return varbind.name.toString() + " came back as " + toString(varbind.val);
     }
   }
-  if (shape == GetNextShape::OneVarbind) return {};
+  if (count == GetNextVarbinds::One) return {};
   if (!(sysDescr < varbinds[1].name)) {
     return "the successor of sysDescr.0 does not follow it: " + varbinds[1].name.toString();
   }
-  // A GETBULK that failed, or was too short to reach its column from sysDescr.0, fails its own
-  // row; there is nothing here to compare with.
-  const auto fromBulk = bulkIndex(0, 1);
-  if (bulk.ec || bulk.response.varbinds.size() <= fromBulk) return {};
-  const auto& bulkSuccessor = bulk.response.varbinds[fromBulk];
-  if (isException(bulkSuccessor) || bulkSuccessor.name != varbinds[1].name) {
+  if (fromBulk && (isException(*fromBulk) || fromBulk->name != varbinds[1].name)) {
     return "the successor of sysDescr.0 is " + varbinds[1].name.toString() + " by GETNEXT but " +
-           describe(bulkSuccessor) + " by GETBULK";
+           describe(*fromBulk) + " by GETBULK";
   }
   return {};
 }
@@ -143,19 +153,16 @@ inline constexpr std::size_t bulkColumns = 2;
 [[nodiscard]] inline std::string getBulkProblem(const ExchangeResult& bulk) {
   if (auto problem = transportProblem(bulk); !problem.empty()) return problem;
   const auto& varbinds = bulk.response.varbinds;
-  constexpr auto nonRepeaters = bulkNonRepeaters;
-  constexpr auto columns = bulkColumns;
-  const std::vector<Oid> requested{systemGroup, sysDescr};
+  const std::size_t columns = bulkColumns.size();
   // An Agent may drop Varbinds off the end to fit its datagram, and RFC 3416 section 4.2.3 lets
   // that end partway through a row -- so the last row may be short, and is checked as far as it
   // goes. The one row every Response has room for is still required.
-  if (varbinds.size() < nonRepeaters + columns ||
-      varbinds.size() > nonRepeaters + (columns * static_cast<std::size_t>(bulkRepetitions))) {
-    return "asked for " + std::to_string(nonRepeaters) + " non-repeaters and " +
-           std::to_string(bulkRepetitions) + " rows of " + std::to_string(columns) + ", got " +
-           std::to_string(varbinds.size()) + " Varbinds";
+  const auto repetitions = static_cast<std::size_t>(bulkRepetitions);
+  if (varbinds.size() < bulkIndex(1, 0) || varbinds.size() > bulkIndex(repetitions, 0)) {
+    return "asked for one non-repeater and " + std::to_string(repetitions) + " rows of " +
+           std::to_string(columns) + ", got " + std::to_string(varbinds.size()) + " Varbinds";
   }
-  const std::size_t rows = (varbinds.size() - nonRepeaters + columns - 1) / columns;
+  const std::size_t rows = (varbinds.size() - bulkIndex(0, 0) + columns - 1) / columns;
   const auto present = [&](std::size_t row, std::size_t column) {
     return bulkIndex(row, column) < varbinds.size();
   };
@@ -169,7 +176,7 @@ inline constexpr std::size_t bulkColumns = 2;
     return "the first repetition of system is sysDescr.0, got " + at(0, 0).name.toString();
   }
   for (std::size_t column = 0; column < columns; ++column) {
-    const Oid* previous = &requested[column];
+    const Oid* previous = &bulkColumns[column];
     bool ended = false;
     for (std::size_t row = 0; row < rows && present(row, column); ++row) {
       const auto& varbind = at(row, column);
@@ -193,7 +200,7 @@ inline constexpr std::size_t bulkColumns = 2;
   }
   for (std::size_t row = 0; row + 1 < rows && present(row + 1, 0); ++row) {
     const auto& late = at(row + 1, 0);
-    const auto& early = at(row, 1);
+    const auto& early = at(row, columnFromSysDescr);
     // Both columns running out together is the one way they may stop agreeing on an OID; one
     // running out while the other still has the successor it should have reached is a mismatch.
     if (isException(late) && isException(early)) break;
@@ -209,25 +216,23 @@ inline constexpr std::size_t bulkColumns = 2;
 // Record `problem` against `label` in the run summary, and fail the test on it. Recorded before
 // the assertion, so a failing row is still in the summary. `note` is what an ok row did not prove.
 inline void recordOutcome(const std::string& label, const std::string& problem,
-                          const std::string& note = {}) {
+                          const std::string& note) {
   recordPair(label, problem.empty(), problem.empty() ? note : problem);
   EXPECT_TRUE(problem.empty()) << label << ": " << problem;
 }
 
 // `auth` is a Community or a Credentials.
 template <typename Auth>
-ExchangeResult sendGetNext(const Target& target, const Auth& auth, GetNextShape shape) {
+ExchangeResult sendGetNext(const Target& target, const Auth& auth, GetNextVarbinds count) {
   return exchange([&](Client& client, auto handler) {
-    client.asyncGetNext(target, auth, getNextRequest(shape), std::move(handler));
+    client.asyncGetNext(target, auth, getNextRequest(count), std::move(handler));
   });
 }
 
 template <typename Auth>
 ExchangeResult sendGetBulk(const Target& target, const Auth& auth) {
   return exchange([&](Client& client, auto handler) {
-    client.asyncGetBulk(target, auth, {systemGroup, systemGroup, sysDescr},
-                        static_cast<std::int32_t>(bulkNonRepeaters), bulkRepetitions,
-                        std::move(handler));
+    client.asyncGetBulk(target, auth, getBulkRequest(), 1, bulkRepetitions, std::move(handler));
   });
 }
 
@@ -236,19 +241,24 @@ ExchangeResult sendGetBulk(const Target& target, const Auth& auth) {
 template <typename Auth>
 void getNextAndGetBulkAndRecord(const Target& target, const Auth& auth, const std::string& label) {
   const auto broken = severalVarbindGetNextBroken();
-  const auto shape = broken ? GetNextShape::OneVarbind : GetNextShape::SeveralVarbinds;
-  const auto next = sendGetNext(target, auth, shape);
+  const auto count = broken ? GetNextVarbinds::One : GetNextVarbinds::Several;
+  const auto next = sendGetNext(target, auth, count);
   const auto bulk = sendGetBulk(target, auth);
-  recordOutcome(operationLabel(Operation::GetNext, label), getNextProblem(next, shape, bulk),
-                broken.value_or(""));
-  recordOutcome(operationLabel(Operation::GetBulk, label), getBulkProblem(bulk));
+  const auto fromBulk = bulkSuccessorOfSysDescr(bulk);
+  std::string note = broken.value_or("");
+  if (!broken && !fromBulk) {
+    note = "the successor of sysDescr.0 held only to following it: GETBULK gave none to compare";
+  }
+  recordOutcome(operationLabel(Operation::GetNext, label), getNextProblem(next, count, fromBulk),
+                note);
+  recordOutcome(operationLabel(Operation::GetBulk, label), getBulkProblem(bulk), {});
 }
 
 // One GETBULK, recorded as `GETBULK <label>`.
 template <typename Auth>
 void getBulkAndRecord(const Target& target, const Auth& auth, const std::string& label) {
   recordOutcome(operationLabel(Operation::GetBulk, label),
-                getBulkProblem(sendGetBulk(target, auth)));
+                getBulkProblem(sendGetBulk(target, auth)), {});
 }
 
 // Record that every row of the GET matrix was skipped for the same reason.

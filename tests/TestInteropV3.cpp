@@ -223,12 +223,13 @@ TEST_F(InteropV3, GetNextAndGetBulkAtEverySecurityLevel) {
 
 // GETBULK under every privacy protocol the Agent speaks, at the size test::bulkRepetitions picks
 // for it, on data an Agent nobody here wrote encrypted. The AES-128 row is the Security Level
-// test's authPriv row again, and the summary keeps whichever of the two failed. The Key Extension
-// rows are gated as the GET ones are, and on SHA-1 for the same reason.
+// test's authPriv row again, and test::replaces says which of the two the summary keeps. The Key
+// Extension rows are gated as the GET ones are, and on SHA-1 for the same reason.
 TEST_F(InteropV3, GetBulkUnderEveryPrivacyProtocol) {
   if (m_named) {
-    recordBulkPrivacySkipped(namedUserOnly());
-    GTEST_SKIP() << namedUserOnly();
+    const auto reason = namedUserOnly();
+    recordBulkPrivacySkipped(reason);
+    GTEST_SKIP() << reason;
   }
   for (const auto& priv : privProtocols) {
     getBulkAndRecord(m_target, credentials(sha256Row, priv), pairLabel(sha256Row, priv));

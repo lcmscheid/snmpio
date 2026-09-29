@@ -69,8 +69,7 @@ inline const Oid sysDescr{1, 3, 6, 1, 2, 1, 1, 1, 0};
   return target;
 }
 
-// The one GET every half of the suite is built on, plus a sysDescr recording so that the run
-// summary can identify the Agent that answered.
+// How one request came back, whichever operation it was.
 struct ExchangeResult {
   net::ErrorCode ec;
   Response response;
@@ -93,6 +92,7 @@ ExchangeResult exchange(Initiate initiate) {
   return result;
 }
 
+// The one GET every half of the suite is built on.
 template <typename Auth>
 ExchangeResult get(const Target& target, const Auth& auth) {
   return exchange([&](Client& client, auto handler) {
@@ -101,7 +101,7 @@ ExchangeResult get(const Target& target, const Auth& auth) {
 }
 
 // Assert that `result` is a successful sysDescr.0 response, and record its OCTET STRING value as
-// the device/firmware identification for the run summary.
+// what identifies the Agent in the run summary.
 inline void expectSysDescr(const ExchangeResult& result, const std::string& what) {
   ASSERT_FALSE(result.ec) << what << ": " << result.ec.category().name() << ": "
                           << result.ec.message();

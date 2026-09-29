@@ -18,7 +18,7 @@ namespace {
 
 struct PairResult {
   std::string label;
-  enum class State { Ok, Failed, Skipped } state;
+  RowOutcome state;
   // What the run did not prove about this row: the failure message for a Failed pair, the reason
   // for a Skipped one, and for an Ok one whatever the check it passed left out.
   std::string reason;
@@ -36,24 +36,13 @@ class InteropSummary {
 
   void setSysDescr(const std::string& sysDescr) { m_sysDescr = sysDescr; }
 
-  // A row two tests reach is printed once, and says the worst they found. A result replaces a
-  // skip, which only means that one test did not reach the row, and a failure replaces an ok --
-  // so neither test order nor which of the two ran second can print a row as proven that one of
-  // them disproved.
-  void recordPair(const std::string& label, bool succeeded, const std::string& error) {
-    PairResult result{label, succeeded ? PairResult::State::Ok : PairResult::State::Failed, error};
-    auto* const existing = find(label);
+  void record(PairResult result) {
+    auto* const existing = find(result.label);
     if (existing == nullptr) {
       m_pairs.push_back(std::move(result));
-    } else if (existing->state == PairResult::State::Skipped ||
-               (existing->state == PairResult::State::Ok && !succeeded)) {
+    } else if (replaces(result.state, existing->state)) {
       *existing = std::move(result);
     }
-  }
-
-  void recordSkip(const std::string& label, std::string reason) {
-    if (find(label) != nullptr) return;
-    m_pairs.push_back({label, PairResult::State::Skipped, std::move(reason)});
   }
 
   void print() const {
@@ -79,13 +68,13 @@ class InteropSummary {
       std::cout << "\nProtocols exercised:\n";
       for (const auto& pair : m_pairs) {
         switch (pair.state) {
-          case PairResult::State::Ok:
+          case RowOutcome::Ok:
             std::cout << "  ok   ";
             break;
-          case PairResult::State::Failed:
+          case RowOutcome::Failed:
             std::cout << "  fail ";
             break;
-          case PairResult::State::Skipped:
+          case RowOutcome::Skipped:
             std::cout << "  skip ";
             break;
         }
@@ -135,12 +124,19 @@ void recordSysDescr(const std::string& sysDescr) {
   InteropSummary::instance().setSysDescr(sysDescr);
 }
 
-void recordPair(const std::string& label, bool succeeded, const std::string& error) {
-  InteropSummary::instance().recordPair(label, succeeded, error);
+void recordPair(const std::string& label, bool succeeded, const std::string& detail) {
+  InteropSummary::instance().record(
+      {label, succeeded ? RowOutcome::Ok : RowOutcome::Failed, detail});
 }
 
 void recordSkip(const std::string& label, std::string reason) {
-  InteropSummary::instance().recordSkip(label, std::move(reason));
+  InteropSummary::instance().record({label, RowOutcome::Skipped, std::move(reason)});
+}
+
+bool replaces(RowOutcome incoming, RowOutcome existing) {
+  if (incoming == RowOutcome::Skipped) return false;
+  return existing == RowOutcome::Skipped ||
+         (existing == RowOutcome::Ok && incoming == RowOutcome::Failed);
 }
 
 }  // namespace snmpio::test

@@ -380,8 +380,8 @@ authentication protocol, and `priv<hash><cipher>` per pair — because they are 
 Simulator's own example configuration names them otherwise, which is why ours is mounted over it.
 What the Simulator serves is ours too:
 [`fault-agent-values.sh`](tests/interop/fault-agent-values.sh) writes the `values.json` mounted
-beside it, with a fifty-row `interfaces` group for the Walks and the writable and read-only entries
-a SET needs.
+beside it, with fifty instances under `interfaces` for the Walks and the writable and read-only
+entries a SET needs.
 The matrix is MD5, SHA-1 and the four SHA-2 hashes, each of them alone at `authNoPriv` and again
 over DES and AES-128 at `authPriv`. AES-192/256 under both Key Extensions are four more users, and
 both Agents carry them, so each scheme is read on every commit by an implementation that is not ours
@@ -397,12 +397,13 @@ v2c and at each Security Level on SHA-256 with AES-128, and GETBULK again under 
 protocol. Those two assert successor semantics without pinning any MIB contents: GETNEXT of
 `system` is `sysDescr.0`, which every Agent here already has; a GETBULK's column from `system` is
 its column from `sysDescr.0` one row late, strictly increasing until it reaches `endOfMibView`; and
-GETNEXT of `sysDescr.0` is where that second column starts. And a Walk of `interfaces`, several
-batches long on every Agent, in GETNEXT mode and in GETBULK mode, each streaming and collecting,
-over v2c, at each Security Level and under every privacy protocol. Those assert structure alone —
-every OID inside the Subtree, strictly increasing, a clean end, more than one batch — and hold the
-four Walks to one OID list, so the Agent supplies the expected answer; values are not compared,
-since counters move between Walks.
+GETNEXT of `sysDescr.0` is where that second column starts. And a Walk of `interfaces` in GETNEXT
+mode and in GETBULK mode, each streaming and collecting, over v2c, at each Security Level and under
+every privacy protocol. The Subtree is several batches long on the three Agents CI starts, and on
+most Targets beside them; on one with too few interfaces the Walks fail rather than pass on a
+single batch. The Walks assert structure alone — every OID inside the Subtree, strictly increasing,
+a clean end, more than one batch — and are held to one OID list, so the Agent supplies the expected
+answer; values are not compared, since counters move between Walks.
 It also proves that Engine Discovery costs the extra round trips exactly once, counted off the wire
 by a relay between Client and Agent, since the API deliberately never surfaces it; and that a wrong
 password comes back as the Report the Engine sent rather than as a timeout.

@@ -29,18 +29,18 @@ namespace snmpio::test {
 
 // The Walk's Subtree, on every Agent. Several batches long anywhere: `snmpd` in a container has a
 // loopback and an Ethernet interface, 22 columns each; a switch on the bench has dozens of ports;
-// and tests/interop/fault-agent-values.sh gives the Simulator fifty rows under it, since the
+// and tests/interop/fault-agent-values.sh gives the Simulator fifty instances under it, since the
 // image's own configuration has two.
 inline const Oid interfacesGroup{1, 3, 6, 1, 2, 1, 2};
 
-// What a Walk is asked to do. Zero max-repetitions is GETNEXT mode, what a Target that mishandles
-// GETBULK depends on; GETBULK mode is the library's default, at its default max-repetitions.
-enum class WalkMode : std::uint8_t { GetNext, GetBulk };
-enum class WalkShape : std::uint8_t { Streaming, Collecting };
-
-[[nodiscard]] inline std::int32_t maxRepetitions(WalkMode mode) {
-  return mode == WalkMode::GetNext ? 0 : WalkOptions{}.maxRepetitions;
+// A Walk's mode is its Operation, WalkGetNext or WalkGetBulk. Zero max-repetitions is GETNEXT
+// mode, what a Target that mishandles GETBULK depends on; GETBULK mode is the library's default,
+// at its default max-repetitions.
+[[nodiscard]] inline std::int32_t walkRepetitions(Operation mode) {
+  return mode == Operation::WalkGetNext ? 0 : WalkOptions{}.maxRepetitions;
 }
+
+enum class WalkShape : std::uint8_t { Streaming, Collecting };
 
 // How one Walk came back: its completion, the OIDs it delivered in order, and -- for a streaming
 // Walk, the only shape that shows them -- how many batches they came in.
@@ -53,12 +53,12 @@ struct WalkRun {
 // The first thing structurally wrong with a Walk of interfacesGroup, or empty when there is
 // nothing. `repetitions` is the max-repetitions it was sent with, zero in GETNEXT mode.
 [[nodiscard]] inline std::string walkProblem(const WalkRun& run, std::int32_t repetitions) {
-  if (run.ec) return std::string(run.ec.category().name()) + ": " + run.ec.message();
+  if (run.ec) return errorText(run.ec);
   if (run.oids.empty()) return "the Walk of " + interfacesGroup.toString() + " came back empty";
   const Oid* previous = &interfacesGroup;
   for (std::size_t i = 0; i < run.oids.size(); ++i) {
     const auto& oid = run.oids[i];
-    const std::string where = "row " + std::to_string(i) + ": ";
+    const std::string where = "OID " + std::to_string(i) + ": ";
     if (!interfacesGroup.isPrefixOf(oid)) {
       return where + oid.toString() + " is outside " + interfacesGroup.toString();
     }
@@ -68,7 +68,7 @@ struct WalkRun {
   }
   // The one place batching is the behaviour under test: a Walk that ended in one round trip never
   // continued from one Response to the next request. A streaming Walk shows its batches; a
-  // collecting one does not, but more rows than one batch carries needed more than one.
+  // collecting one does not, but more OIDs than one batch carries needed more than one.
   if (run.batches) {
     if (*run.batches > 1) return {};
     return "the Walk came in " + std::to_string(*run.batches) +
@@ -76,7 +76,7 @@ struct WalkRun {
   }
   const auto perBatch = static_cast<std::size_t>(std::max(repetitions, 1));
   if (run.oids.size() > perBatch) return {};
-  return "the Walk collected " + std::to_string(run.oids.size()) + " rows, which one batch of " +
+  return "the Walk collected " + std::to_string(run.oids.size()) + " OIDs, which one batch of " +
          std::to_string(perBatch) + " carries, so it may never have needed a second request";
 }
 
@@ -85,22 +85,22 @@ struct WalkRun {
                                                  const std::vector<Oid>& other) {
   const auto [ref, oth] = std::ranges::mismatch(reference, other);
   if (ref == reference.end() && oth == other.end()) return {};
-  const auto row = static_cast<std::size_t>(ref - reference.begin());
+  const auto position = static_cast<std::size_t>(ref - reference.begin());
   const auto said = [](const std::vector<Oid>& oids, std::vector<Oid>::const_iterator it) {
     return it == oids.end() ? std::string("the end of the Walk") : it->toString();
   };
-  return "row " + std::to_string(row) + " is " + said(other, oth) + " but was " +
+  return "OID " + std::to_string(position) + " is " + said(other, oth) + " but was " +
          said(reference, ref);
 }
 
 // One Walk of interfacesGroup on a Client of its own, run to completion. `auth` is a Community or
 // a Credentials.
 template <typename Auth>
-WalkRun walk(const Target& target, const Auth& auth, WalkMode mode, WalkShape shape) {
+WalkRun walk(const Target& target, const Auth& auth, Operation mode, WalkShape shape) {
   net::IoContext io;
   Client client(io.get_executor());
   WalkOptions options;
-  options.maxRepetitions = maxRepetitions(mode);
+  options.maxRepetitions = walkRepetitions(mode);
   WalkRun run;
 
   if (shape == WalkShape::Streaming) {
@@ -118,9 +118,9 @@ WalkRun walk(const Target& target, const Auth& auth, WalkMode mode, WalkShape sh
         });
   } else {
     client.asyncWalkCollect(target, auth, interfacesGroup, options,
-                            [&](net::ErrorCode ec, std::vector<Varbind> rows) {
+                            [&](net::ErrorCode ec, std::vector<Varbind> varbinds) {
                               run.ec = ec;
-                              for (auto& varbind : rows)
+                              for (auto& varbind : varbinds)
                                 run.oids.push_back(std::move(varbind.name));
                               client.stop();
                             });
@@ -129,44 +129,71 @@ WalkRun walk(const Target& target, const Auth& auth, WalkMode mode, WalkShape sh
   return run;
 }
 
-// Both shapes of one mode's Walk: the first thing wrong with either, or with either's OIDs against
-// `reference` -- the GETNEXT-mode streaming Walk, which every other Walk of the Subtree must list
-// OID for OID -- when there is one to compare with.
-[[nodiscard]] inline std::string walkModeProblem(const WalkRun& streaming,
-                                                 const WalkRun& collecting, WalkMode mode,
-                                                 const std::vector<Oid>* reference) {
-  const auto repetitions = maxRepetitions(mode);
-  for (const auto& [run, shape] :
-       {std::pair{&streaming, "streaming"}, {&collecting, "collecting"}}) {
-    if (auto problem = walkProblem(*run, repetitions); !problem.empty()) {
-      return std::string(shape) + ": " + problem;
-    }
-    if (reference == nullptr) continue;
-    if (auto problem = sameOidsProblem(*reference, run->oids); !problem.empty()) {
-      return std::string(shape) + " against the GETNEXT-mode Walk: " + problem;
-    }
+// One of the four Walks walkBothModesAndRecord runs, with what it was asked to do.
+struct Walked {
+  Operation mode;
+  WalkShape shape;
+  WalkRun run;
+};
+
+[[nodiscard]] inline std::string shapeName(WalkShape shape) {
+  return shape == WalkShape::Streaming ? "streaming" : "collecting";
+}
+
+// A Walk as a failure message names it: `the GETBULK-mode collecting Walk`.
+[[nodiscard]] inline std::string walkName(const Walked& walked) {
+  return std::string("the ") + (walked.mode == Operation::WalkGetNext ? "GETNEXT" : "GETBULK") +
+         "-mode " + shapeName(walked.shape) + " Walk";
+}
+
+[[nodiscard]] inline bool isSound(const Walked& walked) {
+  return walkProblem(walked.run, walkRepetitions(walked.mode)).empty();
+}
+
+// The first thing wrong with one Walk: its own structure, then its OIDs against `reference`'s.
+[[nodiscard]] inline std::string walkedProblem(const Walked& walked, const Walked& reference) {
+  if (auto problem = walkProblem(walked.run, walkRepetitions(walked.mode)); !problem.empty()) {
+    return problem;
+  }
+  if (auto problem = sameOidsProblem(reference.run.oids, walked.run.oids); !problem.empty()) {
+    return "against " + walkName(reference) + ": " + problem;
   }
   return {};
 }
 
 // Four Walks of interfacesGroup -- GETNEXT mode and GETBULK mode, each streaming and collecting --
-// recorded as `GETNEXT Walk <label>` and `GETBULK Walk <label>`. Run together because the
-// GETNEXT-mode streaming Walk is what the other three are compared to.
+// recorded as `GETNEXT Walk <label>` and `GETBULK Walk <label>`, each row failing on the first
+// thing wrong with either of its mode's two Walks. Run together because they are held to one OID
+// list.
 template <typename Auth>
 void walkBothModesAndRecord(const Target& target, const Auth& auth, const std::string& label) {
-  const auto nextStreaming = walk(target, auth, WalkMode::GetNext, WalkShape::Streaming);
-  const auto nextCollecting = walk(target, auth, WalkMode::GetNext, WalkShape::Collecting);
-  const auto bulkStreaming = walk(target, auth, WalkMode::GetBulk, WalkShape::Streaming);
-  const auto bulkCollecting = walk(target, auth, WalkMode::GetBulk, WalkShape::Collecting);
-  // A GETNEXT-mode Walk that failed is no list to hold the others to; its own row fails, and the
-  // GETBULK row says what it was not compared with rather than blaming GETBULK for the difference.
-  const bool comparable = walkProblem(nextStreaming, maxRepetitions(WalkMode::GetNext)).empty();
-  const auto* const reference = comparable ? &nextStreaming.oids : nullptr;
-  recordOutcome(operationLabel(Operation::WalkGetNext, label),
-                walkModeProblem(nextStreaming, nextCollecting, WalkMode::GetNext, reference), {});
-  recordOutcome(operationLabel(Operation::WalkGetBulk, label),
-                walkModeProblem(bulkStreaming, bulkCollecting, WalkMode::GetBulk, reference),
-                comparable ? "" : "not compared with the GETNEXT-mode Walk, which failed");
+  std::vector<Walked> walks;
+  for (const auto mode : {Operation::WalkGetNext, Operation::WalkGetBulk}) {
+    for (const auto shape : {WalkShape::Streaming, WalkShape::Collecting}) {
+      walks.push_back({mode, shape, walk(target, auth, mode, shape)});
+    }
+  }
+  // The list is the first sound Walk's: the GETNEXT-mode streaming Walk's, unless that one failed,
+  // when the next sound one stands in so the rest are still compared with something. Only a sound
+  // Walk reaches the comparison, so when none is sound, what stands in is never read.
+  const auto sound = std::ranges::find_if(walks, isSound);
+  const Walked& reference = sound == walks.end() ? walks.front() : *sound;
+  const std::string note =
+      &reference == &walks.front()
+          ? std::string()
+          : "held to " + walkName(reference) + ", since " + walkName(walks.front()) + " failed";
+  for (const auto mode : {Operation::WalkGetNext, Operation::WalkGetBulk}) {
+    std::string problem;
+    for (const auto& walked : walks) {
+      if (walked.mode != mode) continue;
+      problem = walkedProblem(walked, reference);
+      if (!problem.empty()) {
+        problem = shapeName(walked.shape) + ": " + problem;
+        break;
+      }
+    }
+    recordOutcome(operationLabel(mode, label), problem, note);
+  }
 }
 
 }  // namespace snmpio::test

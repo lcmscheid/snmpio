@@ -12,6 +12,7 @@
 #include <snmpio/Client.hpp>
 #include <snmpio/Oid.hpp>
 #include <snmpio/Value.hpp>
+#include <snmpio/detail/Net.hpp>
 
 #include <gtest/gtest.h>
 
@@ -36,8 +37,9 @@ inline const Oid systemGroup{1, 3, 6, 1, 2, 1, 1};
 inline constexpr std::int32_t bulkRepetitions = 20;
 
 // What a summary row says was sent. GET's rows are the pair or Community alone, which is how the
-// matrix was labelled before any other operation reached an Agent; the rest say their name first,
-// and a Walk's says which mode it traversed in.
+// matrix was labelled before any other operation reached an Agent; the rest say their name first.
+// A Walk is two operations, one per traversal mode, because the mode is what its row reports and
+// what tests/InteropWalk.hpp sends it in.
 enum class Operation : std::uint8_t { Get, GetNext, GetBulk, WalkGetNext, WalkGetBulk };
 
 [[nodiscard]] inline std::string operationLabel(Operation operation, const std::string& label) {
@@ -104,11 +106,15 @@ inline constexpr std::size_t columnFromSysDescr = 1;
   return isException(varbind) ? std::string(toString(varbind.val)) : varbind.name.toString();
 }
 
-// The first thing wrong with a result, or empty when there is nothing: the text a summary row and
-// a failure message both carry.
+// An operation's failed completion as a summary row and a failure message both say it.
+[[nodiscard]] inline std::string errorText(const net::ErrorCode& ec) {
+  return std::string(ec.category().name()) + ": " + ec.message();
+}
+
+// The first thing wrong with a result, or empty when there is nothing.
 [[nodiscard]] inline std::string transportProblem(const ExchangeResult& result) {
   if (!result.ec) return {};
-  return std::string(result.ec.category().name()) + ": " + result.ec.message();
+  return errorText(result.ec);
 }
 
 // What GETBULK's column from sysDescr.0 starts with -- its answer for the successor of sysDescr.0

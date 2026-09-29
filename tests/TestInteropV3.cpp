@@ -168,6 +168,31 @@ class InteropV3 : public ::testing::Test {
            pairLabel(m_named->auth, m_named->priv);
   }
 
+  // The pairs the privacy-protocol tests cover: every privacy protocol on SHA-256, then the Key
+  // Extension rows on SHA-1 when the run says the Agent serves them. `send(credentials, label)`
+  // runs once per pair, and the rows of `operations` it does not reach are recorded as skipped --
+  // all of them for a named user, which is one user and so one cipher.
+  template <typename Send>
+  void underEveryPrivacyProtocol(std::initializer_list<Operation> operations, Send send) {
+    if (m_named) {
+      const auto reason = namedUserOnly();
+      recordPrivacySkipped(operations, reason);
+      GTEST_SKIP() << reason;
+    }
+    for (const auto& priv : privProtocols) {
+      send(credentials(sha256Row, priv), pairLabel(sha256Row, priv));
+    }
+    if (!envVar("SNMPIO_INTEROP_V3_KEY_EXTENSIONS")) {
+      for (const auto operation : operations) {
+        recordKeyExtensionsSkipped(operation, keyExtensionsUnset);
+      }
+      return;
+    }
+    for (const auto& priv : keyExtensionProtocols) {
+      send(credentials(keyExtensionAuthRow, priv), pairLabel(keyExtensionAuthRow, priv));
+    }
+  }
+
   Target m_target;
   std::string m_password;
   std::optional<NamedUser> m_named;
@@ -241,22 +266,10 @@ TEST_F(InteropV3, GetNextAndGetBulkAtEverySecurityLevel) {
 // test's authPriv row again, and test::replaces says which of the two the summary keeps. The Key
 // Extension rows are gated as the GET ones are, and on SHA-1 for the same reason.
 TEST_F(InteropV3, GetBulkUnderEveryPrivacyProtocol) {
-  if (m_named) {
-    const auto reason = namedUserOnly();
-    recordPrivacySkipped({Operation::GetBulk}, reason);
-    GTEST_SKIP() << reason;
-  }
-  for (const auto& priv : privProtocols) {
-    getBulkAndRecord(m_target, credentials(sha256Row, priv), pairLabel(sha256Row, priv));
-  }
-  if (!envVar("SNMPIO_INTEROP_V3_KEY_EXTENSIONS")) {
-    recordKeyExtensionsSkipped(Operation::GetBulk, keyExtensionsUnset);
-    return;
-  }
-  for (const auto& priv : keyExtensionProtocols) {
-    getBulkAndRecord(m_target, credentials(keyExtensionAuthRow, priv),
-                     pairLabel(keyExtensionAuthRow, priv));
-  }
+  underEveryPrivacyProtocol({Operation::GetBulk},
+                            [&](const Credentials& user, const std::string& label) {
+                              getBulkAndRecord(m_target, user, label);
+                            });
 }
 
 // A Walk that needs several batches, in both modes, each streaming and collecting, at every
@@ -276,25 +289,11 @@ TEST_F(InteropV3, WalksSeveralBatchesAtEverySecurityLevel) {
 
 // The same Walks under every privacy protocol the Agent speaks: a Subtree several batches long is
 // many encrypted Responses, each running to many cipher blocks, where
-// GetBulkUnderEveryPrivacyProtocol is one. Gated and paired as that test is, for the same reasons.
+// GetBulkUnderEveryPrivacyProtocol is one. The same pairs as that test, gated the same way.
 TEST_F(InteropV3, WalksSeveralBatchesUnderEveryPrivacyProtocol) {
-  if (m_named) {
-    const auto reason = namedUserOnly();
-    recordPrivacySkipped(walkModes, reason);
-    GTEST_SKIP() << reason;
-  }
-  for (const auto& priv : privProtocols) {
-    walkBothModesAndRecord(m_target, credentials(sha256Row, priv), pairLabel(sha256Row, priv));
-  }
-  if (!envVar("SNMPIO_INTEROP_V3_KEY_EXTENSIONS")) {
-    for (const auto operation : walkModes)
-      recordKeyExtensionsSkipped(operation, keyExtensionsUnset);
-    return;
-  }
-  for (const auto& priv : keyExtensionProtocols) {
-    walkBothModesAndRecord(m_target, credentials(keyExtensionAuthRow, priv),
-                           pairLabel(keyExtensionAuthRow, priv));
-  }
+  underEveryPrivacyProtocol(walkModes, [&](const Credentials& user, const std::string& label) {
+    walkBothModesAndRecord(m_target, user, label);
+  });
 }
 
 // The Engine Discovery criterion, stated the way it is observable: the first request against an

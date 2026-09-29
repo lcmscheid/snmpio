@@ -12,7 +12,7 @@
 #     writable entry the SET tests write and restore, as on `snmpd`; and sysLocation.0. sysDescr.0
 #     is `readOnly`, which is the entry a refused SET targets: the Simulator has no per-user access
 #     control, so a read-only object is the only refusal it can give.
-#   - `interfaces`: ifNumber.0 and ten columns of ifTable over five interfaces, 51 rows -- the
+#   - `interfaces`: ifNumber.0 and ten columns of ifTable over five interfaces, 51 instances -- the
 #     Subtree tests/InteropWalk.hpp walks, several batches long at the library's default
 #     max-repetitions. Columns 10 and 16 sort after 9 by sub-identifier and before it as text, so
 #     an Agent that ordered OIDs as strings would fail the Walk rather than pass it.
@@ -20,7 +20,8 @@
 #     does on `snmpd`, rather than at the end of the MIB view.
 #
 # Each entry has one value, so what a test reads is what this says: the Simulator picks among
-# several at random on startup. Only what RFC 2863 makes writable is writable here.
+# several at random on startup. RFC 2863 makes all of ifAdminStatus writable, but only
+# ifAdminStatus.1 is here: one writable entry in ifTable is all a SET test needs.
 set -eu
 
 first=1
@@ -41,7 +42,7 @@ value 1.3.6.1.2.1.1.6.0 string "rack 4, row B"
 
 interfaces=5
 value 1.3.6.1.2.1.2.1.0 integer "$interfaces" readOnly
-# <column>:<type>:<value>, in column order. ifAdminStatus (7) is the one read-write column.
+# <column>:<type>:<value>, in column order. Of ifAdminStatus (7), only interface 1's is writable.
 for column in 1:integer: 2:string: 3:integer:6 4:integer:1500 5:gauge:1000000000 \
               7:integer:1 8:integer:1 9:timeticks:0 10:counter:0 16:counter:0; do
   number=${column%%:*}
@@ -56,7 +57,7 @@ for column in 1:integer: 2:string: 3:integer:6 4:integer:1500 5:gauge:1000000000
       2) v="eth$((i - 1))" ;;
       *) v=$fixed ;;
     esac
-    if [ "$number" = 7 ]; then
+    if [ "$number.$i" = 7.1 ]; then
       value "1.3.6.1.2.1.2.2.1.$number.$i" "$type" "$v"
     else
       value "1.3.6.1.2.1.2.2.1.$number.$i" "$type" "$v" readOnly

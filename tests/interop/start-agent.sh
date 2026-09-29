@@ -139,7 +139,9 @@ fetch >&2
 # The Simulator's image carries its own example configuration; ours is mounted over it so the
 # suite's `auth<hash>` / `priv<hash><cipher>` convention holds against every Agent here and there
 # is no second table saying the same thing, and so it serves the Subtree the Walk tests need.
-# `z` relabels each file for an SELinux host, and is ignored elsewhere.
+# `z` relabels each file for an SELinux host, and is ignored elsewhere. The -v options are built
+# up in the positional parameters, the one array POSIX sh has -- `set --` clears the script's own
+# argument, which is safe only because it was read into $agent above.
 set --
 for mount in $mounts; do
   set -- "$@" -v "$configDir/${mount##*/}:$mount:ro,z"

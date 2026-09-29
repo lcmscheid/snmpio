@@ -31,6 +31,7 @@ using test::CountingRelay;
 using test::credentialsFor;
 using test::envPort;
 using test::envVar;
+using test::errorText;
 using test::get;
 using test::makeInteropTarget;
 using test::sha256Row;
@@ -120,8 +121,8 @@ TEST_F(InteropFaults, RecoversFromAnEngineRestart) {
 
   ASSERT_TRUE(bumped) << "the Simulator did not accept engineBootsBump";
   ASSERT_EQ(results.size(), 2U);
-  EXPECT_FALSE(results[0]) << "before the restart: " << results[0].message();
-  EXPECT_FALSE(results[1]) << "after the restart: " << results[1].message();
+  EXPECT_FALSE(results[0]) << "before the restart: " << errorText(results[0]);
+  EXPECT_FALSE(results[1]) << "after the restart: " << errorText(results[1]);
 }
 
 // Criterion: a boots/time regression is refused rather than cached. RFC 3414 section 2.2.3 lets a
@@ -145,8 +146,8 @@ TEST_F(InteropFaults, RefusesABootsRegression) {
   ASSERT_TRUE(bumped) << "the Simulator did not accept engineBootsBump";
   ASSERT_TRUE(cleared) << "the Simulator did not clear its faults";
   ASSERT_EQ(results.size(), 3U);
-  EXPECT_FALSE(results[0]) << results[0].message();
-  EXPECT_FALSE(results[1]) << "the boots bump did not resynchronise: " << results[1].message();
+  EXPECT_FALSE(results[0]) << errorText(results[0]);
+  EXPECT_FALSE(results[1]) << "the boots bump did not resynchronise: " << errorText(results[1]);
   // That it failed, rather than which code it failed with: what an Agent does with a request it
   // considers untimely is the Agent's choice, and the Simulator makes a third one -- it does not
   // run the check at all, so it answers with its real pair and there is no Report to name. The
@@ -173,8 +174,8 @@ TEST_F(InteropFaults, RefusesATimeRegressionWithinOneBoot) {
   ASSERT_TRUE(shifted) << "the Simulator did not accept engineTimeOffsetS";
   ASSERT_TRUE(cleared) << "the Simulator did not clear its faults";
   ASSERT_EQ(results.size(), 3U);
-  EXPECT_FALSE(results[0]) << results[0].message();
-  EXPECT_FALSE(results[1]) << "the clock jump did not resynchronise: " << results[1].message();
+  EXPECT_FALSE(results[0]) << errorText(results[0]);
+  EXPECT_FALSE(results[1]) << "the clock jump did not resynchronise: " << errorText(results[1]);
   // Failure, and a fresh Client getting in regardless -- the same pair of assertions, and for the
   // same reason, as RefusesABootsRegression states.
   EXPECT_TRUE(results[2]) << "the clock going back was cached rather than refused";
@@ -208,9 +209,9 @@ TEST_F(InteropFaults, RediscoversAnEngineThatChangesItsIdentity) {
 
   ASSERT_TRUE(changed) << "the Simulator did not accept engineIDChange";
   ASSERT_EQ(results.size(), 2U);
-  EXPECT_FALSE(results[0]) << "before the change: " << results[0].message();
+  EXPECT_FALSE(results[0]) << "before the change: " << errorText(results[0]);
   EXPECT_FALSE(results[1]) << "the Engine changed identity and the request did not follow it: "
-                           << results[1].message();
+                           << errorText(results[1]);
 }
 
 // Criterion: `tooBig` degrades max-repetitions and the Walk still finishes.
@@ -258,7 +259,7 @@ TEST_F(InteropFaults, DegradesMaxRepetitionsWhenTheAgentSaysTooBig) {
   ASSERT_GE(asked.size(), 2U);
   EXPECT_LT(asked[1], asked[0]) << "tooBig did not shrink max-repetitions";
   EXPECT_FALSE(walkEc) << "the Walk did not finish once the Agent stopped saying tooBig: "
-                       << walkEc.message();
+                       << errorText(walkEc);
   EXPECT_FALSE(rows.empty());
 }
 
@@ -281,7 +282,7 @@ TEST_F(InteropFaults, FailsAWalkOnANonIncreasingOid) {
                           });
   io.run();
 
-  EXPECT_EQ(walkEc, make_error_code(Errc::NonIncreasingOid)) << walkEc.message();
+  EXPECT_EQ(walkEc, make_error_code(Errc::NonIncreasingOid)) << errorText(walkEc);
 }
 
 // Criterion: malformed BER is dropped, leaving the request outstanding until it times out.
@@ -319,7 +320,7 @@ TEST_F(InteropFaults, DropsMalformedBerAndTimesOut) {
 
   EXPECT_EQ(ec, make_error_code(Errc::Timeout))
       << "an undecodable Response must leave the request outstanding, not fail it: "
-      << ec.message();
+      << errorText(ec);
   EXPECT_GT(relay.datagramsFromTarget(), 0)
       << "the Agent never answered, so nothing was there to drop";
 }

@@ -2,8 +2,8 @@
 
 #include <array>
 #include <cstddef>
-#include <initializer_list>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -57,12 +57,11 @@ using test::walkModes;
 
 // The operations run at every Security Level besides GET and test::walkModes. GETBULK and the
 // Walks run again under every privacy protocol, since their Responses cross many cipher blocks.
-constexpr std::initializer_list<Operation> getNextAndGetBulk{Operation::GetNext,
-                                                             Operation::GetBulk};
+constexpr std::array getNextAndGetBulk{Operation::GetNext, Operation::GetBulk};
+constexpr std::array getBulkAlone{Operation::GetBulk};
 
 // Record that the rows of `operations` at every Security Level were skipped for the same reason.
-void recordSecurityLevelsSkipped(std::initializer_list<Operation> operations,
-                                 const std::string& reason) {
+void recordSecurityLevelsSkipped(std::span<const Operation> operations, const std::string& reason) {
   for (const auto operation : operations) {
     for (const auto& [auth, priv] : securityLevelPairs) {
       recordSkip(operationLabel(operation, pairLabel(auth, priv)), reason);
@@ -72,7 +71,7 @@ void recordSecurityLevelsSkipped(std::initializer_list<Operation> operations,
 
 // Record that the rows of `operations` under every privacy protocol were skipped for the same
 // reason.
-void recordPrivacySkipped(std::initializer_list<Operation> operations, const std::string& reason) {
+void recordPrivacySkipped(std::span<const Operation> operations, const std::string& reason) {
   for (const auto operation : operations) {
     for (const auto& priv : privProtocols) {
       recordSkip(operationLabel(operation, pairLabel(sha256Row, priv)), reason);
@@ -88,7 +87,7 @@ void recordEveryRowSkipped(const std::string& reason) {
   recordKeyExtensionsSkipped(Operation::Get, reason);
   recordSecurityLevelsSkipped(getNextAndGetBulk, reason);
   recordSecurityLevelsSkipped(walkModes, reason);
-  recordPrivacySkipped({Operation::GetBulk}, reason);
+  recordPrivacySkipped(getBulkAlone, reason);
   recordPrivacySkipped(walkModes, reason);
 }
 
@@ -170,15 +169,14 @@ class InteropV3 : public ::testing::Test {
   // The pairs the privacy-protocol tests cover: every privacy protocol on SHA-256, then the Key
   // Extension rows on SHA-1 when the run says the Agent serves them. `send(credentials, label)`
   // runs once per pair, and the rows of `operations` it does not reach are recorded as skipped --
-  // all of them for a named user, which is one user and so one cipher. Returns why the whole test
-  // skips, for the caller to skip on: GTEST_SKIP here would return from this, not from the test.
+  // all of them for a named user, which is one user and so one cipher. That skip marks the test
+  // skipped but returns only from here, so each test ends with this call.
   template <typename Send>
-  [[nodiscard]] std::optional<std::string> underEveryPrivacyProtocol(
-      std::initializer_list<Operation> operations, Send send) {
+  void underEveryPrivacyProtocol(std::span<const Operation> operations, Send send) {
     if (m_named) {
-      auto reason = namedUserOnly();
+      const auto reason = namedUserOnly();
       recordPrivacySkipped(operations, reason);
-      return reason;
+      GTEST_SKIP() << reason;
     }
     for (const auto& priv : privProtocols) {
       send(credentials(sha256Row, priv), pairLabel(sha256Row, priv));
@@ -187,12 +185,11 @@ class InteropV3 : public ::testing::Test {
       for (const auto operation : operations) {
         recordKeyExtensionsSkipped(operation, keyExtensionsUnset);
       }
-      return std::nullopt;
+      return;
     }
     for (const auto& priv : keyExtensionProtocols) {
       send(credentials(keyExtensionAuthRow, priv), pairLabel(keyExtensionAuthRow, priv));
     }
-    return std::nullopt;
   }
 
   Target m_target;
@@ -268,11 +265,10 @@ TEST_F(InteropV3, GetNextAndGetBulkAtEverySecurityLevel) {
 // test's authPriv row again, and test::replaces says which of the two the summary keeps. The Key
 // Extension rows are gated as the GET ones are, and on SHA-1 for the same reason.
 TEST_F(InteropV3, GetBulkUnderEveryPrivacyProtocol) {
-  const auto skipped = underEveryPrivacyProtocol(
-      {Operation::GetBulk}, [&](const Credentials& credentials, const std::string& label) {
-        getBulkAndRecord(m_target, credentials, label);
-      });
-  if (skipped) GTEST_SKIP() << *skipped;
+  underEveryPrivacyProtocol(getBulkAlone,
+                            [&](const Credentials& credentials, const std::string& label) {
+                              getBulkAndRecord(m_target, credentials, label);
+                            });
 }
 
 // A Walk that needs several batches, in both modes, each streaming and collecting, at every
@@ -294,11 +290,10 @@ TEST_F(InteropV3, WalksSeveralBatchesAtEverySecurityLevel) {
 // many encrypted Responses, each running to many cipher blocks, where
 // GetBulkUnderEveryPrivacyProtocol is one. The same pairs as that test, gated the same way.
 TEST_F(InteropV3, WalksSeveralBatchesUnderEveryPrivacyProtocol) {
-  const auto skipped = underEveryPrivacyProtocol(
-      walkModes, [&](const Credentials& credentials, const std::string& label) {
-        walkBothModesAndRecord(m_target, credentials, label);
-      });
-  if (skipped) GTEST_SKIP() << *skipped;
+  underEveryPrivacyProtocol(walkModes,
+                            [&](const Credentials& credentials, const std::string& label) {
+                              walkBothModesAndRecord(m_target, credentials, label);
+                            });
 }
 
 // The Engine Discovery criterion, stated the way it is observable: the first request against an
@@ -340,8 +335,8 @@ TEST_F(InteropV3, DiscoveryCostsExtraRoundTripsOnlyOnce) {
   });
   io.run();
 
-  ASSERT_FALSE(firstEc) << firstEc.message();
-  ASSERT_FALSE(secondEc) << secondEc.message();
+  ASSERT_FALSE(firstEc) << test::errorText(firstEc);
+  ASSERT_FALSE(secondEc) << test::errorText(secondEc);
   // Three on a healthy run -- the engineID probe, the boots/time probe, then the request -- but
   // what the criterion asks is only that discovery is paid once, and a retransmitted datagram on
   // a loaded runner would make an exact count red for a reason that is not this library's.

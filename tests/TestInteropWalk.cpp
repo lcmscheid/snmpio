@@ -1,8 +1,8 @@
+#include <gtest/gtest-spi.h>
 #include <gtest/gtest.h>
 
 #include <cstdint>
 #include <optional>
-#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -22,10 +22,12 @@ using test::modeOutcomes;
 using test::Operation;
 using test::sameOidsProblem;
 using test::Walked;
+using test::walkModes;
 using test::walkProblem;
 using test::walkRepetitions;
 using test::WalkRun;
 using test::WalkShape;
+using test::walkShapes;
 
 // The max-repetitions each mode's Walk is sent with.
 const std::int32_t bulkModeRepetitions = walkRepetitions(Operation::WalkGetBulk);
@@ -112,26 +114,30 @@ TEST(InteropWalk, ComparesTwoWalksOidForOid) {
   EXPECT_NE(sameOidsProblem(ifOids(25), other), "");
 }
 
-// Only a Walk has a mode. Anything else asked for one is a mistake in the suite, not a GETBULK-mode
-// Walk.
+// Only a Walk has a mode. Anything else asked for one is a mistake in the suite, failed as one,
+// not a GETBULK-mode Walk.
 TEST(InteropWalk, GivesMaxRepetitionsOnlyToAWalk) {
   EXPECT_EQ(nextModeRepetitions, 0);
   EXPECT_GT(bulkModeRepetitions, 0);
-  EXPECT_THROW((void)walkRepetitions(Operation::GetBulk), std::invalid_argument);
-  EXPECT_THROW((void)walkRepetitions(Operation::GetNext), std::invalid_argument);
-  EXPECT_THROW((void)walkRepetitions(Operation::Get), std::invalid_argument);
+  EXPECT_NONFATAL_FAILURE((void)walkRepetitions(Operation::Get), "GET is not a Walk");
+  EXPECT_NONFATAL_FAILURE((void)walkRepetitions(Operation::GetNext), "GETNEXT is not a Walk");
+  EXPECT_NONFATAL_FAILURE((void)walkRepetitions(Operation::GetBulk), "GETBULK is not a Walk");
 }
 
 // The four Walks walkBothModesAndRecord runs, in its order, each sound and listing the same OIDs.
 std::vector<Walked> fourSoundWalks() {
-  return {
-      {Operation::WalkGetNext, WalkShape::Streaming, streamed(ifOids(25), 25)},
-      {Operation::WalkGetNext, WalkShape::Collecting, collected(ifOids(25))},
-      {Operation::WalkGetBulk, WalkShape::Streaming, streamed(ifOids(25), 3)},
-      {Operation::WalkGetBulk, WalkShape::Collecting, collected(ifOids(25))},
-  };
+  std::vector<Walked> walks;
+  for (const auto mode : walkModes) {
+    for (const auto shape : walkShapes) {
+      walks.push_back(
+          {mode, shape,
+           shape == WalkShape::Streaming ? streamed(ifOids(25), 3) : collected(ifOids(25))});
+    }
+  }
+  return walks;
 }
 
+// A Walk that timed out, keeping the OIDs it had: only its failure may take it out of the running.
 void timeOut(Walked& walked) {
   walked.run.ec = make_error_code(Errc::Timeout);
 }
@@ -140,6 +146,7 @@ bool mentions(const std::string& text, const std::string& part) {
   return text.find(part) != std::string::npos;
 }
 
+// The walks are in walkModes' order, and so is a row per mode.
 TEST(InteropWalk, PassesFourWalksThatListTheSameOids) {
   const auto outcomes = modeOutcomes(fourSoundWalks());
   ASSERT_EQ(outcomes.size(), 2U);
@@ -155,6 +162,7 @@ TEST(InteropWalk, HoldsEveryWalkToTheGetNextModeStreamingOne) {
   auto walks = fourSoundWalks();
   walks[3].run.oids.pop_back();
   const auto outcomes = modeOutcomes(walks);
+  ASSERT_EQ(outcomes.size(), 2U);
   EXPECT_EQ(outcomes[0].problem, "");
   EXPECT_TRUE(mentions(outcomes[1].problem, "collecting"));
   EXPECT_TRUE(mentions(outcomes[1].problem, "against the GETNEXT-mode streaming Walk"));
@@ -166,6 +174,7 @@ TEST(InteropWalk, HoldsTheRestToTheNextSoundWalkWhenTheFirstFails) {
   auto walks = fourSoundWalks();
   timeOut(walks[0]);
   const auto outcomes = modeOutcomes(walks);
+  ASSERT_EQ(outcomes.size(), 2U);
   EXPECT_TRUE(mentions(outcomes[0].problem, "streaming"));
   EXPECT_EQ(outcomes[1].problem, "");
   EXPECT_EQ(
@@ -178,26 +187,41 @@ TEST(InteropWalk, FailsAWalkThatDisagreesWithTheStandIn) {
   timeOut(walks[0]);
   walks[2].run.oids.pop_back();
   const auto outcomes = modeOutcomes(walks);
+  ASSERT_EQ(outcomes.size(), 2U);
   EXPECT_TRUE(mentions(outcomes[1].problem, "against the GETNEXT-mode collecting Walk"));
 }
 
-// With both GETNEXT-mode Walks failed, the GETBULK-mode ones are still held to each other.
+// With both GETNEXT-mode Walks failed, the GETBULK-mode ones are still held to each other, and an
+// ok GETBULK row says so.
 TEST(InteropWalk, HoldsTheGetBulkModeWalksToEachOtherWhenNeitherGetNextOneIsSound) {
   auto walks = fourSoundWalks();
   timeOut(walks[0]);
   timeOut(walks[1]);
+  const auto agreeing = modeOutcomes(walks);
+  ASSERT_EQ(agreeing.size(), 2U);
+  EXPECT_NE(agreeing[0].problem, "");
+  EXPECT_EQ(agreeing[1].problem, "");
+  EXPECT_EQ(
+      agreeing[1].note,
+      "held to the GETBULK-mode streaming Walk, since the GETNEXT-mode streaming Walk failed");
+
   walks[3].run.oids.pop_back();
-  const auto outcomes = modeOutcomes(walks);
-  EXPECT_NE(outcomes[0].problem, "");
-  EXPECT_TRUE(mentions(outcomes[1].problem, "against the GETBULK-mode streaming Walk"));
+  const auto disagreeing = modeOutcomes(walks);
+  ASSERT_EQ(disagreeing.size(), 2U);
+  EXPECT_TRUE(mentions(disagreeing[1].problem, "against the GETBULK-mode streaming Walk"));
 }
 
+// Nothing sound means nothing to hold the rest to: both rows fail on their own checks, and there is
+// no stand-in to name.
 TEST(InteropWalk, FailsBothRowsWhenNoWalkIsSound) {
   auto walks = fourSoundWalks();
   for (auto& walked : walks) timeOut(walked);
   const auto outcomes = modeOutcomes(walks);
-  EXPECT_NE(outcomes[0].problem, "");
-  EXPECT_NE(outcomes[1].problem, "");
+  ASSERT_EQ(outcomes.size(), 2U);
+  for (const auto& outcome : outcomes) {
+    EXPECT_NE(outcome.problem, "");
+    EXPECT_EQ(outcome.note, "");
+  }
 }
 
 }  // namespace

@@ -2,18 +2,18 @@
 #define SNMPIO_TESTS_INTEROPWALK_HPP
 
 #include <algorithm>
+#include <array>
 #include <cstddef>
 #include <cstdint>
-#include <initializer_list>
 #include <optional>
 #include <span>
-#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
 
 #include <snmpio/Client.hpp>
 #include <snmpio/Oid.hpp>
+#include <snmpio/Pdu.hpp>
 #include <snmpio/Target.hpp>
 #include <snmpio/Value.hpp>
 #include <snmpio/detail/Net.hpp>
@@ -29,26 +29,28 @@
 // Values are not compared: counters and sysUpTime move between the two.
 namespace snmpio::test {
 
-// The Walk's Subtree, on every Agent. Several batches long on the three CI starts: `snmpd` in a
-// container has a loopback and an Ethernet interface, 22 columns each, and
+// The Walk's Subtree, on every Agent. Several batches long on the three Agents CI starts: `snmpd`
+// in a container has a loopback and an Ethernet interface, 22 columns each, and
 // tests/interop/fault-agent-values.sh gives the Simulator fifty instances under it, since the
 // image's own configuration has two. Most other Targets have ports enough too; on one with too
 // few interfaces the Walks fail rather than pass on a single batch.
 inline const Oid interfacesGroup{1, 3, 6, 1, 2, 1, 2};
 
 // A Walk's mode is its Operation, and these are the two, in the order they are walked.
-inline constexpr std::initializer_list<Operation> walkModes{Operation::WalkGetNext,
-                                                            Operation::WalkGetBulk};
+inline constexpr std::array walkModes{Operation::WalkGetNext, Operation::WalkGetBulk};
 
 // Zero max-repetitions is GETNEXT mode, what a Target that mishandles GETBULK depends on; GETBULK
 // mode is the library's default, at its default max-repetitions. Only a Walk has a mode, so any
-// other Operation here is a mistake in the suite rather than a GETBULK-mode Walk.
+// other Operation here is a mistake in the suite, failed as one rather than walked in GETBULK mode.
 [[nodiscard]] inline std::int32_t walkRepetitions(Operation mode) {
-  if (!isWalk(mode)) throw std::invalid_argument(operationLabel(mode, "is not a Walk"));
-  return mode == Operation::WalkGetNext ? 0 : WalkOptions{}.maxRepetitions;
+  if (!isWalk(mode)) ADD_FAILURE() << pduName(mode) << " is not a Walk, so it has no mode";
+  return pduOf(mode) == PduType::GetNext ? 0 : WalkOptions{}.maxRepetitions;
 }
 
 enum class WalkShape : std::uint8_t { Streaming, Collecting };
+
+// Each mode is walked in both shapes, in this order.
+inline constexpr std::array walkShapes{WalkShape::Streaming, WalkShape::Collecting};
 
 // How one Walk came back: its completion, the OIDs it delivered in order, and -- for a streaming
 // Walk, the only shape that shows them -- how many batches they came in.
@@ -176,11 +178,11 @@ struct ModeOutcome {
   std::string note;
 };
 
-// Four Walks in walkBothModesAndRecord's order, judged per mode against one OID list: the first
-// sound Walk's. That is the GETNEXT-mode streaming Walk's unless that one failed, when the next
-// sound one stands in so the rest are still compared with something. The reference is compared
-// with itself too, which is harmless. Only a sound Walk reaches the comparison, so when none is
-// sound, what stands in is never read.
+// Four Walks in walkBothModesAndRecord's order -- walkModes, each in walkShapes -- judged per mode
+// against one OID list: the first sound Walk's. That is the GETNEXT-mode streaming Walk's unless
+// that one failed, when the next sound one stands in so the rest are still compared with something.
+// The reference is compared with itself too, which is harmless. Only a sound Walk reaches the
+// comparison, so when none is sound, what stands in is never read.
 [[nodiscard]] inline std::vector<ModeOutcome> modeOutcomes(const std::vector<Walked>& walks) {
   const auto sound = std::ranges::find_if(walks, isSound);
   const Walked& reference = sound == walks.end() ? walks.front() : *sound;
@@ -211,7 +213,7 @@ template <typename Auth>
 void walkBothModesAndRecord(const Target& target, const Auth& auth, const std::string& label) {
   std::vector<Walked> walks;
   for (const auto mode : walkModes) {
-    for (const auto shape : {WalkShape::Streaming, WalkShape::Collecting}) {
+    for (const auto shape : walkShapes) {
       walks.push_back({mode, shape, walk(target, auth, mode, shape)});
     }
   }

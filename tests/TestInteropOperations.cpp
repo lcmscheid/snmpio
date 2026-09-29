@@ -112,9 +112,14 @@ TEST(InteropOperations, GetNextOfOneVarbindIsSysDescr) {
   EXPECT_NE(getNextProblem(answered({scalar(2)}), one, bulkSuccessorOfSysDescr(bulk)), "");
 }
 
+// A row's label is what test::replaces merges on, so two tests reaching one row must spell it
+// alike: the PDU first, a Walk saying so after it, and GET the pair alone.
 TEST(InteropOperations, GetRowsAreLabelledByThePairAlone) {
   EXPECT_EQ(operationLabel(Operation::Get, "noAuthNoPriv"), "noAuthNoPriv");
+  EXPECT_EQ(operationLabel(Operation::GetNext, "noAuthNoPriv"), "GETNEXT noAuthNoPriv");
   EXPECT_EQ(operationLabel(Operation::GetBulk, "noAuthNoPriv"), "GETBULK noAuthNoPriv");
+  EXPECT_EQ(operationLabel(Operation::WalkGetNext, "noAuthNoPriv"), "GETNEXT Walk noAuthNoPriv");
+  EXPECT_EQ(operationLabel(Operation::WalkGetBulk, "noAuthNoPriv"), "GETBULK Walk noAuthNoPriv");
 }
 
 // Without a GETBULK answer to compare with, the second successor is only held to following

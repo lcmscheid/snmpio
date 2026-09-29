@@ -4,8 +4,7 @@
 # Mounted over /etc/snmpfault/values.json beside tests/interop/fault-agent-auth.sh's auth.json, so
 # what the Simulator serves this suite is said here and nowhere else. The image's own
 # configuration serves four instances under `system` and two under `interfaces`, which fits in one
-# GETBULK --
-# so no Walk against it ever continued from one Response to the next request.
+# GETBULK -- so no Walk against it ever continued from one Response to the next request.
 #
 # What it serves, and for which test:
 #

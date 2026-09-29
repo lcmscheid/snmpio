@@ -11,6 +11,7 @@
 
 #include <snmpio/Client.hpp>
 #include <snmpio/Oid.hpp>
+#include <snmpio/Pdu.hpp>
 #include <snmpio/Value.hpp>
 #include <snmpio/detail/Net.hpp>
 
@@ -44,17 +45,33 @@ enum class Operation : std::uint8_t { Get, GetNext, GetBulk, WalkGetNext, WalkGe
   return operation == Operation::WalkGetNext || operation == Operation::WalkGetBulk;
 }
 
-// The PDU an operation sends, which for a Walk is its mode.
-[[nodiscard]] inline std::string pduName(Operation operation) {
+// The PDU an operation sends, which for a Walk is its mode. The one place either is said.
+[[nodiscard]] inline PduType pduOf(Operation operation) {
   switch (operation) {
     case Operation::Get:
-      return "GET";
+      return PduType::Get;
     case Operation::GetNext:
     case Operation::WalkGetNext:
-      return "GETNEXT";
+      return PduType::GetNext;
     case Operation::GetBulk:
     case Operation::WalkGetBulk:
+      return PduType::GetBulk;
+  }
+  return PduType::Get;
+}
+
+[[nodiscard]] inline std::string pduName(Operation operation) {
+  switch (pduOf(operation)) {
+    case PduType::Get:
+      return "GET";
+    case PduType::GetNext:
+      return "GETNEXT";
+    case PduType::GetBulk:
       return "GETBULK";
+    case PduType::Set:
+    case PduType::Response:
+    case PduType::Report:
+      break;  // no Operation sends these
   }
   return {};
 }

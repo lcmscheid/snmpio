@@ -360,21 +360,12 @@ carries, while this library **requires** it explicitly, and that divergence is d
 sides — a Client that silently downgraded `authPriv` would have a security hole, where a test Agent
 that accepts what arrives is merely convenient (ADR-0006).
 
-Every Agent the script starts is pinned, so a commit is tested against the same Agents on every
-run of it. `snmpd` is Ubuntu 24.04's own package, built by
-[`tests/interop/snmpd.Dockerfile`](tests/interop/snmpd.Dockerfile) from a base pinned by digest and
-an archive pinned by snapshot. The [Simulator](https://github.com/lcmscheid/snmp-fault-agent) images
-are pinned by digest in the script, so a push to the Simulator's own repo cannot change what a
-commit was tested against. Moving any pin is a commit.
-
-There are two Simulator images, and the older one is not redundant. `0.1.0` runs the
-authoritative-side timeliness check and answers a request whose boots/time it disagrees with by
-sending the usmStats Report, which is what a compliant Agent does; the earlier `sha-b300f60` stamps
-its own pair into an ordinary Response instead. Only that second shape reaches the Command
-Generator's own timeliness comparison — a Response of exactly that kind is what caught this Client
-reading RFC 3414 section 3.2 step 7a where 7b applies, and against the release image the same bug
-passes in silence. The release is pinned because it is what anyone else will run; the older image
-because it is the only Agent that makes the comparison observable at all.
+Every Agent the script starts is pinned — `snmpd` by
+[`tests/interop/snmpd.Dockerfile`](tests/interop/snmpd.Dockerfile), the two
+[Simulator](https://github.com/lcmscheid/snmp-fault-agent) images by digest — and there are two
+Simulator images on purpose: the older one is the only Agent that makes the Command Generator's
+own timeliness comparison observable. [The script](tests/interop/start-agent.sh) says why for
+both, once.
 
 The v3 users are a convention the tests share with the two configuration generators the script runs,
 [`snmpd-conf.sh`](tests/interop/snmpd-conf.sh) and

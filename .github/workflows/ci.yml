@@ -107,8 +107,8 @@ jobs:
   # are reachable no other way, because a correct Agent never produces any of them.
   #
   # tests/interop/start-agent.sh starts each Agent, exactly as it does on a workstation, and says
-  # everything about it this job needs: the image pins, why there are two Simulators, and each
-  # Agent's capability flags. None of that is repeated here, so the two cannot drift, and a failure
+  # everything about it this job needs: where each Agent is pinned, why there are two Simulators,
+  # and each Agent's capability flags. None of that is repeated here, so the two cannot drift, and a failure
   # here is reproduced with the one command the job ran.
   interop:
     name: interop (${{ matrix.agent }})

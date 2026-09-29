@@ -1,6 +1,8 @@
 #!/bin/sh
 # Prints the snmpd configuration the interop suite expects, to stdout.
 #
+#   tests/interop/snmpd-conf.sh [source]
+#
 # The v3 users are a convention shared with tests/TestInteropV3.cpp: one per auth protocol at
 # authNoPriv, one per (auth, privacy) pair at authPriv, and the four Key Extension users, all
 # named after what they carry. They are ours to create, which is why the suite can name them. An
@@ -17,16 +19,17 @@
 # The password arrives in the environment rather than in this file: one value configures the Agent
 # and drives the suite, so the two cannot drift.
 #
-# The Communities answer any source. This Agent runs in a container (tests/interop/start-agent.sh),
-# where a request through the published port arrives from the runtime's gateway rather than from
-# 127.0.0.1 -- and the port is published on the loopback alone, which is the restriction.
+# The Communities answer 127.0.0.1 alone unless `source` says otherwise, in net-snmp's spelling --
+# `default` is any. tests/interop/start-agent.sh says `default`, and why; an `snmpd` run from this
+# configuration anywhere else answers `public` to nobody but its own host.
 set -eu
 
 : "${SNMPIO_INTEROP_V3_PASSWORD:?set it to the password every interop user gets (8+ characters)}"
+communitySource=${1:-127.0.0.1}
 
 cat <<CONF
-rocommunity public
-rocommunity netops-ro
+rocommunity public $communitySource
+rocommunity netops-ro $communitySource
 sysDescr snmpio interop Agent
 
 createUser noauth

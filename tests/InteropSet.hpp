@@ -25,7 +25,7 @@
 // SET against a live Agent: a write that lands, and a write the Agent refuses.
 //
 // The write that lands is sysContact.0 -- written, read back with a GET, and restored -- and only
-// with the writer Credentials the environment names. Nobody names them for a Target we did not
+// with the Writer Credentials the environment names. Nobody names them for a Target we did not
 // configure unless they choose to, so a run against a borrowed switch writes nothing by default,
 // and its summary says the writes were skipped rather than proven.
 //
@@ -46,21 +46,27 @@ inline const Oid sysContact{1, 3, 6, 1, 2, 1, 1, 4, 0};
 // The error-status RFC 3416 spells `name`, or nothing when it spells none -- or spells noError,
 // which refuses nothing.
 [[nodiscard]] inline std::optional<ErrorStatus> errorStatusNamed(std::string_view name) {
+  if (name.empty()) return std::nullopt;
   for (auto value = static_cast<std::int32_t>(ErrorStatus::TooBig);
        value <= static_cast<std::int32_t>(ErrorStatus::InconsistentName); ++value) {
     const auto status = static_cast<ErrorStatus>(value);
-    if (!name.empty() && statusName(status) == name) return status;
+    if (statusName(status) == name) return status;
   }
   return std::nullopt;
 }
 
+// Whether the Agent refused `set` with an error-status of its own. A timeout is its silence.
+[[nodiscard]] inline bool refusedByAgent(const ExchangeResult& set) {
+  return set.ec && set.ec.category() == agentErrorCategory();
+}
+
 // The first thing wrong with a SET that should have been refused, or empty when there is nothing.
 // `expected` is the error-status the Agent's capability flag names, or nothing when it names none
-// and any refusal will do. A refusal is the Agent's own error-status: a timeout is its silence.
+// and any refusal will do.
 [[nodiscard]] inline std::string refusalProblem(const ExchangeResult& set,
                                                 std::optional<ErrorStatus> expected) {
   if (!set.ec) return "the Agent accepted a SET of a read-only object";
-  if (set.ec.category() != agentErrorCategory()) {
+  if (!refusedByAgent(set)) {
     return "not refused by the Agent: " + errorText(set.ec);
   }
   if (expected && set.ec != make_error_code(*expected)) {
@@ -70,10 +76,11 @@ inline const Oid sysContact{1, 3, 6, 1, 2, 1, 1, 4, 0};
   return {};
 }
 
-// What an ok refusal row was held to, when that was less than one exact status or less than
-// RFC 3416 asks of the Agent; `errorIndex` is the Varbind the refusal blamed.
-[[nodiscard]] inline std::string refusalNote(std::optional<ErrorStatus> expected,
-                                             std::int32_t errorIndex) {
+// What a refusal row was held to, when that was less than one exact status or less than RFC 3416
+// asks of the Agent. `set` is the SET's own result, whose error-index is the Varbind a refusal
+// blamed.
+[[nodiscard]] inline std::string refusalNote(const ExchangeResult& set,
+                                             std::optional<ErrorStatus> expected) {
   std::string note;
   const auto add = [&](const std::string& part) { note += (note.empty() ? "" : "; ") + part; };
   if (!expected) add("any refusal accepted: SNMPIO_INTEROP_SET_REFUSAL is unset");
@@ -86,11 +93,13 @@ inline const Oid sysContact{1, 3, 6, 1, 2, 1, 1, 4, 0};
         "(lcmscheid/snmp-fault-agent#10)");
   }
   // The request carries one Varbind, so RFC 3416 has the error-index name it. Both pinned
-  // Simulator images say 0. Noted rather than failed: the status is what this test asserts, and
-  // the index is the Agent's to get right -- `snmpd` gets it right, so a row without this note is
-  // an Agent that did and a Command Generator that read it.
-  if (errorIndex != 1) {
-    add("blamed Varbind " + std::to_string(errorIndex) +
+  // Simulator images say 0 (lcmscheid/snmp-fault-agent#12). Noted rather than failed: the status
+  // is what this test asserts, and the index is the Agent's to get right -- `snmpd` gets it right,
+  // so a row without this note is an Agent that did and a Command Generator that read it. Only a
+  // refusal blames a Varbind: a SET taken or never answered leaves the index 0, and its row has a
+  // problem of its own to say.
+  if (refusedByAgent(set) && set.response.errorIndex != 1) {
+    add("blamed Varbind " + std::to_string(set.response.errorIndex) +
         " of the one sent, where RFC 3416 names it");
   }
   return note;
@@ -120,12 +129,17 @@ struct OctetsRead {
   return {*octets, {}};
 }
 
+// `text`'s bytes as an OCTET STRING.
+[[nodiscard]] inline Octets octetsOf(std::string_view text) {
+  Octets bytes;
+  for (const char c : text) bytes.push_back(static_cast<std::byte>(c));
+  return bytes;
+}
+
 // A value to write that is not the one already there, since writing that would pass the read-back
 // without ever having landed.
 [[nodiscard]] inline Octets differentFrom(const Octets& original) {
-  constexpr std::string_view written = "snmpio interop write";
-  Octets value;
-  for (const char c : written) value.push_back(static_cast<std::byte>(c));
+  auto value = octetsOf("snmpio interop write");
   if (value == original) value.push_back(static_cast<std::byte>('!'));
   return value;
 }
@@ -220,7 +234,7 @@ void refusedSetAndRecord(const Target& target, const Auth& auth, const std::stri
   } else {
     const auto refusal = sendSet(target, auth, sysDescr, before.value);
     problem = refusalProblem(refusal, expected);
-    note = refusalNote(expected, refusal.response.errorIndex);
+    note = refusalNote(refusal, expected);
     if (problem.empty()) {
       problem = readBackProblem(target, auth, sysDescr, before.value, "after the refusal");
     }

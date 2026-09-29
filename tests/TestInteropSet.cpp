@@ -20,6 +20,7 @@ namespace {
 using test::differentFrom;
 using test::errorStatusNamed;
 using test::ExchangeResult;
+using test::octetsOf;
 using test::Operation;
 using test::operationLabel;
 using test::readOctets;
@@ -27,12 +28,6 @@ using test::refusalNote;
 using test::refusalProblem;
 using test::sysContact;
 using test::sysDescr;
-
-Octets octets(const std::string& text) {
-  Octets bytes;
-  for (const char c : text) bytes.push_back(static_cast<std::byte>(c));
-  return bytes;
-}
 
 ExchangeResult answered(std::vector<Varbind> varbinds) {
   ExchangeResult result;
@@ -44,6 +39,12 @@ ExchangeResult refused(ErrorStatus status, std::int32_t errorIndex = 1) {
   ExchangeResult result;
   result.ec = make_error_code(status);
   result.response.errorIndex = errorIndex;
+  return result;
+}
+
+ExchangeResult timedOut() {
+  ExchangeResult result;
+  result.ec = make_error_code(Errc::Timeout);
   return result;
 }
 
@@ -90,60 +91,74 @@ TEST(InteropSet, AcceptsAnyRefusalWhenTheFlagIsUnset) {
 }
 
 TEST(InteropSet, RejectsASetThatWasAccepted) {
-  EXPECT_NE(refusalProblem(answered({{sysDescr, octets("x")}}), ErrorStatus::NoAccess), "");
-  EXPECT_NE(refusalProblem(answered({{sysDescr, octets("x")}}), std::nullopt), "");
+  EXPECT_NE(refusalProblem(answered({{sysDescr, octetsOf("x")}}), ErrorStatus::NoAccess), "");
+  EXPECT_NE(refusalProblem(answered({{sysDescr, octetsOf("x")}}), std::nullopt), "");
 }
 
 // A timeout is the Agent's silence, not its refusal -- even beside an error-index that would pass.
 TEST(InteropSet, RejectsAFailureThatIsNotTheAgentsOwn) {
-  ExchangeResult timedOut;
-  timedOut.ec = make_error_code(Errc::Timeout);
-  timedOut.response.errorIndex = 1;
-  EXPECT_NE(refusalProblem(timedOut, std::nullopt), "");
-  EXPECT_NE(refusalProblem(timedOut, ErrorStatus::NoAccess), "");
+  auto silence = timedOut();
+  silence.response.errorIndex = 1;
+  EXPECT_NE(refusalProblem(silence, std::nullopt), "");
+  EXPECT_NE(refusalProblem(silence, ErrorStatus::NoAccess), "");
 }
 
 // The request carries one Varbind, so RFC 3416 has the error-index name it. An Agent that names
 // another is noted on the row, not failed: the status is what the test asserts.
 TEST(InteropSet, NotesARefusalThatBlamesAnotherVarbind) {
   EXPECT_EQ(refusalProblem(refused(ErrorStatus::NoAccess, 0), ErrorStatus::NoAccess), "");
-  EXPECT_EQ(refusalNote(ErrorStatus::NoAccess, 1), "");
-  EXPECT_TRUE(mentions(refusalNote(ErrorStatus::NoAccess, 0), "blamed Varbind 0"));
-  EXPECT_TRUE(mentions(refusalNote(ErrorStatus::NoAccess, 2), "blamed Varbind 2"));
+  EXPECT_EQ(refusalNote(refused(ErrorStatus::NoAccess, 1), ErrorStatus::NoAccess), "");
+  EXPECT_TRUE(mentions(refusalNote(refused(ErrorStatus::NoAccess, 0), ErrorStatus::NoAccess),
+                       "blamed Varbind 0"));
+  EXPECT_TRUE(mentions(refusalNote(refused(ErrorStatus::NoAccess, 2), ErrorStatus::NoAccess),
+                       "blamed Varbind 2"));
+  // A refusal with the wrong status is still the Agent's own, so its index still says something.
+  EXPECT_TRUE(mentions(refusalNote(refused(ErrorStatus::NotWritable, 0), ErrorStatus::NoAccess),
+                       "blamed Varbind 0"));
+}
+
+// Only a refusal blames a Varbind. A SET the Agent took, or one it never answered, leaves the
+// error-index at 0 -- and a failed row saying the Agent blamed Varbind 0 would send whoever reads
+// it after a refusal that never happened.
+TEST(InteropSet, NotesNoBlamedVarbindWhenNothingWasRefused) {
+  const auto accepted = refusalNote(answered({{sysDescr, octetsOf("x")}}), ErrorStatus::NoAccess);
+  EXPECT_FALSE(mentions(accepted, "blamed Varbind")) << accepted;
+  const auto silent = refusalNote(timedOut(), ErrorStatus::NoAccess);
+  EXPECT_FALSE(mentions(silent, "blamed Varbind")) << silent;
 }
 
 TEST(InteropSet, ReadsTheOctetsOfTheOneVarbindAskedFor) {
-  const auto read = readOctets(answered({{sysContact, octets("noc")}}), sysContact);
+  const auto read = readOctets(answered({{sysContact, octetsOf("noc")}}), sysContact);
   EXPECT_EQ(read.problem, "");
-  EXPECT_EQ(read.value, octets("noc"));
+  EXPECT_EQ(read.value, octetsOf("noc"));
 }
 
 TEST(InteropSet, RejectsAReadThatIsNotThatObjectsOctets) {
-  EXPECT_NE(readOctets(answered({{sysDescr, octets("noc")}}), sysContact).problem, "");
+  EXPECT_NE(readOctets(answered({{sysDescr, octetsOf("noc")}}), sysContact).problem, "");
   EXPECT_NE(readOctets(answered({{sysContact, 4}}), sysContact).problem, "");
   EXPECT_NE(readOctets(answered({{sysContact, ValueException::NoSuchObject}}), sysContact).problem,
             "");
   EXPECT_NE(readOctets(answered({}), sysContact).problem, "");
-  ExchangeResult timedOut;
-  timedOut.ec = make_error_code(Errc::Timeout);
-  EXPECT_NE(readOctets(timedOut, sysContact).problem, "");
+  EXPECT_NE(readOctets(timedOut(), sysContact).problem, "");
 }
 
 // A write of the value already there would pass a read-back without ever landing.
 TEST(InteropSet, WritesSomethingOtherThanWhatWasThere) {
-  EXPECT_NE(differentFrom(octets("")), octets(""));
-  EXPECT_NE(differentFrom(octets("noc")), octets("noc"));
-  const auto usual = differentFrom(octets(""));
+  EXPECT_NE(differentFrom(octetsOf("")), octetsOf(""));
+  EXPECT_NE(differentFrom(octetsOf("noc")), octetsOf("noc"));
+  const auto usual = differentFrom(octetsOf(""));
   EXPECT_NE(differentFrom(usual), usual);
 }
 
 TEST(InteropSet, SaysWhatARefusalRowWasHeldTo) {
-  EXPECT_EQ(refusalNote(ErrorStatus::NoAccess, 1), "");
-  EXPECT_TRUE(mentions(refusalNote(std::nullopt, 1), "SNMPIO_INTEROP_SET_REFUSAL"));
+  EXPECT_EQ(refusalNote(refused(ErrorStatus::NoAccess), ErrorStatus::NoAccess), "");
+  EXPECT_TRUE(mentions(refusalNote(refused(ErrorStatus::NotWritable), std::nullopt),
+                       "SNMPIO_INTEROP_SET_REFUSAL"));
   // The Simulator's refusal is non-compliant, and its row says so rather than passing silently.
-  EXPECT_TRUE(mentions(refusalNote(ErrorStatus::ReadOnly, 1), "lcmscheid/snmp-fault-agent#10"));
+  EXPECT_TRUE(mentions(refusalNote(refused(ErrorStatus::ReadOnly), ErrorStatus::ReadOnly),
+                       "lcmscheid/snmp-fault-agent#10"));
   // Both at once, as the Simulator images give them, and neither hiding the other.
-  const auto both = refusalNote(ErrorStatus::ReadOnly, 0);
+  const auto both = refusalNote(refused(ErrorStatus::ReadOnly, 0), ErrorStatus::ReadOnly);
   EXPECT_TRUE(mentions(both, "lcmscheid/snmp-fault-agent#10")) << both;
   EXPECT_TRUE(mentions(both, "blamed Varbind 0")) << both;
 }

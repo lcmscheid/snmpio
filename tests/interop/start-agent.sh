@@ -55,7 +55,7 @@ brokenGetNext=''
 # it; tests/InteropSet.hpp says what the SET is. Empty would accept any refusal.
 setRefusal=''
 
-# The writer Credentials, the only identities the SET tests write sysContact.0 with. They are
+# The Writer Credentials, the only identities the SET tests write sysContact.0 with. They are
 # printed here, for the Agents we configure, and nowhere else: a Target outside CI writes nothing
 # unless whoever runs the suite names a writer for it. The users are named alike on every Agent
 # here; the Community is not, since the Simulator has only the one.
@@ -92,7 +92,8 @@ useSimulator() {
   # readOnly, which RFC 3416 section 4.2.5 says an SNMPv2 entity never sends -- notWritable is the
   # status for a read-only object (lcmscheid/snmp-fault-agent#10). The suite asserts what the
   # Agent does and says on every row that it is non-compliant. Make it notWritable when an image
-  # fixing that is pinned.
+  # fixing that is pinned. Both images also blame Varbind 0 where RFC 3416 names the one sent
+  # (lcmscheid/snmp-fault-agent#12); no flag gates that, and the rows note it until it is fixed.
   setRefusal=readOnly
   writerCommunity=public
   fetch() { docker pull -q "$image"; }

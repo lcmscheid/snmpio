@@ -267,7 +267,7 @@ SNMPIO_INTEROP_FAULTS=                     # the Simulators' control UI port
 SNMPIO_INTEROP_FAULTS_ENGINE_ID=
 SNMPIO_INTEROP_BROKEN_GETNEXT=
 SNMPIO_INTEROP_SET_REFUSAL=noAccess
-SNMPIO_INTEROP_WRITER_COMMUNITY=snmpio-writer       # the writer Credentials, below
+SNMPIO_INTEROP_WRITER_COMMUNITY=snmpio-writer       # the Writer Credentials, below
 SNMPIO_INTEROP_WRITER_NOAUTHNOPRIV=writer-noauth
 SNMPIO_INTEROP_WRITER_AUTHNOPRIV=writer-authsha256
 SNMPIO_INTEROP_WRITER_AUTHPRIV=writer-privsha256aes
@@ -376,7 +376,7 @@ becomes `notWritable` once an image fixing it is pinned.
 ### Writer Credentials
 
 The SET that lands writes `sysContact.0`, reads it back and restores it, so it changes the Target
-while it runs. It uses only the writer Credentials the run names: a v2c Community, and one v3 user
+while it runs. It uses only the Writer Credentials the run names: a v2c Community, and one v3 user
 per Security Level, each carrying that level's representative pair (SHA-256, then AES-128) and
 `SNMPIO_INTEROP_V3_PASSWORD`. On `snmpd` they are separate from every user and Community the rest
 of the suite reads with, which all stay read-only.
@@ -397,7 +397,10 @@ control, so there the writers are ordinary users, and `sysContact.0` is the one 
 values configuration serves.
 
 The SET that is refused needs no writer and changes nothing: it writes `sysDescr.0`'s own value back
-with the Credentials every other test reads with. So it runs everywhere, hardware included.
+with the Credentials every other test reads with. So it runs everywhere, hardware included. A
+refusal whose error-index names some Varbind other than the one sent is noted on its row, not
+failed: both Simulator images name Varbind 0
+([snmp-fault-agent#12](https://github.com/lcmscheid/snmp-fault-agent/issues/12)).
 
 CI runs three Agents, one job each, and between them they cover every v3 case above. Neither gate is
 a Security Level being negotiated: the Simulator **infers** the level from which protocols a user
@@ -504,7 +507,7 @@ Of the [capability variables](#everything-else-the-harness-reads), leave `SNMPIO
 `_FAULTS_ENGINE_ID` unset, because a correct Agent cannot misbehave on request, and
 `SNMPIO_INTEROP_BROKEN_GETNEXT` unset. Set `SNMPIO_INTEROP_SET_REFUSAL` only once you know which
 error-status the Target refuses a read-only SET with; unset, the refused SET still runs, held only
-to being refused. Name no [writer Credentials](#writer-credentials) unless the Target is yours to
+to being refused. Name no [Writer Credentials](#writer-credentials) unless the Target is yours to
 write `sysContact.0` on; its write rows then say `skip`. Set
 `SNMPIO_INTEROP_V3_USM_REPORTS` only if the Target answers a bad digest with a usmStats Report. That
 Report is optional behaviour RFC 3414 allows a correct Agent, and a Target that sends it can prove

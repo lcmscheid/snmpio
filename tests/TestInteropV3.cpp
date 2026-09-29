@@ -330,7 +330,7 @@ TEST_F(InteropV3, SurfacesTheAgentsRefusalOfASetAtEverySecurityLevel) {
 // read-only; it carries its level's representative pair. With none named the test skips, and every
 // level it did not reach says so in the summary.
 TEST_F(InteropV3, WritesReadsBackAndRestoresSysContactAtEverySecurityLevel) {
-  bool wrote = false;
+  bool anyWriterNamed = false;
   for (const auto& [auth, priv] : securityLevelPairs) {
     const char* const variable = writerVariable(securityLevel(auth, priv));
     const auto writer = envVar(variable);
@@ -345,15 +345,15 @@ TEST_F(InteropV3, WritesReadsBackAndRestoresSysContactAtEverySecurityLevel) {
                     std::string(variable) + "=" + *writer + " carries " + auth.name +
                         ", so it needs SNMPIO_INTEROP_V3_PASSWORD to authenticate with",
                     {});
-      wrote = true;
+      anyWriterNamed = true;
       continue;
     }
     const NamedUser user{*writer, auth, priv};
     writeReadAndRestoreAndRecord(m_target, credentialsFor(auth, priv, m_password, &user),
                                  pairLabel(auth, priv));
-    wrote = true;
+    anyWriterNamed = true;
   }
-  if (!wrote) {
+  if (!anyWriterNamed) {
     GTEST_SKIP() << "names no writer: SNMPIO_INTEROP_WRITER_NOAUTHNOPRIV, _AUTHNOPRIV and "
                     "_AUTHPRIV are all unset";
   }

@@ -133,8 +133,9 @@ _Avoid_: mock, fake agent, test server
 **Writer Credentials**:
 The Credentials the interop suite's SET tests write with — a Community and one v3 user per Security
 Level — named in the run's environment and, on an Agent with access control, separate from every
-identity the rest of the suite reads with, which all stay read-only. Unnamed, the write tests skip, so a run against equipment that is not
-ours writes nothing unless someone chooses to. Distinct from the refused SET, which needs none.
+identity the rest of the suite reads with, which all stay read-only. Unnamed, the write tests
+skip, so a run against equipment that is not ours writes nothing unless someone chooses to.
+Distinct from the refused SET, which needs none.
 _Avoid_: rw user, admin credentials, write community
 
 **Scripted Agent**:

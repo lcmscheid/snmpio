@@ -29,3 +29,15 @@ in both READMEs so it is not mistaken for an inconsistency to be fixed.
 Real hardware — iLO 5, iLO 6, Cisco switches, Meinberg NTP servers — remains a manual pre-release
 checklist, recorded in the README with firmware versions. Cisco covers the Reeder path and iLO 6
 covers 3DES and the full protocol range.
+
+## Amendment, 2026-09-29: the checklist has two rows, not four
+
+The simulator settling both Key Extensions per commit proves the Command Generator agrees with
+*our* reading of each scheme, and the simulator is ours too. Whether a vendor read the expired
+Reeder draft the same way is a question only hardware answers, so Cisco's row stands for that
+independent check rather than for coverage the simulator lacks.
+
+A device earns a row only by closing a gap the automated matrix leaves, since a row that closes
+none is one nobody re-runs. iLO 5 and Meinberg NTP servers were named in the fleet above without a
+gap assigned, so the README checklist carries no row for either. iLO 6 keeps its row for the widest
+vendor protocol range; its 3DES waits on the library, which no stage yet carries (ADR-0005).

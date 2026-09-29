@@ -254,18 +254,20 @@ gates the v3 tests: the Agent has to be running the configuration
 the bench is not, so an unset variable skips rather than fails. One value configures the Agent and
 drives the suite, which is why it is not written down twice.
 
-### Two ways to name a v3 user
+### Two ways in
 
 The above is the first: the Agent is **ours to configure**, so the tests know the users by name and
 walk the whole matrix. It is what CI's three Agents run, and what an `snmpd` or Simulator started
 from the commands below runs.
 
-The second is for an Agent that is **not** ours — a switch on the bench, whose users someone
-created years ago and will not be renaming for us. Name the one user it has and what that user
-carries, and the v3 tests address it instead of the convention:
+The second is for an Agent that is **not** ours — a switch on the bench, whose users and Community
+someone chose years ago and will not be changing for us. Name the one user it has and what that
+user carries, and the Community it answers to, and the tests address those instead of the
+convention:
 
 ```sh
 export SNMPIO_INTEROP_TARGET=10.0.0.7
+export SNMPIO_INTEROP_COMMUNITY=bench-ro           # the v2c Community; omit for public
 export SNMPIO_INTEROP_V3_USER=netops-legacy        # what the user is actually called
 export SNMPIO_INTEROP_V3_AUTH=sha256               # none, md5, sha1, sha224, sha256, sha384, sha512
 export SNMPIO_INTEROP_V3_PRIV=aes                  # none, des, aes, aes192, aes256, aes192c, aes256c
@@ -280,28 +282,33 @@ section shows, because `ctest` splits the run summary into pieces.
 One user is enough to be useful, because a Target typically has exactly one. The matrix test then
 covers the single pair that user can serve, and the Key Extension test skips, since it needs four
 users of its own. The other two v3 tests in that file — Engine Discovery and the wrong-password Report — run against the named
-user rather than against the conventional one, and the v2c half of the suite is untouched, since a Community
-has no user.
+user rather than against the conventional one.
 
-Naming a user the Target does not have **fails** the suite, the same as any other variable that is
-set but unusable: a skip there would report green for a user nobody ever reached. So does a
-protocol name that is not one of the words above; a privacy protocol with no authentication
-protocol beside it — USM derives the privacy key with the authentication protocol's hash, so there
-is no privacy without one; an authenticating user with no password to authenticate with; and
-`SNMPIO_INTEROP_V3_AUTH` or `_PRIV` set with no user for them to describe.
+The v2c half has the same two ways in. It sends the Community `public`, which is what every Agent
+we configure answers to, unless `SNMPIO_INTEROP_COMMUNITY` names another. A Community is the whole
+of v2c's secret, so a named one is sent but never printed: the summary says `v2c/named community`.
+
+Naming a user or a Community the Target does not have **fails** the suite, the same as any other
+variable that is set but unusable: a skip there would report green for Credentials nobody ever
+reached. A wrong Community fails as a timeout, because an Agent drops a v2c request with the wrong
+Community without answering. The suite also fails on a protocol name that is not one of the words
+above; a privacy protocol with no authentication protocol beside it — USM derives the privacy key
+with the authentication protocol's hash, so there is no privacy without one; an authenticating user
+with no password to authenticate with; and `SNMPIO_INTEROP_V3_AUTH` or `_PRIV` set with no user for
+them to describe.
 
 One password, used as both the authentication and the privacy secret. A Target whose user carries
 two different ones cannot be addressed this way yet.
 
 Verifying this way in needs no hardware. The `snmpd` below also carries `netops-legacy`, a user
-deliberately named after nothing it holds, which is what a Target somebody else configured looks
-like:
+deliberately named after nothing it holds, and `netops-ro`, a Community other than `public`. That
+is what a Target somebody else configured looks like:
 
 ```sh
-export SNMPIO_INTEROP_TARGET=127.0.0.1 SNMPIO_INTEROP_PORT=16161
+export SNMPIO_INTEROP_TARGET=127.0.0.1 SNMPIO_INTEROP_PORT=16161 SNMPIO_INTEROP_COMMUNITY=netops-ro
 export SNMPIO_INTEROP_V3_USER=netops-legacy SNMPIO_INTEROP_V3_AUTH=sha256
 export SNMPIO_INTEROP_V3_PRIV=aes SNMPIO_INTEROP_V3_PASSWORD=snmpio-interop
-ctest --preset default -R InteropV3 --output-on-failure
+ctest --preset default -R 'Interop(V2c|V3)' --output-on-failure
 ```
 
 CI runs exactly this, as a second pass over the same `snmpd`, so the way in for a Target we did not
@@ -409,12 +416,12 @@ been checked against that hardware since then.
 
 Each row is there because the automated matrix leaves a gap that only that equipment can close.
 ADR-0006 assigns those gaps. Hardware that would close no gap gets no row, because nobody would ever
-re-run it. ADR-0006 also lists iLO 5 and Meinberg NTP servers as part of the fleet, but it assigns
-neither of them a gap. They are left out until someone can say what they would prove.
+re-run it. That is why iLO 5 and Meinberg NTP servers, which ADR-0006 first named in the fleet,
+have none (its 2026-09-29 amendment).
 
 | Row | Gap it closes | Device and firmware | Protocols exercised | Last run |
 |---|---|---|---|---|
-| Cisco switch | Reeder (`aes192c`/`aes256c`) against an Engine we did not write. The Simulator catches a regression in the Reeder path on every commit, but the Simulator is also ours. It shares our reading of an expired draft, so agreeing with it proves consistency, not interop. ADR-0006 assigns the independent check to Cisco | — | — | — |
+| Cisco switch | Reeder (`aes192c`/`aes256c`) against an Engine we did not write. The Simulator catches a regression in the Reeder path on every commit, but the Simulator is also ours. It shares our reading of an expired draft, so agreeing with it proves consistency, not interop | — | — | — |
 | HPE iLO 6 | The widest protocol range of any vendor Agent on the bench, SHA-2 and AES-192/256 included, against an Engine that is neither `snmpd` nor ours. Its 3DES has to wait, because the library does not speak 3DES and no stage carries it yet | — | — | — |
 
 A dash means the run has not happened. Nothing goes into a row that a run did not print. **Device
@@ -424,8 +431,9 @@ of it, the row leaves it out too, rather than adding it from memory.
 ### Running it against a switch
 
 A switch on the bench carries users someone else named, so it is always addressed the
-[second way in](#two-ways-to-name-a-v3-user): name the one user and the protocols it carries. Do not
-set up the `noauth`/`auth<hash>`/`priv<hash><cipher>` convention that CI's Agents use.
+[second way in](#two-ways-in): name its Community, and the one user and the protocols it
+carries. Do not set up the `noauth`/`auth<hash>`/`priv<hash><cipher>` convention that CI's Agents
+use.
 
 Of the [capability variables](#everything-else-the-harness-reads), leave `SNMPIO_INTEROP_FAULTS` and
 `_FAULTS_ENGINE_ID` unset, because a correct Agent cannot misbehave on request. Set
@@ -440,7 +448,7 @@ and it only shows a passing test's output under `-V`. The binary runs the whole 
 process and ends with one summary:
 
 ```sh
-export SNMPIO_INTEROP_TARGET=10.0.0.7
+export SNMPIO_INTEROP_TARGET=10.0.0.7 SNMPIO_INTEROP_COMMUNITY=bench-ro
 export SNMPIO_INTEROP_V3_USER=netops-legacy SNMPIO_INTEROP_V3_AUTH=sha1
 export SNMPIO_INTEROP_V3_PRIV=aes256c SNMPIO_INTEROP_V3_PASSWORD=bench-secret-123
 ./build/default/tests/snmpio_tests --gtest_filter='Interop*'
@@ -452,7 +460,7 @@ Device/firmware: <the Target's sysDescr.0, verbatim>
 Date: <YYYY-MM-DD>
 
 Protocols exercised:
-  ok   v2c/public
+  ok   v2c/named community
   ok   authPriv/sha1/aes256c
   skip noAuthNoPriv  -- run named one user: netops-legacy
   ...

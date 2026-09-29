@@ -207,15 +207,17 @@ jobs:
         run: ctest --test-dir build -R Interop --verbose --no-tests=error
 
       # The second way in, over the same Agent: `netops-legacy` is a user of snmpd-conf.sh's whose
-      # name says nothing about what it carries, which is what a Target we did not configure looks
-      # like. Without this the path is documented and never run.
-      - name: Interop, addressing a user by name
+      # name says nothing about what it carries, and `netops-ro` a community other than `public`,
+      # which is what a Target we did not configure looks like. Without this the path is
+      # documented and never run.
+      - name: Interop, addressing a user and a community by name
         if: matrix.agent == 'snmpd'
         env:
+          SNMPIO_INTEROP_COMMUNITY: netops-ro
           SNMPIO_INTEROP_V3_USER: netops-legacy
           SNMPIO_INTEROP_V3_AUTH: sha256
           SNMPIO_INTEROP_V3_PRIV: aes
-        run: ctest --test-dir build -R InteropV3 --verbose --no-tests=error
+        run: ctest --test-dir build -R 'Interop(V2c|V3)' --verbose --no-tests=error
 
       - name: Agent log
         if: failure()

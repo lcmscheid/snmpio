@@ -8,9 +8,10 @@
 # and the matrix covers the pair that user serves.
 #
 # `netops-legacy` below is that second way in, made reachable without a switch on the bench: one
-# user whose name says nothing about what it carries, which is the whole of what a Target we did
-# not configure looks like. No run addresses it unless SNMPIO_INTEROP_V3_USER asks for it by name,
-# so the convention path over this Agent is the run it always was.
+# user whose name says nothing about what it carries, which is what a Target we did not configure
+# looks like. No run addresses it unless SNMPIO_INTEROP_V3_USER asks for it by name, so the
+# convention path over this Agent is the run it always was. `netops-ro` is the same for v2c: a
+# Community other than `public`, used only when SNMPIO_INTEROP_COMMUNITY names it.
 #
 # The password arrives in the environment rather than in this file: one value configures the Agent
 # and drives the suite, so the two cannot drift.
@@ -20,6 +21,7 @@ set -eu
 
 cat <<CONF
 rocommunity public 127.0.0.1
+rocommunity netops-ro 127.0.0.1
 sysDescr snmpio interop Agent
 
 createUser noauth

@@ -13,9 +13,9 @@ FROM ubuntu:24.04@sha256:008173c23f95b170204355c12626cb5a965d779a7e1283b09e9cffb
 
 # The snapshot archive is HTTPS only, and the base carries no certificates. They come from the live
 # archive, in a stage of their own of which only the bundle is kept: `ca-certificates` depends on
-# `openssl`, which depends on `libssl3t64`, and installing it here would let the live archive
-# choose the libssl that `snmpd` does its AES and SHA with -- the very code the Key Extension tests
-# read -- underneath a snapshot that looked as though it had.
+# `openssl`, which depends on `libssl3t64`, and installing it in the final stage would let the live
+# archive choose the libssl that `snmpd` does its AES and SHA with -- the very code the Key
+# Extension tests read -- underneath a snapshot that looked as though it had.
 FROM base AS certificates
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates

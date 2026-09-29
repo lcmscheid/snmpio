@@ -38,7 +38,7 @@ agent=$1
 here=$(cd "$(dirname "$0")" && pwd)
 container=snmpio-interop
 port=16161
-export SNMPIO_INTEROP_V3_PASSWORD="${SNMPIO_INTEROP_V3_PASSWORD:-snmpio-interop}"
+password=${SNMPIO_INTEROP_V3_PASSWORD:-snmpio-interop}
 # The Simulator's control UI listens on 8080 inside its image; faultsPort is where it is published.
 simulatorUiPort=8080
 faultsPort=8080
@@ -105,14 +105,16 @@ esac
 
 # Whatever stops this script short of an answering Agent -- a failed build or pull, a port already
 # taken, an Agent that never answers -- ends here with the Agent's log, or with the reason there is
-# none. Docker's own error, if it had one, is already on stderr above.
+# none. Docker's own error, if it had one, is already on stderr above. A container the runtime
+# created but could not start, as over a port already taken, has run nothing and logged nothing.
 failed() {
-  if docker inspect "$container" >/dev/null 2>&1; then
-    echo "$agent is not answering; its log follows" >&2
-    docker logs "$container" >&2
-  else
-    echo "$agent never started, so it has no log" >&2
-  fi
+  case $(docker inspect -f '{{.State.Status}}' "$container" 2>/dev/null) in
+    '' | created) echo "$agent never started, so it has no log" >&2 ;;
+    *)
+      echo "$agent is not answering; its log follows" >&2
+      docker logs "$container" >&2
+      ;;
+  esac
 }
 trap 'status=$?; [ $status -eq 0 ] || failed' EXIT
 
@@ -125,13 +127,13 @@ configFile=$configDir/${mount##*/}
 
 docker rm -f "$container" >/dev/null 2>&1 || true
 fetch >&2
-configure > "$configFile"
+(export SNMPIO_INTEROP_V3_PASSWORD="$password"; configure) > "$configFile"
 # The Simulator's image carries its own example configuration; ours is mounted over it so the
 # suite's `auth<hash>` / `priv<hash><cipher>` convention holds against every Agent here and there
 # is no second table saying the same thing. `z` relabels it for an SELinux host, and is ignored
 # elsewhere.
 docker run -d --name "$container" -p "127.0.0.1:$port:1161/udp" \
-  ${faults:+-p "127.0.0.1:$faults:$simulatorUiPort"} \
+  ${faults:+-p "127.0.0.1:$faultsPort:$simulatorUiPort"} \
   -v "$configFile:$mount:ro,z" "$image" >&2
 
 # Up to 30 seconds, or not at all once the Agent has exited. A deadline rather than a count of
@@ -147,7 +149,7 @@ echo "$agent is answering on 127.0.0.1:$port" >&2
 cat <<ENV
 SNMPIO_INTEROP_TARGET=127.0.0.1
 SNMPIO_INTEROP_PORT=$port
-SNMPIO_INTEROP_V3_PASSWORD=$SNMPIO_INTEROP_V3_PASSWORD
+SNMPIO_INTEROP_V3_PASSWORD=$password
 SNMPIO_INTEROP_V3_USM_REPORTS=$usmReports
 SNMPIO_INTEROP_V3_KEY_EXTENSIONS=$keyExtensions
 SNMPIO_INTEROP_FAULTS=$faults

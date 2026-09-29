@@ -363,9 +363,7 @@ that accepts what arrives is merely convenient (ADR-0006).
 Every Agent the script starts is pinned — `snmpd` by
 [`tests/interop/snmpd.Dockerfile`](tests/interop/snmpd.Dockerfile), the two
 [Simulator](https://github.com/lcmscheid/snmp-fault-agent) images by digest — and there are two
-Simulator images on purpose: the older one is the only Agent that makes the Command Generator's
-own timeliness comparison observable. [The script](tests/interop/start-agent.sh) says why for
-both, once.
+Simulator images on purpose. [The script](tests/interop/start-agent.sh) says why for both, once.
 
 The v3 users are a convention the tests share with the two configuration generators the script runs,
 [`snmpd-conf.sh`](tests/interop/snmpd-conf.sh) and

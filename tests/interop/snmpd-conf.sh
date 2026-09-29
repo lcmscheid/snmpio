@@ -21,7 +21,7 @@
 #
 # The Communities answer 127.0.0.1 alone unless `source` says otherwise, in net-snmp's spelling --
 # `default` is any. tests/interop/start-agent.sh says `default`, and why; an `snmpd` run from this
-# configuration anywhere else answers `public` to nobody but its own host.
+# configuration anywhere else answers `public` to nobody but the machine it runs on.
 set -eu
 
 : "${SNMPIO_INTEROP_V3_PASSWORD:?set it to the password every interop user gets (8+ characters)}"

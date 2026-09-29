@@ -51,6 +51,16 @@ usmReports='' keyExtensions=1 faults='' faultsEngineId=''
 # (lcmscheid/snmp-fault-agent#11); tests/InteropOperations.hpp says what the flag gates and why it
 # names the defect. Unset it here when a fixed image is pinned.
 brokenGetNext=''
+# The error-status each Agent refuses the suite's read-only SET with, spelled as RFC 3416 spells
+# it; tests/InteropSet.hpp says what the SET is. Empty would accept any refusal.
+setRefusal=''
+
+# The writer Credentials, the only identities the SET tests write sysContact.0 with. They are
+# printed here, for the Agents we configure, and nowhere else: a Target outside CI writes nothing
+# unless whoever runs the suite names a writer for it. The users are named alike on every Agent
+# here; the Community is not, since the Simulator has only the one.
+writerCommunity=snmpio-writer
+writerNoAuth=writer-noauth writerAuth=writer-authsha256 writerPriv=writer-privsha256aes
 
 # Every Agent here is pinned, so a push to an image nobody here controls cannot change what this
 # library was tested against between two runs of the same commit. Moving a pin is a commit here,
@@ -79,6 +89,12 @@ useSimulator() {
   }
   faults=$faultsPort
   brokenGetNext=1
+  # readOnly, which RFC 3416 section 4.2.5 says an SNMPv2 entity never sends -- notWritable is the
+  # status for a read-only object (lcmscheid/snmp-fault-agent#10). The suite asserts what the
+  # Agent does and says on every row that it is non-compliant. Make it notWritable when an image
+  # fixing that is pinned.
+  setRefusal=readOnly
+  writerCommunity=public
   fetch() { docker pull -q "$image"; }
   # The control UI and the SNMP socket come up in the same process, and the UI answers over TCP --
   # so a connection to it is the readiness check.
@@ -93,6 +109,9 @@ case $agent in
     # the restriction.
     configure() { "$here/snmpd-conf.sh" default > "$configDir/snmpd.conf"; }
     usmReports=1
+    # Its access control refuses a user or Community that only reads before it looks at the
+    # object, so the read-only SET is noAccess whether or not the object is writable.
+    setRefusal=noAccess
     fetch() { docker build -q -t "$image" -f "$here/snmpd.Dockerfile" "$here"; }
     # A real request, through the published port, from the same image so the workstation needs no
     # SNMP tools. The port alone proves nothing: the runtime listens on it from the moment it
@@ -169,4 +188,9 @@ SNMPIO_INTEROP_V3_KEY_EXTENSIONS=$keyExtensions
 SNMPIO_INTEROP_FAULTS=$faults
 SNMPIO_INTEROP_FAULTS_ENGINE_ID=$faultsEngineId
 SNMPIO_INTEROP_BROKEN_GETNEXT=$brokenGetNext
+SNMPIO_INTEROP_SET_REFUSAL=$setRefusal
+SNMPIO_INTEROP_WRITER_COMMUNITY=$writerCommunity
+SNMPIO_INTEROP_WRITER_NOAUTHNOPRIV=$writerNoAuth
+SNMPIO_INTEROP_WRITER_AUTHNOPRIV=$writerAuth
+SNMPIO_INTEROP_WRITER_AUTHPRIV=$writerPriv
 ENV

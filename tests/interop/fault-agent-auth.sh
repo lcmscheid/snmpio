@@ -40,4 +40,14 @@ for theirs in AES192 AES256 AES192C AES256C; do
   user "privsha1${ours}" SHA "$theirs"
 done
 
+# The writers, named as tests/interop/snmpd-conf.sh names its own so one set of names addresses
+# both Agents. The Simulator has no per-user access control, so these are ordinary users -- any
+# user here can write sysContact.0, the one entry tests/interop/fault-agent-values.sh leaves
+# writable -- but it infers the Security Level from the protocols a user carries (ADR-0006), so
+# each carries exactly the level its name says, or the test that names that level would not be
+# testing it. The v2c writer is `public`: the Simulator has one Community.
+printf ',\n    {"username": "writer-noauth"}'
+user writer-authsha256 SHA256
+user writer-privsha256aes SHA256 AES
+
 printf '\n  ]\n}\n'

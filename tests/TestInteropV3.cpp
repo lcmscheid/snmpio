@@ -14,6 +14,7 @@
 #include "InteropCredentials.hpp"
 #include "InteropOperations.hpp"
 #include "InteropRelay.hpp"
+#include "InteropSet.hpp"
 #include "InteropSummary.hpp"
 #include "InteropTarget.hpp"
 #include "InteropWalk.hpp"
@@ -28,6 +29,7 @@ using test::CountingRelay;
 using test::credentialsFor;
 using test::envPort;
 using test::envVar;
+using test::expectedRefusal;
 using test::findAuth;
 using test::findPriv;
 using test::get;
@@ -48,17 +50,26 @@ using test::privProtocols;
 using test::PrivRow;
 using test::recordAuthAndPrivacyMatrixSkipped;
 using test::recordKeyExtensionsSkipped;
+using test::recordOutcome;
 using test::recordSkip;
+using test::refusedSetAndRecord;
+using test::securityLevel;
 using test::securityLevelPairs;
 using test::sha256Row;
 using test::sysDescr;
 using test::walkBothModesAndRecord;
 using test::walkModes;
+using test::writeReadAndRestoreAndRecord;
+using test::writerUnset;
+using test::writerVariable;
 
 // The operations run at every Security Level besides GET and test::walkModes. GETBULK and the
 // Walks run again under every privacy protocol, since their Responses cross many cipher blocks.
 constexpr std::array getNextAndGetBulk{Operation::GetNext, Operation::GetBulk};
 constexpr std::array getBulkAlone{Operation::GetBulk};
+// The two SETs, which run at every Security Level and under no other privacy protocol.
+constexpr std::array refusedSetAlone{Operation::RefusedSet};
+constexpr std::array bothSets{Operation::RefusedSet, Operation::Set};
 
 // Record that the rows of `operations` at every Security Level were skipped for the same reason.
 void recordSecurityLevelsSkipped(std::span<const Operation> operations, const std::string& reason) {
@@ -87,6 +98,7 @@ void recordEveryRowSkipped(const std::string& reason) {
   recordKeyExtensionsSkipped(Operation::Get, reason);
   recordSecurityLevelsSkipped(getNextAndGetBulk, reason);
   recordSecurityLevelsSkipped(walkModes, reason);
+  recordSecurityLevelsSkipped(bothSets, reason);
   recordPrivacySkipped(getBulkAlone, reason);
   recordPrivacySkipped(walkModes, reason);
 }
@@ -294,6 +306,57 @@ TEST_F(InteropV3, WalksSeveralBatchesUnderEveryPrivacyProtocol) {
                             [&](const Credentials& credentials, const std::string& label) {
                               walkBothModesAndRecord(m_target, credentials, label);
                             });
+}
+
+// The promise that a rejected SET surfaces the Agent's own error-status, at every Security Level on
+// the representative pair -- or as the named user's pair, the one it serves. The same SET as the
+// v2c one: sysDescr.0's own value, sent as a user that only reads, so it changes nothing.
+TEST_F(InteropV3, SurfacesTheAgentsRefusalOfASetAtEverySecurityLevel) {
+  std::optional<ErrorStatus> expected;
+  ASSERT_NO_FATAL_FAILURE(expectedRefusal(expected));
+  if (m_named) {
+    refusedSetAndRecord(m_target, singlePairCredentials(), pairLabel(m_named->auth, m_named->priv),
+                        expected);
+    recordSecurityLevelsSkipped(refusedSetAlone, namedUserOnly());
+    return;
+  }
+  for (const auto& [auth, priv] : securityLevelPairs) {
+    refusedSetAndRecord(m_target, credentials(auth, priv), pairLabel(auth, priv), expected);
+  }
+}
+
+// A write that lands, read back and restored, at every Security Level the run names a writer for.
+// A writer is a user of its own, never the named user or a conventional one, which all stay
+// read-only; it carries its level's representative pair. With none named the test skips, and every
+// level it did not reach says so in the summary.
+TEST_F(InteropV3, WritesReadsBackAndRestoresSysContactAtEverySecurityLevel) {
+  bool wrote = false;
+  for (const auto& [auth, priv] : securityLevelPairs) {
+    const char* const variable = writerVariable(securityLevel(auth, priv));
+    const auto writer = envVar(variable);
+    if (!writer) {
+      recordSkip(operationLabel(Operation::Set, pairLabel(auth, priv)), writerUnset(variable));
+      continue;
+    }
+    // Set but unusable fails, as everywhere -- as a failed row rather than an assertion, so the
+    // levels after it still reach the summary.
+    if (auth.protocol != AuthProtocol::None && m_password.empty()) {
+      recordOutcome(operationLabel(Operation::Set, pairLabel(auth, priv)),
+                    std::string(variable) + "=" + *writer + " carries " + auth.name +
+                        ", so it needs SNMPIO_INTEROP_V3_PASSWORD to authenticate with",
+                    {});
+      wrote = true;
+      continue;
+    }
+    const NamedUser user{*writer, auth, priv};
+    writeReadAndRestoreAndRecord(m_target, credentialsFor(auth, priv, m_password, &user),
+                                 pairLabel(auth, priv));
+    wrote = true;
+  }
+  if (!wrote) {
+    GTEST_SKIP() << "names no writer: SNMPIO_INTEROP_WRITER_NOAUTHNOPRIV, _AUTHNOPRIV and "
+                    "_AUTHPRIV are all unset";
+  }
 }
 
 // The Engine Discovery criterion, stated the way it is observable: the first request against an

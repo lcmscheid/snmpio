@@ -16,6 +16,14 @@
 # convention path over this Agent is the run it always was. `netops-ro` is the same for v2c: a
 # Community other than `public`, used only when SNMPIO_INTEROP_COMMUNITY names it.
 #
+# The writers are the only identities here that can write, and each reaches `system.sysContact`
+# alone: `snmpio-writer`, a Community, and one user per Security Level on the representative pair,
+# named after what it carries as the convention's users are. The SET tests address them only
+# because tests/interop/start-agent.sh names them in the environment -- every other user and
+# Community is read-only, which is what makes a SET with one of them the refused case for free.
+# sysContact.0 is left unset below on purpose: net-snmp makes an object read-only when its
+# configuration sets it.
+#
 # The password arrives in the environment rather than in this file: one value configures the Agent
 # and drives the suite, so the two cannot drift.
 #
@@ -26,6 +34,7 @@ set -eu
 
 : "${SNMPIO_INTEROP_V3_PASSWORD:?set it to the password every interop user gets (8+ characters)}"
 communitySource=${1:-127.0.0.1}
+sysContact=.1.3.6.1.2.1.1.4
 
 cat <<CONF
 rocommunity public $communitySource
@@ -37,6 +46,14 @@ rouser noauth noauth
 
 createUser netops-legacy SHA-256 "$SNMPIO_INTEROP_V3_PASSWORD" AES "$SNMPIO_INTEROP_V3_PASSWORD"
 rouser netops-legacy priv
+
+rwcommunity snmpio-writer $communitySource $sysContact
+createUser writer-noauth
+rwuser writer-noauth noauth $sysContact
+createUser writer-authsha256 SHA-256 "$SNMPIO_INTEROP_V3_PASSWORD"
+rwuser writer-authsha256 auth $sysContact
+createUser writer-privsha256aes SHA-256 "$SNMPIO_INTEROP_V3_PASSWORD" AES "$SNMPIO_INTEROP_V3_PASSWORD"
+rwuser writer-privsha256aes priv $sysContact
 CONF
 
 # net-snmp's spelling on the left of each pair, ours on the right. SHA-1 is plain "SHA" to

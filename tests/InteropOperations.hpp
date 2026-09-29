@@ -38,8 +38,18 @@ inline const Oid systemGroup{1, 3, 6, 1, 2, 1, 1};
 inline constexpr std::int32_t bulkRepetitions = 20;
 
 // What a summary row says was sent. A Walk is recorded as two operations, one per traversal mode,
-// because the mode is what its row reports and what tests/InteropWalk.hpp sends it in.
-enum class Operation : std::uint8_t { Get, GetNext, GetBulk, WalkGetNext, WalkGetBulk };
+// because the mode is what its row reports and what tests/InteropWalk.hpp sends it in. A SET is
+// two as well: the write that lands and the write that is refused, which tests/InteropSet.hpp
+// sends with different Credentials to different objects.
+enum class Operation : std::uint8_t {
+  Get,
+  GetNext,
+  GetBulk,
+  WalkGetNext,
+  WalkGetBulk,
+  Set,
+  RefusedSet
+};
 
 [[nodiscard]] inline bool isWalk(Operation operation) {
   return operation == Operation::WalkGetNext || operation == Operation::WalkGetBulk;
@@ -56,6 +66,9 @@ enum class Operation : std::uint8_t { Get, GetNext, GetBulk, WalkGetNext, WalkGe
     case Operation::GetBulk:
     case Operation::WalkGetBulk:
       return PduType::GetBulk;
+    case Operation::Set:
+    case Operation::RefusedSet:
+      return PduType::Set;
   }
   return PduType::Get;
 }
@@ -69,6 +82,7 @@ enum class Operation : std::uint8_t { Get, GetNext, GetBulk, WalkGetNext, WalkGe
     case PduType::GetBulk:
       return "GETBULK";
     case PduType::Set:
+      return "SET";
     case PduType::Response:
     case PduType::Report:
       break;  // no Operation sends these
@@ -77,10 +91,14 @@ enum class Operation : std::uint8_t { Get, GetNext, GetBulk, WalkGetNext, WalkGe
 }
 
 // GET's rows are the pair or Community alone, which is how the matrix was labelled before any
-// other operation reached an Agent; the rest say their PDU first, and a Walk says so after it.
+// other operation reached an Agent; the rest say their PDU first, and a Walk or a refused SET says
+// so after it.
 [[nodiscard]] inline std::string operationLabel(Operation operation, const std::string& label) {
   if (operation == Operation::Get) return label;
-  return pduName(operation) + (isWalk(operation) ? " Walk " : " ") + label;
+  const char* const kind = isWalk(operation)                    ? " Walk "
+                           : operation == Operation::RefusedSet ? " refused "
+                                                                : " ";
+  return pduName(operation) + kind + label;
 }
 
 // How many Varbinds a GETNEXT carries. Several is the whole check: each answered from its own

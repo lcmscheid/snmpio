@@ -21,6 +21,7 @@ add_executable(snmpio_tests
   TestInterop.cpp
   TestInteropFaults.cpp
   TestInteropOperations.cpp
+  TestInteropSet.cpp
   TestInteropV3.cpp
   TestInteropWalk.cpp
   TestOid.cpp

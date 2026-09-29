@@ -11,7 +11,9 @@ that shaped it are in [`docs/adr/`](docs/adr).
 **Stage 4 of 6.** SNMPv2c and SNMPv3 both work end to end over UDP: GET, GETNEXT, GETBULK, SET and
 Walk, at all three Security Levels. Engine Discovery, time synchronisation and Report routing happen
 underneath and are never surfaced. `authPriv` speaks DES, AES-128, and AES-192/256 under both the
-Blumenthal and the Reeder key extension.
+Blumenthal and the Reeder key extension. Stage 5's automated half is done too: every operation
+reaches `snmpd` and both Simulator images in CI, and what stage 5 still needs is a run of the
+hardware checklist.
 
 | Stage | Deliverable | State |
 |---|---|---|
@@ -20,7 +22,7 @@ Blumenthal and the Reeder key extension.
 | 2 | v3 message framing, USM auth (MD5, SHA-1, SHA-2), password-to-key, key localization | **done** |
 | 3 | Async engine discovery, time sync, Report handling | **done** |
 | 4 | Privacy: AES-128, then AES-192/256 under both key extensions, DES behind the legacy provider | **done** |
-| 5 | Interop matrix vs the Simulator, `snmpd`, and real vendor gear | next |
+| 5 | Interop matrix vs the Simulator, `snmpd`, and real vendor gear | automated half **done**; the [hardware checklist](#pre-release-hardware-checklist) remains |
 | 6 | Docs, cancellation semantics, error taxonomy, packaging | |
 
 ## Using it
@@ -264,6 +266,11 @@ SNMPIO_INTEROP_V3_KEY_EXTENSIONS=1
 SNMPIO_INTEROP_FAULTS=                     # the Simulators' control UI port
 SNMPIO_INTEROP_FAULTS_ENGINE_ID=
 SNMPIO_INTEROP_BROKEN_GETNEXT=
+SNMPIO_INTEROP_SET_REFUSAL=noAccess
+SNMPIO_INTEROP_WRITER_COMMUNITY=snmpio-writer       # the writer Credentials, below
+SNMPIO_INTEROP_WRITER_NOAUTHNOPRIV=writer-noauth
+SNMPIO_INTEROP_WRITER_AUTHNOPRIV=writer-authsha256
+SNMPIO_INTEROP_WRITER_AUTHPRIV=writer-privsha256aes
 ```
 
 `SNMPIO_INTEROP_TARGET` is the address the Agent answers at and `SNMPIO_INTEROP_PORT` the port,
@@ -302,8 +309,8 @@ section shows, because `ctest` splits the run summary into pieces.
 One user is enough to be useful, because a Target typically has exactly one. The matrix test then
 covers the single pair that user can serve, and the Key Extension test skips, since it needs four
 users of its own. The other two v3 tests in that file — Engine Discovery and the wrong-password Report — run against the named
-user rather than against the conventional one. GETNEXT, GETBULK and the Walks run as that user's
-pair in place of one pair per Security Level, and the GETBULK and Walk passes across every privacy
+user rather than against the conventional one. GETNEXT, GETBULK, the Walks and the refused SET run
+as that user's pair in place of one pair per Security Level, and the GETBULK and Walk passes across every privacy
 protocol skip, since they need a user per cipher.
 
 The v2c half has the same two ways in. It sends the Community `public`, which is what every Agent
@@ -357,10 +364,40 @@ one place their flags are said:
 | `SNMPIO_INTEROP_FAULTS` | can be **told to misbehave** — the port the Simulator's control UI is on |
 | `SNMPIO_INTEROP_FAULTS_ENGINE_ID` | offers the `engineIDChange` fault, which the older pinned image does not |
 | `SNMPIO_INTEROP_BROKEN_GETNEXT` | answers a GETNEXT carrying several Varbinds from the wrong requested OIDs, as both pinned Simulator images do ([snmp-fault-agent#11](https://github.com/lcmscheid/snmp-fault-agent/issues/11)) |
+| `SNMPIO_INTEROP_SET_REFUSAL` | is known to refuse a read-only SET with one error-status — its RFC 3416 name: `noAccess` for `snmpd`, `readOnly` for the Simulators ([snmp-fault-agent#10](https://github.com/lcmscheid/snmp-fault-agent/issues/10)) |
 
-With the last one set, GETNEXT sends one Varbind per request instead of several, and its summary
-rows say so; [`tests/InteropOperations.hpp`](tests/InteropOperations.hpp) says why it
-names a defect rather than an ability.
+With `SNMPIO_INTEROP_BROKEN_GETNEXT` set, GETNEXT sends one Varbind per request instead of
+several, and its summary rows say so; [`tests/InteropOperations.hpp`](tests/InteropOperations.hpp)
+says why it names a defect rather than an ability. With `SNMPIO_INTEROP_SET_REFUSAL` unset, the
+refused SET is held only to being refused, and its rows say that too. `readOnly` is what the pinned
+Simulator images send, and RFC 3416 says an SNMPv2 entity never does; the rows say so, and the flag
+becomes `notWritable` once an image fixing it is pinned.
+
+### Writer Credentials
+
+The SET that lands writes `sysContact.0`, reads it back and restores it, so it changes the Target
+while it runs. It uses only the writer Credentials the run names: a v2c Community, and one v3 user
+per Security Level, each carrying that level's representative pair (SHA-256, then AES-128) and
+`SNMPIO_INTEROP_V3_PASSWORD`. On `snmpd` they are separate from every user and Community the rest
+of the suite reads with, which all stay read-only.
+
+| Variable | Names the writer |
+|---|---|
+| `SNMPIO_INTEROP_WRITER_COMMUNITY` | over v2c, never printed: the summary says `v2c/writer community` |
+| `SNMPIO_INTEROP_WRITER_NOAUTHNOPRIV` | at `noAuthNoPriv` |
+| `SNMPIO_INTEROP_WRITER_AUTHNOPRIV` | at `authNoPriv`, on SHA-256 |
+| `SNMPIO_INTEROP_WRITER_AUTHPRIV` | at `authPriv`, on SHA-256 with AES-128 |
+
+With one unset, its write **skips**, and the run summary lists it as `skip`, not `ok`. The script
+names all four for the Agents it starts, and nothing names them for a Target it did not, so a run
+against someone else's equipment writes nothing unless you choose to. On `snmpd` the writers reach
+`sysContact` and nothing else, and its configuration leaves `sysContact.0` unset, because net-snmp
+makes an object read-only when its configuration sets it. The Simulator has no per-user access
+control, so there the writers are ordinary users, and `sysContact.0` is the one writable entry its
+values configuration serves.
+
+The SET that is refused needs no writer and changes nothing: it writes `sysDescr.0`'s own value back
+with the Credentials every other test reads with. So it runs everywhere, hardware included.
 
 CI runs three Agents, one job each, and between them they cover every v3 case above. Neither gate is
 a Security Level being negotiated: the Simulator **infers** the level from which protocols a user
@@ -404,6 +441,9 @@ most Targets beside them; on one with too few interfaces the Walks fail rather t
 single batch. The Walks assert structure alone — every OID inside the Subtree, strictly increasing,
 a clean end, more than one batch — and are held to one OID list, so the Agent supplies the expected
 answer; values are not compared, since counters move between Walks.
+And SET, over v2c and at each Security Level: a [write that lands](#writer-credentials), read
+back with a GET and restored, and a write the Agent refuses, asserting the exact error-status its
+capability flag names and that the value is unchanged afterwards.
 It also proves that Engine Discovery costs the extra round trips exactly once, counted off the wire
 by a relay between Client and Agent, since the API deliberately never surfaces it; and that a wrong
 password comes back as the Report the Engine sent rather than as a timeout.
@@ -462,7 +502,10 @@ use.
 
 Of the [capability variables](#everything-else-the-harness-reads), leave `SNMPIO_INTEROP_FAULTS` and
 `_FAULTS_ENGINE_ID` unset, because a correct Agent cannot misbehave on request, and
-`SNMPIO_INTEROP_BROKEN_GETNEXT` unset. Set
+`SNMPIO_INTEROP_BROKEN_GETNEXT` unset. Set `SNMPIO_INTEROP_SET_REFUSAL` only once you know which
+error-status the Target refuses a read-only SET with; unset, the refused SET still runs, held only
+to being refused. Name no [writer Credentials](#writer-credentials) unless the Target is yours to
+write `sysContact.0` on; its write rows then say `skip`. Set
 `SNMPIO_INTEROP_V3_USM_REPORTS` only if the Target answers a bad digest with a usmStats Report. That
 Report is optional behaviour RFC 3414 allows a correct Agent, and a Target that sends it can prove
 the wrong-password test. `SNMPIO_INTEROP_V3_KEY_EXTENSIONS` does nothing here, because that test

@@ -15,10 +15,12 @@
 
 #include <gtest/gtest.h>
 
+#include "InteropCredentials.hpp"
 #include "InteropSummary.hpp"
 #include "InteropTarget.hpp"
 
-// GETNEXT and GETBULK against a live Agent, asserted only on what a caller observes.
+// GETNEXT and GETBULK against a live Agent, asserted only on what a caller observes, and the
+// summary rows every operation the suite sends is recorded under.
 //
 // No MIB contents are pinned beyond what the GET half already relies on: sysDescr.0 exists. From
 // that alone, both operations' successor semantics are checkable against any Agent. sysDescr is
@@ -33,41 +35,82 @@ inline const Oid systemGroup{1, 3, 6, 1, 2, 1, 1};
 // and the AES-CFB tail are exercised, and well inside what any Agent fits in one datagram.
 inline constexpr std::int32_t bulkRepetitions = 20;
 
-// Why the successor checks cannot run against this Agent, or nothing when they can. Both pinned
-// Simulator images answer a GETNEXT or GETBULK carrying several Varbinds from the wrong requested
-// OIDs (lcmscheid/snmp-fault-agent#11) -- which is what these checks exist to catch, and which a
-// test that asserted the Simulator's answers would pin in place. tests/interop/start-agent.sh sets
-// the flag for them, and unsets it when a fixed image is pinned. It names the defect rather than
-// the compliance, so a Target nobody described is held to RFC 3416 like `snmpd`.
-[[nodiscard]] inline std::optional<std::string> successorsUncheckable() {
-  if (!envVar("SNMPIO_INTEROP_BROKEN_SUCCESSORS")) return std::nullopt;
-  return "SNMPIO_INTEROP_BROKEN_SUCCESSORS: the Agent answers multi-Varbind GETNEXT/GETBULK from "
-         "the wrong OIDs (lcmscheid/snmp-fault-agent#11)";
+// What a summary row says was sent. GET's rows are the pair or Community alone, which is how the
+// matrix was labelled before any other operation reached an Agent; the rest say their name first.
+enum class Operation : std::uint8_t { Get, GetNext, GetBulk };
+
+[[nodiscard]] inline std::string operationLabel(Operation operation, const std::string& label) {
+  switch (operation) {
+    case Operation::GetNext:
+      return "GETNEXT " + label;
+    case Operation::GetBulk:
+      return "GETBULK " + label;
+    case Operation::Get:
+      break;
+  }
+  return label;
 }
 
-// What an operation's summary row is called: the operation, then the pair or Community it ran as.
-[[nodiscard]] inline std::string operationLabel(const char* operation, const std::string& label) {
-  return std::string(operation) + " " + label;
+// How many Varbinds a GETNEXT carries. Several is the whole check: each answered from its own
+// requested OID. One is what an Agent with the defect below can still be held to.
+enum class GetNextShape : std::uint8_t { SeveralVarbinds, OneVarbind };
+
+// Why this Agent is sent one Varbind per GETNEXT, or nothing when it can take several. Both pinned
+// Simulator images answer a GETNEXT carrying several Varbinds from the last requested OID
+// (lcmscheid/snmp-fault-agent#11) -- which is what the whole check exists to catch, and which
+// asserting the Simulator's answers would pin in place. tests/interop/start-agent.sh sets the flag
+// for them. It names the defect rather than the compliance, so a Target nobody described is held
+// to RFC 3416 like `snmpd`. GETBULK needs no such flag: the same images answer the one it sends
+// correctly.
+[[nodiscard]] inline std::optional<std::string> severalVarbindGetNextBroken() {
+  if (!envVar("SNMPIO_INTEROP_BROKEN_GETNEXT")) return std::nullopt;
+  return "one Varbind per request: SNMPIO_INTEROP_BROKEN_GETNEXT says the Agent answers several "
+         "from the wrong OIDs (lcmscheid/snmp-fault-agent#11)";
+}
+
+// GETNEXT asks for {system, sysDescr.0}, or {system}.
+[[nodiscard]] inline std::vector<Oid> getNextRequest(GetNextShape shape) {
+  if (shape == GetNextShape::OneVarbind) return {systemGroup};
+  return {systemGroup, sysDescr};
+}
+
+// GETBULK asks for {system | system, sysDescr.0}: one non-repeater, then two repeating columns.
+inline constexpr std::size_t bulkNonRepeaters = 1;
+inline constexpr std::size_t bulkColumns = 2;
+
+// The GETBULK Varbind in `row` of `column`, counted past the non-repeater.
+[[nodiscard]] inline std::size_t bulkIndex(std::size_t row, std::size_t column) {
+  return bulkNonRepeaters + (row * bulkColumns) + column;
 }
 
 [[nodiscard]] inline bool isException(const Varbind& varbind) {
   return std::holds_alternative<ValueException>(varbind.val);
 }
 
+// A Varbind as a failure message wants it: its OID, or the exception that stands in for one.
+[[nodiscard]] inline std::string describe(const Varbind& varbind) {
+  return isException(varbind) ? std::string(toString(varbind.val)) : varbind.name.toString();
+}
+
 // The first thing wrong with a result, or empty when there is nothing: the text a summary row and
 // a failure message both carry.
-[[nodiscard]] inline std::string transportProblem(const GetResult& result) {
+[[nodiscard]] inline std::string transportProblem(const ExchangeResult& result) {
   if (!result.ec) return {};
   return std::string(result.ec.category().name()) + ": " + result.ec.message();
 }
 
-// GETNEXT of {system, sysDescr.0}: the first comes back as sysDescr.0, its immediate successor,
-// and the second as something after sysDescr.0 that the Agent actually has.
-[[nodiscard]] inline std::string getNextProblem(const GetResult& result) {
-  if (auto problem = transportProblem(result); !problem.empty()) return problem;
-  const auto& varbinds = result.response.varbinds;
-  if (varbinds.size() != 2) {
-    return "asked for 2 successors, got " + std::to_string(varbinds.size());
+// GETNEXT of {system, sysDescr.0}: the first comes back as sysDescr.0, its immediate successor.
+// What the second's immediate successor is, no pinned MIB content says -- so it is held to what
+// GETBULK's column from sysDescr.0 starts with, the same successor asked through another PDU.
+// With one Varbind, only the first.
+[[nodiscard]] inline std::string getNextProblem(const ExchangeResult& next, GetNextShape shape,
+                                                const ExchangeResult& bulk) {
+  if (auto problem = transportProblem(next); !problem.empty()) return problem;
+  const auto& varbinds = next.response.varbinds;
+  const auto requested = getNextRequest(shape);
+  if (varbinds.size() != requested.size()) {
+    return "asked for " + std::to_string(requested.size()) + " successors, got " +
+           std::to_string(varbinds.size());
   }
   if (varbinds[0].name != sysDescr) {
     return "the successor of system is sysDescr.0, got " + varbinds[0].name.toString();
@@ -77,43 +120,54 @@ inline constexpr std::int32_t bulkRepetitions = 20;
       return varbind.name.toString() + " came back as " + toString(varbind.val);
     }
   }
+  if (shape == GetNextShape::OneVarbind) return {};
   if (!(sysDescr < varbinds[1].name)) {
     return "the successor of sysDescr.0 does not follow it: " + varbinds[1].name.toString();
+  }
+  // A GETBULK that failed, or was too short to reach its column from sysDescr.0, fails its own
+  // row; there is nothing here to compare with.
+  const auto fromBulk = bulkIndex(0, 1);
+  if (bulk.ec || bulk.response.varbinds.size() <= fromBulk) return {};
+  const auto& bulkSuccessor = bulk.response.varbinds[fromBulk];
+  if (isException(bulkSuccessor) || bulkSuccessor.name != varbinds[1].name) {
+    return "the successor of sysDescr.0 is " + varbinds[1].name.toString() + " by GETNEXT but " +
+           describe(bulkSuccessor) + " by GETBULK";
   }
   return {};
 }
 
-// GETBULK of {system | system, sysDescr.0} with one non-repeater: the non-repeater's single
-// successor, then rows of two columns, each column strictly increasing until it runs off the end
-// of the MIB view and stays there. The columns are GETNEXT chains from `system` and from
-// sysDescr.0, so the first is the second one row late -- which checks that each row is the
-// immediate successor of the one before, not merely a later OID.
-[[nodiscard]] inline std::string getBulkProblem(const GetResult& result) {
-  if (auto problem = transportProblem(result); !problem.empty()) return problem;
-  const auto& varbinds = result.response.varbinds;
-  constexpr std::size_t columns = 2;
+// GETBULK: the non-repeater's single successor, then rows of two columns, each column strictly
+// increasing until it runs off the end of the MIB view and stays there. The columns are GETNEXT
+// chains from `system` and from sysDescr.0, so the first is the second one row late -- which checks
+// that each row is the immediate successor of the one before, not merely a later OID.
+[[nodiscard]] inline std::string getBulkProblem(const ExchangeResult& bulk) {
+  if (auto problem = transportProblem(bulk); !problem.empty()) return problem;
+  const auto& varbinds = bulk.response.varbinds;
+  constexpr auto nonRepeaters = bulkNonRepeaters;
+  constexpr auto columns = bulkColumns;
+  const std::vector<Oid> requested{systemGroup, sysDescr};
   // An Agent may drop Varbinds off the end to fit its datagram, and RFC 3416 section 4.2.3 lets
   // that end partway through a row -- so the last row may be short, and is checked as far as it
   // goes. The one row every Response has room for is still required.
-  if (varbinds.size() < 1 + columns ||
-      varbinds.size() > 1 + (columns * static_cast<std::size_t>(bulkRepetitions))) {
-    return "asked for one non-repeater and " + std::to_string(bulkRepetitions) +
-           " rows of two, got " + std::to_string(varbinds.size()) + " Varbinds";
+  if (varbinds.size() < nonRepeaters + columns ||
+      varbinds.size() > nonRepeaters + (columns * static_cast<std::size_t>(bulkRepetitions))) {
+    return "asked for " + std::to_string(nonRepeaters) + " non-repeaters and " +
+           std::to_string(bulkRepetitions) + " rows of " + std::to_string(columns) + ", got " +
+           std::to_string(varbinds.size()) + " Varbinds";
   }
-  const std::size_t rows = (varbinds.size() - 1 + columns - 1) / columns;
+  const std::size_t rows = (varbinds.size() - nonRepeaters + columns - 1) / columns;
   const auto present = [&](std::size_t row, std::size_t column) {
-    return 1 + (row * columns) + column < varbinds.size();
+    return bulkIndex(row, column) < varbinds.size();
+  };
+  const auto at = [&](std::size_t row, std::size_t column) -> const Varbind& {
+    return varbinds[bulkIndex(row, column)];
   };
   if (varbinds[0].name != sysDescr || isException(varbinds[0])) {
-    return "the non-repeater's successor is sysDescr.0, got " + varbinds[0].name.toString();
+    return "the non-repeater's successor is sysDescr.0, got " + describe(varbinds[0]);
   }
-  const auto at = [&](std::size_t row, std::size_t column) -> const Varbind& {
-    return varbinds[1 + (row * columns) + column];
-  };
   if (at(0, 0).name != sysDescr) {
     return "the first repetition of system is sysDescr.0, got " + at(0, 0).name.toString();
   }
-  const std::vector<Oid> requested{systemGroup, sysDescr};
   for (std::size_t column = 0; column < columns; ++column) {
     const Oid* previous = &requested[column];
     bool ended = false;
@@ -140,10 +194,12 @@ inline constexpr std::int32_t bulkRepetitions = 20;
   for (std::size_t row = 0; row + 1 < rows && present(row + 1, 0); ++row) {
     const auto& late = at(row + 1, 0);
     const auto& early = at(row, 1);
-    if (isException(late) || isException(early)) break;
-    if (late.name != early.name) {
-      return "row " + std::to_string(row + 1) + " from system is " + late.name.toString() +
-             " but row " + std::to_string(row) + " from sysDescr.0 is " + early.name.toString() +
+    // Both columns running out together is the one way they may stop agreeing on an OID; one
+    // running out while the other still has the successor it should have reached is a mismatch.
+    if (isException(late) && isException(early)) break;
+    if (isException(late) || isException(early) || late.name != early.name) {
+      return "row " + std::to_string(row + 1) + " from system is " + describe(late) + " but row " +
+             std::to_string(row) + " from sysDescr.0 is " + describe(early) +
              ", and they are the same successor";
     }
   }
@@ -151,29 +207,70 @@ inline constexpr std::int32_t bulkRepetitions = 20;
 }
 
 // Record `problem` against `label` in the run summary, and fail the test on it. Recorded before
-// the assertion, so a failing row is still in the summary.
-inline void recordOutcome(const std::string& label, const std::string& problem) {
-  recordPair(label, problem.empty(), problem);
+// the assertion, so a failing row is still in the summary. `note` is what an ok row did not prove.
+inline void recordOutcome(const std::string& label, const std::string& problem,
+                          const std::string& note = {}) {
+  recordPair(label, problem.empty(), problem.empty() ? note : problem);
   EXPECT_TRUE(problem.empty()) << label << ": " << problem;
 }
 
-// One GETNEXT, recorded as `GETNEXT <label>`. `auth` is a Community or a Credentials.
+// `auth` is a Community or a Credentials.
 template <typename Auth>
-void getNextAndRecord(const Target& target, const Auth& auth, const std::string& label) {
-  const auto result = exchange([&](Client& client, auto handler) {
-    client.asyncGetNext(target, auth, {systemGroup, sysDescr}, std::move(handler));
+ExchangeResult sendGetNext(const Target& target, const Auth& auth, GetNextShape shape) {
+  return exchange([&](Client& client, auto handler) {
+    client.asyncGetNext(target, auth, getNextRequest(shape), std::move(handler));
   });
-  recordOutcome(operationLabel("GETNEXT", label), getNextProblem(result));
 }
 
-// One GETBULK with a non-repeater and two repeating columns, recorded as `GETBULK <label>`.
 template <typename Auth>
-void getBulkAndRecord(const Target& target, const Auth& auth, const std::string& label) {
-  const auto result = exchange([&](Client& client, auto handler) {
-    client.asyncGetBulk(target, auth, {systemGroup, systemGroup, sysDescr}, 1, bulkRepetitions,
+ExchangeResult sendGetBulk(const Target& target, const Auth& auth) {
+  return exchange([&](Client& client, auto handler) {
+    client.asyncGetBulk(target, auth, {systemGroup, systemGroup, sysDescr},
+                        static_cast<std::int32_t>(bulkNonRepeaters), bulkRepetitions,
                         std::move(handler));
   });
-  recordOutcome(operationLabel("GETBULK", label), getBulkProblem(result));
+}
+
+// One GETNEXT and one GETBULK, recorded as `GETNEXT <label>` and `GETBULK <label>`: sent together
+// because the GETBULK is what the GETNEXT's second successor is held to.
+template <typename Auth>
+void getNextAndGetBulkAndRecord(const Target& target, const Auth& auth, const std::string& label) {
+  const auto broken = severalVarbindGetNextBroken();
+  const auto shape = broken ? GetNextShape::OneVarbind : GetNextShape::SeveralVarbinds;
+  const auto next = sendGetNext(target, auth, shape);
+  const auto bulk = sendGetBulk(target, auth);
+  recordOutcome(operationLabel(Operation::GetNext, label), getNextProblem(next, shape, bulk),
+                broken.value_or(""));
+  recordOutcome(operationLabel(Operation::GetBulk, label), getBulkProblem(bulk));
+}
+
+// One GETBULK, recorded as `GETBULK <label>`.
+template <typename Auth>
+void getBulkAndRecord(const Target& target, const Auth& auth, const std::string& label) {
+  recordOutcome(operationLabel(Operation::GetBulk, label),
+                getBulkProblem(sendGetBulk(target, auth)));
+}
+
+// Record that every row of the GET matrix was skipped for the same reason.
+inline void recordAuthAndPrivacyMatrixSkipped(const std::string& reason) {
+  recordSkip(pairLabel(noAuthRow, noPrivRow), reason);
+  for (const auto& auth : authProtocols) {
+    recordSkip(pairLabel(auth, noPrivRow), reason);
+    for (const auto& priv : privProtocols) {
+      recordSkip(pairLabel(auth, priv), reason);
+    }
+  }
+}
+
+// Why the Key Extension rows skip when the run does not say the Agent serves them.
+inline const std::string keyExtensionsUnset =
+    "needs SNMPIO_INTEROP_V3_KEY_EXTENSIONS and an Agent serving AES-192/256";
+
+// Record that all four of an operation's Key Extension rows were skipped for the same reason.
+inline void recordKeyExtensionsSkipped(Operation operation, const std::string& reason) {
+  for (const auto& priv : keyExtensionProtocols) {
+    recordSkip(operationLabel(operation, pairLabel(keyExtensionAuthRow, priv)), reason);
+  }
 }
 
 }  // namespace snmpio::test

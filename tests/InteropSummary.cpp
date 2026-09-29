@@ -8,6 +8,7 @@
 #include <iostream>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include <gtest/gtest.h>
@@ -18,8 +19,8 @@ namespace {
 struct PairResult {
   std::string label;
   enum class State { Ok, Failed, Skipped } state;
-  // What kept the row from being Ok: the failure message for a Failed pair, or the reason for a
-  // Skipped one. The two say the same thing -- the reason the run did not prove this row.
+  // What the run did not prove about this row: the failure message for a Failed pair, the reason
+  // for a Skipped one, and for an Ok one whatever the check it passed left out.
   std::string reason;
 };
 
@@ -35,14 +36,23 @@ class InteropSummary {
 
   void setSysDescr(const std::string& sysDescr) { m_sysDescr = sysDescr; }
 
+  // A row two tests reach is printed once, and says the worst they found. A result replaces a
+  // skip, which only means that one test did not reach the row, and a failure replaces an ok --
+  // so neither test order nor which of the two ran second can print a row as proven that one of
+  // them disproved.
   void recordPair(const std::string& label, bool succeeded, const std::string& error) {
-    if (hasLabel(label)) return;
-    m_pairs.push_back(
-        {label, succeeded ? PairResult::State::Ok : PairResult::State::Failed, error});
+    PairResult result{label, succeeded ? PairResult::State::Ok : PairResult::State::Failed, error};
+    auto* const existing = find(label);
+    if (existing == nullptr) {
+      m_pairs.push_back(std::move(result));
+    } else if (existing->state == PairResult::State::Skipped ||
+               (existing->state == PairResult::State::Ok && !succeeded)) {
+      *existing = std::move(result);
+    }
   }
 
   void recordSkip(const std::string& label, std::string reason) {
-    if (hasLabel(label)) return;
+    if (find(label) != nullptr) return;
     m_pairs.push_back({label, PairResult::State::Skipped, std::move(reason)});
   }
 
@@ -93,8 +103,9 @@ class InteropSummary {
  private:
   InteropSummary() = default;
 
-  [[nodiscard]] bool hasLabel(std::string_view label) const {
-    return std::ranges::any_of(m_pairs, [label](const auto& pair) { return pair.label == label; });
+  [[nodiscard]] PairResult* find(std::string_view label) {
+    const auto found = std::ranges::find(m_pairs, label, &PairResult::label);
+    return found == m_pairs.end() ? nullptr : &*found;
   }
 
   std::string m_sysDescr;

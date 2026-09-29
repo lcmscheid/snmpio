@@ -31,7 +31,7 @@ using test::findPriv;
 using test::get;
 using test::getAndRecord;
 using test::getBulkAndRecord;
-using test::getNextAndRecord;
+using test::getNextAndGetBulkAndRecord;
 using test::keyExtensionAuthRow;
 using test::keyExtensionProtocols;
 using test::keyExtensionsUnset;
@@ -39,6 +39,7 @@ using test::makeInteropTarget;
 using test::NamedUser;
 using test::noAuthRow;
 using test::noPrivRow;
+using test::Operation;
 using test::operationLabel;
 using test::pairLabel;
 using test::privProtocols;
@@ -48,31 +49,32 @@ using test::recordKeyExtensionsSkipped;
 using test::recordSkip;
 using test::securityLevelPairs;
 using test::sha256Row;
-using test::successorsUncheckable;
 using test::sysDescr;
 
-// Record that an operation's row at every Security Level was skipped for the same reason.
-void recordSecurityLevelsSkipped(const char* operation, const std::string& reason) {
-  for (const auto& [auth, priv] : securityLevelPairs) {
-    recordSkip(operationLabel(operation, pairLabel(auth, priv)), reason);
+// Record that GETNEXT's and GETBULK's rows at every Security Level were skipped for the same
+// reason.
+void recordSecurityLevelsSkipped(const std::string& reason) {
+  for (const auto operation : {Operation::GetNext, Operation::GetBulk}) {
+    for (const auto& [auth, priv] : securityLevelPairs) {
+      recordSkip(operationLabel(operation, pairLabel(auth, priv)), reason);
+    }
   }
 }
 
 // Record that GETBULK's row under every privacy protocol was skipped for the same reason.
 void recordBulkPrivacySkipped(const std::string& reason) {
   for (const auto& priv : privProtocols) {
-    recordSkip(operationLabel("GETBULK", pairLabel(sha256Row, priv)), reason);
+    recordSkip(operationLabel(Operation::GetBulk, pairLabel(sha256Row, priv)), reason);
   }
-  recordKeyExtensionsSkipped(reason, operationLabel("GETBULK", ""));
+  recordKeyExtensionsSkipped(Operation::GetBulk, reason);
 }
 
 // Record that every v3 row was skipped for the same reason. Called from SetUp when the Target is
 // configured but the run did not name any v3 way in, so the summary still lists every row.
 void recordEveryRowSkipped(const std::string& reason) {
   recordAuthAndPrivacyMatrixSkipped(reason);
-  recordKeyExtensionsSkipped(reason);
-  recordSecurityLevelsSkipped("GETNEXT", reason);
-  recordSecurityLevelsSkipped("GETBULK", reason);
+  recordKeyExtensionsSkipped(Operation::Get, reason);
+  recordSecurityLevelsSkipped(reason);
   recordBulkPrivacySkipped(reason);
 }
 
@@ -145,6 +147,12 @@ class InteropV3 : public ::testing::Test {
     return m_named ? credentials(m_named->auth, m_named->priv) : credentials(sha256Row, aes128Row);
   }
 
+  // Why a row the named user does not serve is skipped: the run said which one pair it had.
+  [[nodiscard]] std::string namedUserOnly() const {
+    return "run named one user: " + m_named->name + " carrying " +
+           pairLabel(m_named->auth, m_named->priv);
+  }
+
   Target m_target;
   std::string m_password;
   std::optional<NamedUser> m_named;
@@ -160,10 +168,10 @@ class InteropV3 : public ::testing::Test {
 TEST_F(InteropV3, CoversTheAuthAndPrivacyMatrix) {
   if (m_named) {
     getAndRecord(m_target, singlePairCredentials(), pairLabel(m_named->auth, m_named->priv));
-    recordAuthAndPrivacyMatrixSkipped("run named one user: " + m_named->name);
+    recordAuthAndPrivacyMatrixSkipped(namedUserOnly());
     return;
   }
-  getAndRecord(m_target, credentials(noAuthRow, noPrivRow), "noAuthNoPriv");
+  getAndRecord(m_target, credentials(noAuthRow, noPrivRow), pairLabel(noAuthRow, noPrivRow));
   for (const auto& auth : authProtocols) {
     getAndRecord(m_target, credentials(auth, noPrivRow), pairLabel(auth, noPrivRow));
     for (const auto& priv : privProtocols) {
@@ -184,14 +192,12 @@ TEST_F(InteropV3, CoversTheAuthAndPrivacyMatrix) {
 // scheme being implemented at all.
 TEST_F(InteropV3, CoversBothKeyExtensions) {
   if (m_named) {
-    const std::string reason =
-        "needs the four privsha1aes192/256(c) users, and this run named one user: " +
-        m_named->name + " carrying " + pairLabel(m_named->auth, m_named->priv);
-    recordKeyExtensionsSkipped(reason);
+    const std::string reason = "needs the four privsha1aes192/256(c) users; " + namedUserOnly();
+    recordKeyExtensionsSkipped(Operation::Get, reason);
     GTEST_SKIP() << reason;
   }
   if (!envVar("SNMPIO_INTEROP_V3_KEY_EXTENSIONS")) {
-    recordKeyExtensionsSkipped(keyExtensionsUnset);
+    recordKeyExtensionsSkipped(Operation::Get, keyExtensionsUnset);
     GTEST_SKIP() << keyExtensionsUnset;
   }
   for (const auto& priv : keyExtensionProtocols) {
@@ -204,51 +210,31 @@ TEST_F(InteropV3, CoversBothKeyExtensions) {
 // bug in how a Scoped PDU is built or read would hide behind a GET that works. A named user is one
 // pair, and the operations run as that pair instead.
 TEST_F(InteropV3, GetNextAndGetBulkAtEverySecurityLevel) {
-  if (const auto reason = successorsUncheckable()) {
-    if (m_named) {
-      const auto label = pairLabel(m_named->auth, m_named->priv);
-      recordSkip(operationLabel("GETNEXT", label), *reason);
-      recordSkip(operationLabel("GETBULK", label), *reason);
-    }
-    recordSecurityLevelsSkipped("GETNEXT", *reason);
-    recordSecurityLevelsSkipped("GETBULK", *reason);
-    GTEST_SKIP() << *reason;
-  }
   if (m_named) {
-    const auto label = pairLabel(m_named->auth, m_named->priv);
-    getNextAndRecord(m_target, singlePairCredentials(), label);
-    getBulkAndRecord(m_target, singlePairCredentials(), label);
-    const std::string reason = "run named one user: " + m_named->name;
-    recordSecurityLevelsSkipped("GETNEXT", reason);
-    recordSecurityLevelsSkipped("GETBULK", reason);
+    getNextAndGetBulkAndRecord(m_target, singlePairCredentials(),
+                               pairLabel(m_named->auth, m_named->priv));
+    recordSecurityLevelsSkipped(namedUserOnly());
     return;
   }
   for (const auto& [auth, priv] : securityLevelPairs) {
-    getNextAndRecord(m_target, credentials(auth, priv), pairLabel(auth, priv));
-    getBulkAndRecord(m_target, credentials(auth, priv), pairLabel(auth, priv));
+    getNextAndGetBulkAndRecord(m_target, credentials(auth, priv), pairLabel(auth, priv));
   }
 }
 
-// GETBULK under every privacy protocol the Agent speaks. A sysDescr reply is a block or two; a
-// GETBULK Response runs to many, so this is where DES padding and the AES-CFB tail are exercised
-// on data an Agent nobody here wrote encrypted. The Key Extension rows are gated as the GET ones
-// are, and on SHA-1 for the same reason.
+// GETBULK under every privacy protocol the Agent speaks, at the size test::bulkRepetitions picks
+// for it, on data an Agent nobody here wrote encrypted. The AES-128 row is the Security Level
+// test's authPriv row again, and the summary keeps whichever of the two failed. The Key Extension
+// rows are gated as the GET ones are, and on SHA-1 for the same reason.
 TEST_F(InteropV3, GetBulkUnderEveryPrivacyProtocol) {
-  if (const auto reason = successorsUncheckable()) {
-    recordBulkPrivacySkipped(*reason);
-    GTEST_SKIP() << *reason;
-  }
   if (m_named) {
-    const std::string reason = "run named one user: " + m_named->name + " carrying " +
-                               pairLabel(m_named->auth, m_named->priv);
-    recordBulkPrivacySkipped(reason);
-    GTEST_SKIP() << reason;
+    recordBulkPrivacySkipped(namedUserOnly());
+    GTEST_SKIP() << namedUserOnly();
   }
   for (const auto& priv : privProtocols) {
     getBulkAndRecord(m_target, credentials(sha256Row, priv), pairLabel(sha256Row, priv));
   }
   if (!envVar("SNMPIO_INTEROP_V3_KEY_EXTENSIONS")) {
-    recordKeyExtensionsSkipped(keyExtensionsUnset, operationLabel("GETBULK", ""));
+    recordKeyExtensionsSkipped(Operation::GetBulk, keyExtensionsUnset);
     return;
   }
   for (const auto& priv : keyExtensionProtocols) {

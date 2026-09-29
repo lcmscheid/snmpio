@@ -7,8 +7,6 @@
 
 #include <snmpio/Usm.hpp>
 
-#include "InteropSummary.hpp"
-
 // The v3 half of the interop suite's vocabulary: which auth and privacy protocols it names, what
 // the pairs are called, and the Credentials a pair adds up to. Said once here, so that every v3
 // interop test -- the GET matrix, and each operation run over it -- addresses the same users by the
@@ -134,28 +132,6 @@ struct NamedUser {
                      auth.protocol == AuthProtocol::None ? std::string() : password,
                      priv.protocol,
                      priv.protocol == PrivProtocol::None ? std::string() : password};
-}
-
-// Record that every row of the GET matrix was skipped for the same reason.
-inline void recordAuthAndPrivacyMatrixSkipped(const std::string& reason) {
-  recordSkip("noAuthNoPriv", reason);
-  for (const auto& auth : authProtocols) {
-    recordSkip(pairLabel(auth, noPrivRow), reason);
-    for (const auto& priv : privProtocols) {
-      recordSkip(pairLabel(auth, priv), reason);
-    }
-  }
-}
-
-// Why the Key Extension rows skip when the run does not say the Agent serves them.
-inline const std::string keyExtensionsUnset =
-    "needs SNMPIO_INTEROP_V3_KEY_EXTENSIONS and an Agent serving AES-192/256";
-
-// Record that all four Key Extension rows were skipped for the same reason.
-inline void recordKeyExtensionsSkipped(const std::string& reason, const std::string& prefix = {}) {
-  for (const auto& priv : keyExtensionProtocols) {
-    recordSkip(prefix + pairLabel(keyExtensionAuthRow, priv), reason);
-  }
 }
 
 }  // namespace snmpio::test

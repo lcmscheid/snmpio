@@ -263,7 +263,7 @@ SNMPIO_INTEROP_V3_USM_REPORTS=1            # the capability flags, below; empty 
 SNMPIO_INTEROP_V3_KEY_EXTENSIONS=1
 SNMPIO_INTEROP_FAULTS=                     # the Simulators' control UI port
 SNMPIO_INTEROP_FAULTS_ENGINE_ID=
-SNMPIO_INTEROP_BROKEN_SUCCESSORS=
+SNMPIO_INTEROP_BROKEN_GETNEXT=
 ```
 
 `SNMPIO_INTEROP_TARGET` is the address the Agent answers at and `SNMPIO_INTEROP_PORT` the port,
@@ -356,11 +356,11 @@ one place their flags are said:
 | `SNMPIO_INTEROP_V3_USM_REPORTS` | answers a bad digest with a usmStats Report, which RFC 3414 leaves optional |
 | `SNMPIO_INTEROP_FAULTS` | can be **told to misbehave** — the port the Simulator's control UI is on |
 | `SNMPIO_INTEROP_FAULTS_ENGINE_ID` | offers the `engineIDChange` fault, which the older pinned image does not |
-| `SNMPIO_INTEROP_BROKEN_SUCCESSORS` | answers a GETNEXT or GETBULK carrying several Varbinds from the wrong requested OIDs, as both pinned Simulator images do ([snmp-fault-agent#11](https://github.com/lcmscheid/snmp-fault-agent/issues/11)) |
+| `SNMPIO_INTEROP_BROKEN_GETNEXT` | answers a GETNEXT carrying several Varbinds from the wrong requested OIDs, as both pinned Simulator images do ([snmp-fault-agent#11](https://github.com/lcmscheid/snmp-fault-agent/issues/11)) |
 
-The last one is the only flag that names a defect rather than an ability, so that a Target nobody
-described is held to RFC 3416 like `snmpd`. With it set, the GETNEXT and GETBULK tests skip and say
-why, rather than assert what a broken Agent sends.
+With the last one set, GETNEXT sends one Varbind per request instead of several, and its summary
+rows say so; [`tests/InteropOperations.hpp`](tests/InteropOperations.hpp) says why it
+names a defect rather than an ability.
 
 CI runs three Agents, one job each, and between them they cover every v3 case above. Neither gate is
 a Security Level being negotiated: the Simulator **infers** the level from which protocols a user
@@ -390,10 +390,10 @@ the reason `CoversBothKeyExtensions` in [`tests/TestInteropV3.cpp`](tests/TestIn
 What the suite proves: a v2c GET of `sysDescr.0`, which it prints because no two Agents say the
 same thing; the eighteen v3 pairs above and the four Key Extension ones; GETNEXT and GETBULK over
 v2c and at each Security Level on SHA-256 with AES-128, and GETBULK again under every privacy
-protocol, since a Response of many cipher blocks is where padding and the cipher's tail are
-exercised. Those two assert successor semantics without pinning any MIB contents: GETNEXT of
-`system` is `sysDescr.0`, which every Agent here already has, and a GETBULK's column from `system`
-is its column from `sysDescr.0` one row late, strictly increasing until it reaches `endOfMibView`.
+protocol. Those two assert successor semantics without pinning any MIB contents: GETNEXT of
+`system` is `sysDescr.0`, which every Agent here already has; a GETBULK's column from `system` is
+its column from `sysDescr.0` one row late, strictly increasing until it reaches `endOfMibView`; and
+GETNEXT of `sysDescr.0` is where that second column starts.
 It also proves that Engine Discovery costs the extra round trips exactly once, counted off the wire
 by a relay between Client and Agent, since the API deliberately never surfaces it; and that a wrong
 password comes back as the Report the Engine sent rather than as a timeout.
@@ -452,7 +452,7 @@ use.
 
 Of the [capability variables](#everything-else-the-harness-reads), leave `SNMPIO_INTEROP_FAULTS` and
 `_FAULTS_ENGINE_ID` unset, because a correct Agent cannot misbehave on request, and
-`SNMPIO_INTEROP_BROKEN_SUCCESSORS` unset, so that GETNEXT and GETBULK are held to RFC 3416. Set
+`SNMPIO_INTEROP_BROKEN_GETNEXT` unset. Set
 `SNMPIO_INTEROP_V3_USM_REPORTS` only if the Target answers a bad digest with a usmStats Report. That
 Report is optional behaviour RFC 3414 allows a correct Agent, and a Target that sends it can prove
 the wrong-password test. `SNMPIO_INTEROP_V3_KEY_EXTENSIONS` does nothing here, because that test
@@ -478,7 +478,7 @@ Date: <YYYY-MM-DD>
 Protocols exercised:
   ok   v2c/named community
   ok   authPriv/sha1/aes256c
-  skip noAuthNoPriv  -- run named one user: netops-legacy
+  skip noAuthNoPriv  -- run named one user: netops-legacy carrying authPriv/sha1/aes256c
   ...
 ```
 

@@ -47,10 +47,10 @@ faultsPort=8080
 # here speaks AES-192/256 under both Key Extensions, so that flag does not tell them apart, but it
 # is set on each: it says what an Agent is, and a Target outside CI may not be one.
 usmReports='' keyExtensions=1 faults='' faultsEngineId=''
-# Both Simulator images answer multi-Varbind GETNEXT and GETBULK wrongly
+# Both Simulator images answer a GETNEXT carrying several Varbinds from the wrong requested OIDs
 # (lcmscheid/snmp-fault-agent#11); tests/InteropOperations.hpp says what the flag gates and why it
 # names the defect. Unset it here when a fixed image is pinned.
-brokenSuccessors=''
+brokenGetNext=''
 
 # Every Agent here is pinned, so a push to an image nobody here controls cannot change what this
 # library was tested against between two runs of the same commit. Moving a pin is a commit here,
@@ -74,7 +74,7 @@ useSimulator() {
   mount=/etc/snmpfault/auth.json
   configure() { "$here/fault-agent-auth.sh"; }
   faults=$faultsPort
-  brokenSuccessors=1
+  brokenGetNext=1
   fetch() { docker pull -q "$image"; }
   # The control UI and the SNMP socket come up in the same process, and the UI answers over TCP --
   # so a connection to it is the readiness check.
@@ -159,5 +159,5 @@ SNMPIO_INTEROP_V3_USM_REPORTS=$usmReports
 SNMPIO_INTEROP_V3_KEY_EXTENSIONS=$keyExtensions
 SNMPIO_INTEROP_FAULTS=$faults
 SNMPIO_INTEROP_FAULTS_ENGINE_ID=$faultsEngineId
-SNMPIO_INTEROP_BROKEN_SUCCESSORS=$brokenSuccessors
+SNMPIO_INTEROP_BROKEN_GETNEXT=$brokenGetNext
 ENV

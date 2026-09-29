@@ -54,8 +54,8 @@ extension vectors, because neither extension is in an RFC.
 non-minimal long-form lengths), strict where it is not (indefinite length, high-tag-number form,
 sub-identifier overflow). Changing which side something falls on is an ADR-sized decision.
 
-**Tests** — 204 of them, and the defensive paths are the point. A decoder change that keeps them all
-green has probably not been tested; the misbehaving-agent cases are why ADR-0006 exists.
+**Tests** — the defensive paths are the point. A decoder change that keeps them all green has
+probably not been tested; the misbehaving-agent cases are why ADR-0006 exists.
 
 **Licence** — Apache-2.0. No per-file copyright headers, deliberately (ADR-0007). Anything ported
 from gosnmp or async-snmp needs an attribution comment at the site *and* a `NOTICE` entry.

@@ -5,7 +5,6 @@
 #include <snmpio/Client.hpp>
 
 #include "InteropOperations.hpp"
-#include "InteropSummary.hpp"
 #include "InteropTarget.hpp"
 
 namespace snmpio {
@@ -14,12 +13,8 @@ namespace {
 using test::envPort;
 using test::envVar;
 using test::getAndRecord;
-using test::getBulkAndRecord;
-using test::getNextAndRecord;
+using test::getNextAndGetBulkAndRecord;
 using test::makeInteropTarget;
-using test::operationLabel;
-using test::recordSkip;
-using test::successorsUncheckable;
 
 // A live Agent that is not ours -- not the Scripted Agent of ScriptedAgent.hpp and not the
 // Simulator either, but whatever answers at the Target, correct or not -- and a Response from it
@@ -60,23 +55,11 @@ TEST_F(InteropV2c, GetsSysDescrFromALiveAgent) {
 }
 
 // Successor semantics as an Agent nobody here wrote reads RFC 3416: the Scripted Agent shares our
-// reading, so it cannot catch a misreading of it.
-TEST_F(InteropV2c, GetNextReturnsEachOidsSuccessor) {
-  if (const auto reason = successorsUncheckable()) {
-    recordSkip(operationLabel("GETNEXT", m_label), *reason);
-    GTEST_SKIP() << *reason;
-  }
-  getNextAndRecord(m_target, m_community, m_label);
-}
-
-// Non-repeaters and repetitions together, which is where the error-status and error-index slots
-// are reused as counts -- checked against someone else's decoder.
-TEST_F(InteropV2c, GetBulkReturnsNonRepeatersThenRepetitions) {
-  if (const auto reason = successorsUncheckable()) {
-    recordSkip(operationLabel("GETBULK", m_label), *reason);
-    GTEST_SKIP() << *reason;
-  }
-  getBulkAndRecord(m_target, m_community, m_label);
+// reading, so it cannot catch a misreading of it. GETBULK carries non-repeaters and repetitions
+// together, which is where the error-status and error-index slots are reused as counts -- checked
+// against someone else's decoder.
+TEST_F(InteropV2c, GetNextAndGetBulkReturnEachOidsSuccessor) {
+  getNextAndGetBulkAndRecord(m_target, m_community, m_label);
 }
 
 }  // namespace

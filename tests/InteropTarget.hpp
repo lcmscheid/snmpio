@@ -71,7 +71,7 @@ inline const Oid sysDescr{1, 3, 6, 1, 2, 1, 1, 1, 0};
 
 // The one GET every half of the suite is built on, plus a sysDescr recording so that the run
 // summary can identify the Agent that answered.
-struct GetResult {
+struct ExchangeResult {
   net::ErrorCode ec;
   Response response;
 };
@@ -79,10 +79,10 @@ struct GetResult {
 // One request on a Client of its own, run to completion. `initiate(client, handler)` starts the
 // request; whichever operation it is, it completes as void(ErrorCode, Response).
 template <typename Initiate>
-GetResult exchange(Initiate initiate) {
+ExchangeResult exchange(Initiate initiate) {
   net::IoContext io;
   Client client(io.get_executor());
-  GetResult result;
+  ExchangeResult result;
 
   initiate(client, [&](net::ErrorCode ec, Response response) {
     result.ec = ec;
@@ -94,7 +94,7 @@ GetResult exchange(Initiate initiate) {
 }
 
 template <typename Auth>
-GetResult get(const Target& target, const Auth& auth) {
+ExchangeResult get(const Target& target, const Auth& auth) {
   return exchange([&](Client& client, auto handler) {
     client.asyncGet(target, auth, {sysDescr}, std::move(handler));
   });
@@ -102,7 +102,7 @@ GetResult get(const Target& target, const Auth& auth) {
 
 // Assert that `result` is a successful sysDescr.0 response, and record its OCTET STRING value as
 // the device/firmware identification for the run summary.
-inline void expectSysDescr(const GetResult& result, const std::string& what) {
+inline void expectSysDescr(const ExchangeResult& result, const std::string& what) {
   ASSERT_FALSE(result.ec) << what << ": " << result.ec.category().name() << ": "
                           << result.ec.message();
   ASSERT_EQ(result.response.varbinds.size(), 1U) << what;

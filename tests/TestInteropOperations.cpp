@@ -97,7 +97,7 @@ TEST(InteropOperations, GetNextRejectsAGetBulkThatFoundNothingAfterSysDescr) {
       getNextProblem(answered({scalar(1), scalar(2)}), several, bulkSuccessorOfSysDescr(bulk)), "");
 }
 
-// Both Varbinds answered from the last requested OID -- the defect the Simulator images have.
+// Both Varbinds answered from the last requested OID -- lcmscheid/snmp-fault-agent#11.
 TEST(InteropOperations, GetNextRejectsBothAnsweredFromOneOid) {
   const auto bulk = answered({scalar(1), scalar(1), scalar(2), scalar(2), scalar(3)});
   EXPECT_NE(

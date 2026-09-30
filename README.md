@@ -362,16 +362,17 @@ one place their flags are said:
 | `SNMPIO_INTEROP_V3_KEY_EXTENSIONS` | serves the `privsha1aes192`/`256`(`c`) users — AES-192/256 under both schemes |
 | `SNMPIO_INTEROP_V3_USM_REPORTS` | answers a bad digest with a usmStats Report, which RFC 3414 leaves optional |
 | `SNMPIO_INTEROP_FAULTS` | can be **told to misbehave** — the port the Simulator's control UI is on |
-| `SNMPIO_INTEROP_FAULTS_ENGINE_ID` | offers the `engineIDChange` fault, which the older pinned image does not |
-| `SNMPIO_INTEROP_BROKEN_GETNEXT` | answers a GETNEXT carrying several Varbinds from the wrong requested OIDs, as both pinned Simulator images do ([snmp-fault-agent#11](https://github.com/lcmscheid/snmp-fault-agent/issues/11)) |
-| `SNMPIO_INTEROP_SET_REFUSAL` | is known to refuse a read-only SET with one error-status — its RFC 3416 name: `noAccess` for `snmpd`, `readOnly` for the Simulators ([snmp-fault-agent#10](https://github.com/lcmscheid/snmp-fault-agent/issues/10)) |
+| `SNMPIO_INTEROP_FAULTS_ENGINE_ID` | offers the `engineIDChange` fault, which not every Simulator build does |
+| `SNMPIO_INTEROP_BROKEN_GETNEXT` | answers a GETNEXT carrying several Varbinds from the wrong requested OIDs ([snmp-fault-agent#11](https://github.com/lcmscheid/snmp-fault-agent/issues/11)) |
+| `SNMPIO_INTEROP_SET_REFUSAL` | is known to refuse a read-only SET with one error-status — its RFC 3416 name, such as `noAccess` or `notWritable` |
 
 With `SNMPIO_INTEROP_BROKEN_GETNEXT` set, GETNEXT sends one Varbind per request instead of
 several, and its summary rows say so; [`tests/InteropOperations.hpp`](tests/InteropOperations.hpp)
 says why it names a defect rather than an ability. With `SNMPIO_INTEROP_SET_REFUSAL` unset, the
-refused SET is held only to being refused, and its rows say that too. `readOnly` is what the pinned
-Simulator images send, and RFC 3416 says an SNMPv2 entity never does; the rows say so, and the flag
-becomes `notWritable` once an image fixing it is pinned.
+refused SET is held only to being refused, and its rows say that too. With it set to `readOnly`,
+which RFC 3416 says an SNMPv2 entity never sends
+([snmp-fault-agent#10](https://github.com/lcmscheid/snmp-fault-agent/issues/10)), the refusal is
+asserted all the same, and its rows say the Agent is non-compliant.
 
 ### Writer Credentials
 
@@ -399,8 +400,8 @@ values configuration serves.
 The SET that is refused needs no writer and changes nothing: it writes `sysDescr.0`'s own value back
 with the Credentials every other test reads with. So it runs everywhere, hardware included. A
 refusal whose error-index names some Varbind other than the one sent is noted on its row, not
-failed: both Simulator images name Varbind 0
-([snmp-fault-agent#12](https://github.com/lcmscheid/snmp-fault-agent/issues/12)).
+failed ([snmp-fault-agent#12](https://github.com/lcmscheid/snmp-fault-agent/issues/12)); no
+flag gates it, and the script says which Agent does it.
 
 CI runs three Agents, one job each, and between them they cover every v3 case above. Neither gate is
 a Security Level being negotiated: the Simulator **infers** the level from which protocols a user

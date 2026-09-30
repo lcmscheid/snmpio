@@ -43,13 +43,12 @@ password=${SNMPIO_INTEROP_V3_PASSWORD:-snmpio-interop}
 simulatorUiPort=8080
 faultsPort=8080
 
-# Only `snmpd` answers a bad digest with the usmStats Report RFC 3414 leaves optional. Every Agent
-# here speaks AES-192/256 under both Key Extensions, so that flag does not tell them apart, but it
-# is set on each: it says what an Agent is, and a Target outside CI may not be one.
+# Set for an Agent that answers a bad digest with the usmStats Report RFC 3414 leaves optional.
+# Every Agent here speaks AES-192/256 under both Key Extensions, so that flag does not tell them
+# apart, but it is set on each: it says what an Agent is, and a Target outside CI may not be one.
 usmReports='' keyExtensions=1 faults='' faultsEngineId=''
-# Both Simulator images answer a GETNEXT carrying several Varbinds from the wrong requested OIDs
-# (lcmscheid/snmp-fault-agent#11); tests/InteropOperations.hpp says what the flag gates and why it
-# names the defect. Unset it here when a fixed image is pinned.
+# Set for an Agent that answers a GETNEXT carrying several Varbinds from the wrong requested OIDs;
+# tests/InteropOperations.hpp says what the flag gates and why it names the defect.
 brokenGetNext=''
 # The error-status each Agent refuses the suite's read-only SET with, spelled as RFC 3416 spells
 # it; tests/InteropSet.hpp says what the SET is. Empty would accept any refusal.
@@ -88,13 +87,6 @@ useSimulator() {
     "$here/fault-agent-values.sh" > "$configDir/values.json"
   }
   faults=$faultsPort
-  brokenGetNext=1
-  # readOnly, which RFC 3416 section 4.2.5 says an SNMPv2 entity never sends -- notWritable is the
-  # status for a read-only object (lcmscheid/snmp-fault-agent#10). The suite asserts what the
-  # Agent does and says on every row that it is non-compliant. Make it notWritable when an image
-  # fixing that is pinned. Both images also blame Varbind 0 where RFC 3416 names the one sent
-  # (lcmscheid/snmp-fault-agent#12); no flag gates that, and the rows note it until it is fixed.
-  setRefusal=readOnly
   writerCommunity=public
   fetch() { docker pull -q "$image"; }
   # The control UI and the SNMP socket come up in the same process, and the UI answers over TCP --
@@ -124,9 +116,26 @@ case $agent in
     ;;
   simulator)  # sha-b300f60: no authoritative-side timeliness check
     useSimulator ghcr.io/lcmscheid/snmp-fault-agent@sha256:f66982cf07e3290d3a9e054e60539a2d82810648f11fd94e48cf5ee8eb89a158
+    # This image predates the fixes 0.2.0 carries, and no later build keeps the Response it is
+    # pinned for; lcmscheid/snmp-fault-agent#18 would let `simulator` run a release too, and retire
+    # this pin. Until then it keeps three defects. It answers a GETNEXT carrying several Varbinds
+    # from the wrong requested OIDs (lcmscheid/snmp-fault-agent#11), so it is sent one at a time;
+    # tests/InteropOperations.hpp says what the flag gates. It refuses a read-only object with
+    # readOnly, which RFC 3416 section 4.2.5 says an SNMPv2 entity never sends -- notWritable is
+    # the status for one (lcmscheid/snmp-fault-agent#10). And it blames Varbind 0 where RFC 3416
+    # names the one sent (lcmscheid/snmp-fault-agent#12); no flag gates that. It sends no usmStats
+    # Report for a bad digest. The suite asserts what the Agent does, and says on every row it
+    # touches that it is non-compliant.
+    brokenGetNext=1
+    setRefusal=readOnly
     ;;
-  simulator-release)  # 0.1.0
-    useSimulator ghcr.io/lcmscheid/snmp-fault-agent@sha256:78d0abcd7eeba46fd5f7fbef987208ff745f63a72cd416289d8316bf60a6a144
+  simulator-release)  # 0.2.0
+    useSimulator ghcr.io/lcmscheid/snmp-fault-agent@sha256:76537efaedcf8f72d76c301696c50389175a554d5ecc8eaf89fe90eeb5432e7f
+    # 0.2.0 answers a wrong digest, and an unknown user, with a usmStats Report; it refuses a
+    # read-only object with notWritable (lcmscheid/snmp-fault-agent#10); and it names the Varbind
+    # sent in the refusal's error-index (lcmscheid/snmp-fault-agent#12).
+    usmReports=1
+    setRefusal=notWritable
     faultsEngineId=1
     ;;
   *) usage ;;

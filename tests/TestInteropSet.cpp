@@ -154,10 +154,11 @@ TEST(InteropSet, SaysWhatARefusalRowWasHeldTo) {
   EXPECT_EQ(refusalNote(refused(ErrorStatus::NoAccess), ErrorStatus::NoAccess), "");
   EXPECT_TRUE(mentions(refusalNote(refused(ErrorStatus::NotWritable), std::nullopt),
                        "SNMPIO_INTEROP_SET_REFUSAL"));
-  // The Simulator's refusal is non-compliant, and its row says so rather than passing silently.
+  // A readOnly refusal is non-compliant, and its row says so rather than passing silently.
   EXPECT_TRUE(mentions(refusalNote(refused(ErrorStatus::ReadOnly), ErrorStatus::ReadOnly),
                        "lcmscheid/snmp-fault-agent#10"));
-  // Both at once, as the Simulator images give them, and neither hiding the other.
+  // Both at once, as an Agent with snmp-fault-agent#10 and #12 gives them, and neither hiding the
+  // other.
   const auto both = refusalNote(refused(ErrorStatus::ReadOnly, 0), ErrorStatus::ReadOnly);
   EXPECT_TRUE(mentions(both, "lcmscheid/snmp-fault-agent#10")) << both;
   EXPECT_TRUE(mentions(both, "blamed Varbind 0")) << both;

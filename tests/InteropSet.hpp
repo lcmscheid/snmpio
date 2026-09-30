@@ -84,20 +84,19 @@ inline const Oid sysContact{1, 3, 6, 1, 2, 1, 1, 4, 0};
   std::string note;
   const auto add = [&](const std::string& part) { note += (note.empty() ? "" : "; ") + part; };
   if (!expected) add("any refusal accepted: SNMPIO_INTEROP_SET_REFUSAL is unset");
-  // The pinned Simulator images refuse a read-only object with readOnly(4), which RFC 3416 section
-  // 4.2.5 says an SNMPv2 entity never sends -- notWritable is the status it means. The flag
-  // asserts what the Agent does, not what it should, and becomes notWritable when an image fixing
-  // it is pinned.
+  // An Agent expected to refuse with readOnly(4) sends what RFC 3416 section 4.2.5 says an SNMPv2
+  // entity never does -- notWritable is the status for a read-only object. The flag asserts what
+  // the Agent does, not what it should, so the row says what it should.
   if (expected == ErrorStatus::ReadOnly) {
     add("readOnly, which RFC 3416 says an SNMPv2 entity never sends "
         "(lcmscheid/snmp-fault-agent#10)");
   }
-  // The request carries one Varbind, so RFC 3416 has the error-index name it. Both pinned
-  // Simulator images say 0 (lcmscheid/snmp-fault-agent#12). Noted rather than failed: the status
-  // is what this test asserts, and the index is the Agent's to get right -- `snmpd` gets it right,
-  // so a row without this note is an Agent that did and a Command Generator that read it. Only a
-  // refusal blames a Varbind: a SET taken or never answered leaves the index 0, and its row has a
-  // problem of its own to say.
+  // The request carries one Varbind, so RFC 3416 has the error-index name it. Some Agents say 0
+  // (lcmscheid/snmp-fault-agent#12); no flag gates it, and tests/interop/start-agent.sh says which.
+  // Noted rather than failed: the status is what this test asserts, and the index is the Agent's to
+  // get right -- `snmpd` gets it right, so a row without this note is an Agent that did and a
+  // Command Generator that read it. Only a refusal blames a Varbind: a SET taken or never answered
+  // leaves the index 0, and its row has a problem of its own to say.
   if (refusedByAgent(set) && set.response.errorIndex != 1) {
     add("blamed Varbind " + std::to_string(set.response.errorIndex) +
         " of the one sent, where RFC 3416 names it");
@@ -208,10 +207,8 @@ void writeReadAndRestoreAndRecord(const Target& target, const Auth& auth,
 // like every other interop variable set but unusable: a typo that fell back to any refusal would
 // pass a Command Generator that turned every refusal into one generic error.
 //
-// tests/interop/start-agent.sh sets it: noAccess for `snmpd`, whose access control refuses a
-// read-only identity before it looks at the object, and readOnly for the pinned Simulator images --
-// which RFC 3416 says an SNMPv2 entity never sends. It becomes notWritable when an image fixing
-// lcmscheid/snmp-fault-agent#10 is pinned, and refusalNote says so on every row until then.
+// tests/interop/start-agent.sh sets it for each Agent, as the status that Agent actually sends,
+// compliant or not; refusalNote says on the row when it is not.
 inline void expectedRefusal(std::optional<ErrorStatus>& expected) {
   const auto name = envVar("SNMPIO_INTEROP_SET_REFUSAL");
   if (!name) return;

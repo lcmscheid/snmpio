@@ -412,9 +412,8 @@ TEST_F(InteropV3, DiscoveryCostsExtraRoundTripsOnlyOnce) {
 // was dropped, and "wrong password" would be indistinguishable from "unplugged".
 //
 // Gated, because an Agent that answers a bad digest with silence is not thereby broken: RFC 3414
-// §3.2 (5) lets it choose, and the Simulator does -- the library GoSNMPServer it is built on sends
-// no usmStats Report at all, so against it this asserts on an Agent's choice rather than on this
-// Client.
+// §3.2 (5) lets it choose, and against an Agent that stays silent this would assert on its choice
+// rather than on this Client. tests/interop/start-agent.sh says which Agents send the Report.
 TEST_F(InteropV3, SurfacesAWrongPasswordAsAReport) {
   if (!envVar("SNMPIO_INTEROP_V3_USM_REPORTS")) {
     GTEST_SKIP() << "needs SNMPIO_INTEROP_V3_USM_REPORTS and an Agent that sends usmStats Reports";

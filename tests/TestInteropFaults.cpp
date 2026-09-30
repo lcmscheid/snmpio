@@ -195,8 +195,8 @@ TEST_F(InteropFaults, RefusesATimeRegressionWithinOneBoot) {
 // but reused the localized keys authenticates with a digest the Engine will not accept, which is a
 // failure and not a Response.
 //
-// Gated on its own capability: the fault is newer than the older of the two Simulator images CI
-// pins, and an Agent that does not offer it must skip rather than fail for not being asked.
+// Gated on its own capability: not every Simulator build offers the fault, and an Agent that does
+// not must skip rather than fail for not being asked.
 TEST_F(InteropFaults, RediscoversAnEngineThatChangesItsIdentity) {
   if (m_password.empty()) GTEST_SKIP() << "needs SNMPIO_INTEROP_V3_PASSWORD";
   if (!envVar("SNMPIO_INTEROP_FAULTS_ENGINE_ID")) {

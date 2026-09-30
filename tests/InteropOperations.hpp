@@ -105,13 +105,13 @@ enum class Operation : std::uint8_t {
 // requested OID. One is what an Agent with the defect below can still be held to.
 enum class GetNextVarbinds : std::uint8_t { Several, One };
 
-// Why this Agent is sent one Varbind per GETNEXT, or nothing when it can take several. Both pinned
-// Simulator images answer a GETNEXT carrying several Varbinds from the last requested OID
+// Why this Agent is sent one Varbind per GETNEXT, or nothing when it can take several. An Agent
+// with the flag set answers a GETNEXT carrying several Varbinds from the last requested OID
 // (lcmscheid/snmp-fault-agent#11) -- which is what the whole check exists to catch, and which
-// asserting the Simulator's answers would pin in place. tests/interop/start-agent.sh sets the flag
-// for them. It names the defect rather than the compliance, so a Target nobody described is held
-// to RFC 3416 like `snmpd`. GETBULK needs no such flag: the same images answer the one it sends
-// correctly.
+// asserting its answers would pin in place. tests/interop/start-agent.sh says which Agent that is.
+// The flag names the defect rather than the compliance, so a Target nobody described is held to
+// RFC 3416 like `snmpd`. GETBULK needs no such flag: the Agent this was found on answers the one
+// it sends correctly.
 [[nodiscard]] inline std::optional<std::string> severalVarbindGetNextBroken() {
   if (!envVar("SNMPIO_INTEROP_BROKEN_GETNEXT")) return std::nullopt;
   return "one Varbind per request: SNMPIO_INTEROP_BROKEN_GETNEXT says the Agent answers several "

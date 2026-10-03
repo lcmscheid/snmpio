@@ -294,6 +294,7 @@ SNMPIO_INTEROP_V3_KEY_EXTENSIONS=1
 SNMPIO_INTEROP_FAULTS=                     # the Simulators' control UI port
 SNMPIO_INTEROP_FAULTS_ENGINE_ID=
 SNMPIO_INTEROP_BROKEN_GETNEXT=
+SNMPIO_INTEROP_NO_TIME_WINDOW_CHECK=
 SNMPIO_INTEROP_SET_REFUSAL=noAccess
 SNMPIO_INTEROP_WRITER_COMMUNITY=snmpio-writer       # the Writer Credentials, below
 SNMPIO_INTEROP_WRITER_NOAUTHNOPRIV=writer-noauth
@@ -392,6 +393,7 @@ one place their flags are said:
 | `SNMPIO_INTEROP_FAULTS` | can be **told to misbehave** — the port the Simulator's control UI is on |
 | `SNMPIO_INTEROP_FAULTS_ENGINE_ID` | offers the `engineIDChange` fault, which not every Simulator build does |
 | `SNMPIO_INTEROP_BROKEN_GETNEXT` | answers a GETNEXT carrying several Varbinds from the wrong requested OIDs ([snmp-fault-agent#11](https://github.com/lcmscheid/snmp-fault-agent/issues/11)) |
+| `SNMPIO_INTEROP_NO_TIME_WINDOW_CHECK` | skips RFC 3414 section 3.2 step 7a, answering a request outside its Time Window with a Response rather than the notInTimeWindows Report ([snmp-fault-agent#18](https://github.com/lcmscheid/snmp-fault-agent/issues/18)) |
 | `SNMPIO_INTEROP_SET_REFUSAL` | is known to refuse a read-only SET with one error-status — its RFC 3416 name, such as `noAccess` or `notWritable` |
 
 With `SNMPIO_INTEROP_BROKEN_GETNEXT` set, GETNEXT sends one Varbind per request instead of
@@ -534,9 +536,9 @@ use.
 
 Of the [capability variables](#everything-else-the-harness-reads), leave `SNMPIO_INTEROP_FAULTS` and
 `_FAULTS_ENGINE_ID` unset, because a correct Agent cannot misbehave on request, and
-`SNMPIO_INTEROP_BROKEN_GETNEXT` unset. Set `SNMPIO_INTEROP_SET_REFUSAL` only once you know which
-error-status the Target refuses a read-only SET with; unset, the refused SET still runs, held only
-to being refused. Name no [Writer Credentials](#writer-credentials) unless the Target is yours to
+`SNMPIO_INTEROP_BROKEN_GETNEXT` and `_NO_TIME_WINDOW_CHECK` unset. Set
+`SNMPIO_INTEROP_SET_REFUSAL` only once you know which error-status the Target refuses a read-only
+SET with; unset, the refused SET still runs, held only to being refused. Name no [Writer Credentials](#writer-credentials) unless the Target is yours to
 write `sysContact.0` on; its write rows then say `skip`. Set
 `SNMPIO_INTEROP_V3_USM_REPORTS` only if the Target answers a bad digest with a usmStats Report. That
 Report is optional behaviour RFC 3414 allows a correct Agent, and a Target that sends it can prove

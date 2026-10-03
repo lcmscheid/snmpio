@@ -279,27 +279,27 @@ TEST(ClientV3, DropsAReplyClaimingAnOlderBootsCount) {
       << "a boots regression was accepted: " << ec.message();
 }
 
-// One GET settles the cache at the Agent's own boots 3, then `then` changes the Agent, then two
-// more GETs go out one after the other. The Agent change the tests below care about is an Engine
+// One GET settles the cache at the Engine's boots 3, then `changeTheAgent` runs, then two more
+// GETs go out one after the other. The Agent change the tests below care about is an Engine
 // whose boots counter went backwards -- a factory reset, a replaced line card, firmware that lost
 // snmpEngineBoots -- and the cases either side of it.
-struct AfterTheCacheIsSettled {
+struct LaterGets {
   net::ErrorCode second;
   net::ErrorCode third;
   int requestsAfterTheSecondGet = 0;
 };
 
-AfterTheCacheIsSettled afterTheCacheIsSettled(const std::function<void(ScriptedV3Agent&)>& then) {
+LaterGets afterTheCacheIsSettled(const std::function<void(ScriptedV3Agent&)>& changeTheAgent) {
   Fixture f;
   ScriptedV3Agent agent(f.io, credentials(), echoAnswer);
   f.agent = &agent;
   f.expectedCompletions = 3;
 
-  AfterTheCacheIsSettled result;
+  LaterGets result;
   const auto target = targetFor(agent);
   f.client.asyncGet(target, credentials(), {sysDescr}, [&](net::ErrorCode first, const Response&) {
     EXPECT_FALSE(first) << "the GET that settles the cache: " << first.message();
-    then(agent);
+    changeTheAgent(agent);
     const int requestsBeforeTheSecondGet = agent.requestsSeen();
     f.client.asyncGet(target, credentials(), {sysDescr},
                       [&, requestsBeforeTheSecondGet](net::ErrorCode ec, const Response&) {

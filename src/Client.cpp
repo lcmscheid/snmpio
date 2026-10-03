@@ -691,22 +691,23 @@ std::optional<net::ErrorCode> Client::handleReport(const net::UdpEndpoint& from,
   }
   // A signed Report naming a boots *lower* than the one we hold is the one pair observeEngineTime
   // refuses, and refusing it here would be refusing it for good: the retry would carry the same
-  // stale pair and fail the same way, for the rest of this Client's life. It is an Engine whose
-  // counter was reset -- a factory reset, a replaced line card, firmware that lost snmpEngineBoots
-  // -- or a cache poisoned by some route #25 did not close. Either way the Engine has just signed
-  // for where its clock really is, so we forget ours and let the retry rediscover, time-sync phase
-  // included; discoverEngine takes its answer as a fresh baseline without comparing it.
+  // stale pair and fail the same way, for the rest of this Client's life. RFC 3414 section 3.2
+  // step 7(b) deems the message untimely, and we keep to that -- its pair is never written. What
+  // we act on is that an Engine holding our key has just told us our notion of its clock is wrong,
+  // which leaves only the Engine that broke section 2.2.2 by letting its boots go backwards (a
+  // factory reset, a replaced line card, firmware that lost snmpEngineBoots) or a cache poisoned by
+  // some route #25 did not close. Either way we forget our notion and let the retry rediscover,
+  // time-sync phase included; discoverEngine takes its answer as a fresh baseline. ADR-0010.
   //
   // The flag lives on the Engine, not the endpoint, so every Target reaching this Engine stops
   // judging timeliness until the rediscovery completes -- the same window the first discovery had.
   //
   // Not a replay hole. The Report carries our msgID inside the signed header and msgIDs do not
   // repeat within a Client short of 2^31 requests, so an old capture cannot match a request still
-  // waiting for an answer.
-  // What remains is a recording from an earlier Client process that happened to reuse the msgID,
-  // and that buys one rediscovery and no more: the pair it carries is never written -- the
-  // rediscovery adopts the Engine's live, signed answer -- and mayRetry bounds it to once per
-  // request.
+  // waiting for an answer. What remains is a recording from an earlier Client process that happened
+  // to reuse the msgID. That buys one rediscovery per request -- mayRetry bounds it -- and the
+  // rediscovery is exposed exactly as every first discovery is: only a second recording that
+  // matches the time-sync phase's own msgID could set its baseline.
   EngineState* engine = engineAt(from);
   if (engine != nullptr && engine->timeSynced && pending.security.boots < engine->boots) {
     engine->timeSynced = false;

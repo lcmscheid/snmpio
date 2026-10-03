@@ -50,6 +50,10 @@ usmReports='' keyExtensions=1 faults='' faultsEngineId=''
 # Set for an Agent that answers a GETNEXT carrying several Varbinds from the wrong requested OIDs;
 # tests/InteropOperations.hpp says what the flag gates and why it names the defect.
 brokenGetNext=''
+# Set for an Agent that skips RFC 3414 section 3.2 step 7a, and so answers a request outside its
+# Time Window with a Response stamped with its own boots/time rather than the notInTimeWindows
+# Report. tests/TestInteropFaults.cpp says which test each shape reaches.
+noTimeWindowCheck=''
 # The error-status each Agent refuses the suite's read-only SET with, spelled as RFC 3416 spells
 # it; tests/InteropSet.hpp says what the SET is. Empty would accept any refusal.
 setRefusal=''
@@ -127,6 +131,7 @@ case $agent in
     # Report for a bad digest. The suite asserts what the Agent does, and says on every row it
     # touches that it is non-compliant.
     brokenGetNext=1
+    noTimeWindowCheck=1
     setRefusal=readOnly
     ;;
   simulator-release)  # 0.2.0
@@ -198,6 +203,7 @@ SNMPIO_INTEROP_V3_KEY_EXTENSIONS=$keyExtensions
 SNMPIO_INTEROP_FAULTS=$faults
 SNMPIO_INTEROP_FAULTS_ENGINE_ID=$faultsEngineId
 SNMPIO_INTEROP_BROKEN_GETNEXT=$brokenGetNext
+SNMPIO_INTEROP_NO_TIME_WINDOW_CHECK=$noTimeWindowCheck
 SNMPIO_INTEROP_SET_REFUSAL=$setRefusal
 SNMPIO_INTEROP_WRITER_COMMUNITY=$writerCommunity
 SNMPIO_INTEROP_WRITER_NOAUTHNOPRIV=$writerNoAuth

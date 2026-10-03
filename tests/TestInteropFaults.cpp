@@ -135,12 +135,15 @@ TEST_F(InteropFaults, RecoversFromAnEngineRestart) {
 // Client with no cache at all still gets in, which is what says the Agent is healthy and it was
 // the comparison that refused.
 //
-// What is refused is the Response. An Agent that instead rejected the request with a *signed*
-// notInTimeWindows Report at its lower boots would be rediscovered and answered (#40,
-// ClientV3.RediscoversAnEngineWhoseBootsWentBackwards): that is the Engine signing for a counter
-// that really was reset. The Simulator never sends that Report, so this test is not about it.
+// What is refused is a Response stamped with the lower pair, and only an Agent that skips the
+// authoritative-side check (RFC 3414 section 3.2 step 7a) sends one. An Agent that runs the check
+// answers with a signed notInTimeWindows Report instead, and that is the case below.
 TEST_F(InteropFaults, RefusesABootsRegression) {
   if (m_password.empty()) GTEST_SKIP() << "needs SNMPIO_INTEROP_V3_PASSWORD";
+  if (!envVar("SNMPIO_INTEROP_NO_TIME_WINDOW_CHECK")) {
+    GTEST_SKIP() << "needs SNMPIO_INTEROP_NO_TIME_WINDOW_CHECK: an Agent that runs the check sends "
+                    "the Report RediscoversAnEngineWhoseBootsWentBackwards covers";
+  }
   SimulatorFaults faults(m_target.endpoint, m_controlPort);
   bool bumped = false;
   bool cleared = false;
@@ -154,13 +157,42 @@ TEST_F(InteropFaults, RefusesABootsRegression) {
   EXPECT_FALSE(results[0]) << errorText(results[0]);
   EXPECT_FALSE(results[1]) << "the boots bump did not resynchronise: " << errorText(results[1]);
   // That it failed, rather than which code it failed with: what an Agent does with a request it
-  // considers untimely is the Agent's choice, and the Simulator makes a third one -- it does not
-  // run the check at all, so it answers with its real pair and there is no Report to name. The
-  // pair of assertions is what pins the criterion: this Client refuses, and a Client with nothing
+  // considers untimely is the Agent's choice, and this one makes a third one -- it does not run
+  // the check at all, so it answers with its real pair and there is no Report to name. The pair
+  // of assertions is what pins the criterion: this Client refuses, and a Client with nothing
   // cached still gets in, so it was the comparison that refused and not the Agent that died.
   EXPECT_TRUE(results[2]) << "the regression was cached rather than refused";
   EXPECT_FALSE(get(m_target, credentials()).ec)
       << "a Client with an empty cache should still get in";
+}
+
+// Criterion: an Engine whose boots went backwards is rediscovered, not locked out (#40, ADR-0010).
+// The same fault as above, against an Agent that runs the authoritative-side check: when the bump
+// is cleared, the request the Client sends at the higher pair meets a notInTimeWindows Report the
+// Engine signed at its real, lower boots. The Client never adopts that pair -- it forgets its own
+// and rediscovers, and the request completes.
+//
+// The Scripted Agent pins the counts (ClientV3.RediscoversAnEngineWhoseBootsWentBackwards); this
+// is the same path read by an implementation that is not ours.
+TEST_F(InteropFaults, RediscoversAnEngineWhoseBootsWentBackwards) {
+  if (m_password.empty()) GTEST_SKIP() << "needs SNMPIO_INTEROP_V3_PASSWORD";
+  if (envVar("SNMPIO_INTEROP_NO_TIME_WINDOW_CHECK")) {
+    GTEST_SKIP() << "an Agent with SNMPIO_INTEROP_NO_TIME_WINDOW_CHECK sends no Report to recover "
+                    "from; RefusesABootsRegression covers it";
+  }
+  SimulatorFaults faults(m_target.endpoint, m_controlPort);
+  bool bumped = false;
+  bool cleared = false;
+  const auto results = getSequence(
+      m_target, credentials(),
+      {[&] { bumped = faults.set("engineBootsBump", "50"); }, [&] { cleared = faults.clear(); }});
+
+  ASSERT_TRUE(bumped) << "the Simulator did not accept engineBootsBump";
+  ASSERT_TRUE(cleared) << "the Simulator did not clear its faults";
+  ASSERT_EQ(results.size(), 3U);
+  EXPECT_FALSE(results[0]) << errorText(results[0]);
+  EXPECT_FALSE(results[1]) << "the boots bump did not resynchronise: " << errorText(results[1]);
+  EXPECT_FALSE(results[2]) << "the lower boots locked the Engine out: " << errorText(results[2]);
 }
 
 // The other half of the same criterion, and a separate comparison in the Client: within one boot,
@@ -182,7 +214,9 @@ TEST_F(InteropFaults, RefusesATimeRegressionWithinOneBoot) {
   EXPECT_FALSE(results[0]) << errorText(results[0]);
   EXPECT_FALSE(results[1]) << "the clock jump did not resynchronise: " << errorText(results[1]);
   // Failure, and a fresh Client getting in regardless -- the same pair of assertions, and for the
-  // same reason, as RefusesABootsRegression states.
+  // same reason, as RefusesABootsRegression states. Against an Agent that runs the check, what is
+  // refused is a signed notInTimeWindows Report at the same boots, which ADR-0010's recovery does
+  // not cover; whether it should is #42.
   EXPECT_TRUE(results[2]) << "the clock going back was cached rather than refused";
   EXPECT_FALSE(get(m_target, credentials()).ec)
       << "a Client with an empty cache should still get in";

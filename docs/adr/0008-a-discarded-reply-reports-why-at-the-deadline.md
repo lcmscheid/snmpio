@@ -17,7 +17,8 @@ that at expiry instead of reporting `Timeout` unconditionally. Nothing about *wh
 completes moves — only what it says when it does.
 
 Three drops are named, and they are the ones a caller can act on: a digest that does not verify, an
-`encryptedPDU` we cannot open, and a reply that fails our own timeliness check. Every other drop —
+`encryptedPDU` we cannot open, and a reply that fails our own timeliness check. (A fourth was added
+later, for Engine Discovery's time-sync phase -- see the end of _Consequences_.) Every other drop —
 a datagram that does not decode, a `request-id` that does not match, a Response from the wrong
 Engine — stays silent and still reports `Timeout`. Those say nothing about the Target beyond "this
 was not the reply we were waiting for", which is what `Timeout` already means. The useful

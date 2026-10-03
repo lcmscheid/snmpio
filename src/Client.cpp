@@ -265,7 +265,9 @@ void Client::deliverV3(std::span<const std::byte> datagram, const net::UdpEndpoi
   // into "timed out". The bar it clears is the protocol's own -- an outstanding msgID, from the
   // address we sent to -- which is the same bar a spoofed v2c Response clears, and it buys the
   // sender nothing beyond failing this one request or discovery: neither handleReport nor
-  // discoverEngine takes a boots/time pair we will trust from an unauthenticated claim.
+  // discoverEngine takes a boots/time pair we will trust from an unauthenticated claim. (The
+  // identity phase does record one, untrusted: timely() ignores it until the time-sync phase has
+  // replaced it with a signed one.)
   //
   // Except one claim, in one place. Discovery's time-sync phase exists to provoke a
   // notInTimeWindows Report, and a genuine one is always signed -- the Engine knows the user and
@@ -325,6 +327,10 @@ bool Client::timely(const net::UdpEndpoint& from, const UsmParameters& security)
   if (found == m_engines.end()) return true;
 
   const EngineState& engine = found->second;
+  // A pair the identity phase recorded is unsigned, and so nothing to be untimely against: judging
+  // the Engine's signed answer to the time-sync phase by it would let a forged identity reply get
+  // that answer dropped.
+  if (!engine.timeSynced) return true;
   // An Engine at the boots ceiling can never be timely again (RFC 3414 section 2.2.3), which is
   // why observeEngineTime refuses to cache one either.
   if (security.boots == bootsCeiling || engine.boots == bootsCeiling) return false;
@@ -637,10 +643,16 @@ net::Awaitable<net::ErrorCode> Client::discoverEngine(Target target, Credentials
 
   ec = co_await transact(std::move(target), std::move(syncDatagram), syncId, sync);
   if (ec) co_return ec;
-  // RFC 3414 sections 3.2 step 7 and 11.1: the pair is learnt only from an authenticated message.
-  // Anything that got here unsigned is a Report deliverV3 admitted for the error it names, and that
-  // error ends the discovery; its boots and time are not read.
-  if (!sync->replyAuthenticated) co_return reportError(usmStatsCounter(sync->response));
+  // RFC 3414 sections 3.2 step 7 and 11.1: the pair is learnt only from an authenticated message,
+  // and only from one that is about the time. That is the notInTimeWindows Report this phase was
+  // sent to provoke, or a Response from an Engine that found boots and time zero timely. Anything
+  // else -- unsigned, which deliverV3 admitted only for the error it names, or a signed Report
+  // naming some other counter -- ends the discovery with that error, and its boots and time are
+  // not read.
+  const auto counter = usmStatsCounter(sync->response);
+  const bool aboutTheTime =
+      sync->response.type != PduType::Report || counter == usmStatsNotInTimeWindows;
+  if (!sync->replyAuthenticated || !aboutTheTime) co_return reportError(counter);
   if (sync->security.boots == bootsCeiling) co_return make_error_code(Errc::NotInTimeWindow);
 
   // The Engine has just told us where its clock is, and signed for it. This is the one place a

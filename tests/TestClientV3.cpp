@@ -356,6 +356,7 @@ TEST(ClientV3, DropsAResponseFromOutsideTheTimeWindow) {
           return ScriptedV3Agent::report(ScriptedV3Agent::unknownEngineIds,
                                          SecurityLevel::NoAuthNoPriv);
         if (!isAuthenticated(req.message.header.level)) return std::nullopt;
+        if (usm.boots == 0) return agent.behaveLikeACompliantAgent(req);  // the time-sync phase
         ScriptedV3Agent::Reply reply;
         reply.level = req.message.header.level;
         reply.scoped.pdu = echoAnswer(req.message.scoped.pdu);
@@ -570,25 +571,55 @@ TEST(ClientV3, AnUnauthenticatedReportDuringTimeSyncEndsDiscoveryWithItsError) {
   EXPECT_EQ(agent.requestsSeen(), 2);
 }
 
-// Whether a reply was authenticated is a fact about that datagram, not about the exchange. A signed
-// reply that is then dropped must not lend its signature to the unsigned Report that follows it --
-// had it, this forged pair would have become the baseline and the discovery would have succeeded.
-TEST(ClientV3, ASignedButDroppedReplyDoesNotVouchForTheNextOne) {
+// Signed is necessary but not sufficient: the time-sync phase wants the Engine's notInTimeWindows
+// Report, and a signed Report naming anything else is the Engine refusing us, not telling us the
+// time. It ends the discovery with what it names, and the request is never sent.
+TEST(ClientV3, ASignedReportNamingAnotherCounterEndsDiscoveryWithoutSyncing) {
   Fixture f;
   ScriptedV3Agent agent(f.io, credentials(), echoAnswer);
   f.agent = &agent;
-
-  int syncPhases = 0;
   agent.setResponder(
       [&](const ScriptedV3Agent::Request& req) -> std::optional<ScriptedV3Agent::Reply> {
         if (req.message.security.engineId.empty()) return agent.behaveLikeACompliantAgent(req);
-        if (++syncPhases == 1) {
-          // Signed with the right key, and dropped for naming an Engine we did not address.
-          ScriptedV3Agent::Reply reply;
-          reply.scoped.pdu = echoAnswer(req.message.scoped.pdu);
-          reply.engineId = Octets{std::byte{0x80}, std::byte{0x00}, std::byte{0x00}};
-          return reply;
-        }
+        return ScriptedV3Agent::report(ScriptedV3Agent::unsupportedSecLevels,
+                                       SecurityLevel::AuthNoPriv);
+      });
+
+  f.client.asyncGet(targetFor(agent), credentials(), {sysDescr}, f.requestToken());
+  f.run();
+
+  EXPECT_EQ(f.ec, make_error_code(Errc::UnsupportedSecurityLevel));
+  EXPECT_EQ(agent.requestsSeen(), 2);
+}
+
+// The other answer the time-sync phase can get. An Engine that has just booted finds boots 0 and
+// time 0 timely and answers with a Response, signed -- a pair as trustworthy as any Report's.
+TEST(ClientV3, AdoptsTheClockFromASignedResponseToTheTimeSyncPhase) {
+  Fixture f;
+  ScriptedV3Agent agent(f.io, credentials(), echoAnswer);
+  f.agent = &agent;
+  agent.setBoots(0);
+  agent.setTime(0);
+
+  f.client.asyncGet(targetFor(agent), credentials(), {sysDescr}, f.requestToken());
+  f.run();
+
+  EXPECT_FALSE(f.ec) << f.ec.message();
+  EXPECT_EQ(agent.requestsSeen(), 3);
+}
+
+// The identity phase is unsigned by design, so the pair it carries is never a baseline: nothing is
+// timely or untimely against it. Had it been, a forged identity reply would get the Engine's own
+// signed Response to the time-sync phase dropped as a replay.
+TEST(ClientV3, TheIdentityPhasesClockIsNotABaseline) {
+  Fixture f;
+  ScriptedV3Agent agent(f.io, credentials(), echoAnswer);
+  f.agent = &agent;
+  agent.setBoots(0);
+  agent.setTime(0);
+  agent.setResponder(
+      [&](const ScriptedV3Agent::Request& req) -> std::optional<ScriptedV3Agent::Reply> {
+        if (!req.message.security.engineId.empty()) return agent.behaveLikeACompliantAgent(req);
         auto r =
             ScriptedV3Agent::report(ScriptedV3Agent::unknownEngineIds, SecurityLevel::NoAuthNoPriv);
         r.boots = 900000;
@@ -599,8 +630,52 @@ TEST(ClientV3, ASignedButDroppedReplyDoesNotVouchForTheNextOne) {
   f.client.asyncGet(targetFor(agent), credentials(), {sysDescr}, f.requestToken());
   f.run();
 
-  EXPECT_EQ(f.ec, make_error_code(Errc::UnknownEngineId));
-  EXPECT_EQ(syncPhases, 2);
+  EXPECT_FALSE(f.ec) << f.ec.message();
+}
+
+// Whether a reply was authenticated is a fact about that datagram, not about the exchange. Here a
+// request's first answer is signed but dropped for naming an Engine we did not address, and its
+// retransmission is answered by an unsigned notInTimeWindows Report claiming a huge boots. Had the
+// first datagram's signature carried over, handleReport would have adopted that pair, every later
+// request would have carried a boots the Engine is nowhere near, and nothing could repair it.
+TEST(ClientV3, ASignedButDroppedReplyDoesNotVouchForTheNextOne) {
+  Fixture f;
+  f.expectedCompletions = 2;
+  ScriptedV3Agent agent(f.io, credentials(), echoAnswer);
+  f.agent = &agent;
+
+  int dataRequests = 0;
+  agent.setResponder(
+      [&](const ScriptedV3Agent::Request& req) -> std::optional<ScriptedV3Agent::Reply> {
+        const auto& usm = req.message.security;
+        if (usm.engineId.empty() || usm.boots == 0) return agent.behaveLikeACompliantAgent(req);
+        ++dataRequests;
+        if (dataRequests == 1) {
+          // Signed with the right key, and dropped for naming an Engine we did not address.
+          ScriptedV3Agent::Reply reply;
+          reply.scoped.pdu = echoAnswer(req.message.scoped.pdu);
+          reply.engineId = Octets{std::byte{0x80}, std::byte{0x00}, std::byte{0x00}};
+          return reply;
+        }
+        if (dataRequests == 2) {
+          auto r = ScriptedV3Agent::report(ScriptedV3Agent::notInTimeWindows,
+                                           SecurityLevel::NoAuthNoPriv);
+          r.boots = 900000;
+          r.time = 7;
+          return r;
+        }
+        return agent.behaveLikeACompliantAgent(req);
+      });
+
+  const auto target = targetFor(agent);
+  f.client.asyncGet(target, credentials(), {sysDescr}, [&](net::ErrorCode e, const Response&) {
+    EXPECT_FALSE(e) << e.message();
+    f.client.asyncGet(target, credentials(), {sysUpTime}, f.requestToken());
+    f.finish();
+  });
+  f.run();
+
+  EXPECT_FALSE(f.ec) << f.ec.message();
 }
 
 // Story 19, and the reason EngineState tracks whether its pair was ever authenticated: a Target

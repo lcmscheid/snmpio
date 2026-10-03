@@ -594,25 +594,34 @@ TEST(ClientV3, AnUnauthenticatedReportDuringTimeSyncEndsDiscoveryWithItsError) {
   EXPECT_EQ(agent.requestsSeen(), 2);
 }
 
-// Signed is necessary but not sufficient: the time-sync phase wants the Engine's notInTimeWindows
-// Report, and a signed Report naming anything else is the Engine refusing us, not telling us the
-// time. It ends the discovery with what it names, and the request is never sent.
-TEST(ClientV3, ASignedReportNamingAnotherCounterEndsDiscoveryWithoutSyncing) {
+// Signed is the bar, not which counter the Report names. The Simulator image CI pins as `simulator`
+// answers the time-sync phase with a signed unknownEngineIDs Report carrying its real clock --
+// non-compliant, since by then it knows the engineID, but signed by the Engine all the same, and
+// RFC 3414 section 3.2 step 7(b) learns the pair from any authenticated message. This is that
+// Agent's counterpart here (ADR-0006).
+TEST(ClientV3, AdoptsTheClockFromASignedReportNamingAnotherCounter) {
   Fixture f;
   ScriptedV3Agent agent(f.io, credentials(), echoAnswer);
   f.agent = &agent;
   agent.setResponder(
       [&](const ScriptedV3Agent::Request& req) -> std::optional<ScriptedV3Agent::Reply> {
-        if (req.message.security.engineId.empty()) return agent.behaveLikeACompliantAgent(req);
-        return ScriptedV3Agent::report(ScriptedV3Agent::unsupportedSecLevels,
-                                       SecurityLevel::AuthNoPriv);
+        const auto& usm = req.message.security;
+        if (!usm.engineId.empty() && usm.boots == 0) {
+          auto r =
+              ScriptedV3Agent::report(ScriptedV3Agent::unknownEngineIds, SecurityLevel::AuthNoPriv);
+          r.boots = 3;
+          r.time = 1000;
+          return r;
+        }
+        return agent.behaveLikeACompliantAgent(req);
       });
 
   f.client.asyncGet(targetFor(agent), credentials(), {sysDescr}, f.requestToken());
   f.run();
 
-  EXPECT_EQ(f.ec, make_error_code(Errc::UnsupportedSecurityLevel));
-  EXPECT_EQ(agent.requestsSeen(), 2);
+  EXPECT_FALSE(f.ec) << f.ec.message();
+  // Identity, time sync, then the request itself -- with no second discovery.
+  EXPECT_EQ(agent.requestsSeen(), 3);
 }
 
 // The other answer the time-sync phase can get. An Engine that has just booted finds boots 0 and

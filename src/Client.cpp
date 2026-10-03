@@ -649,16 +649,14 @@ net::Awaitable<net::ErrorCode> Client::discoverEngine(Target target, Credentials
 
   ec = co_await transact(std::move(target), std::move(syncDatagram), syncId, sync);
   if (ec) co_return ec;
-  // RFC 3414 sections 3.2 step 7 and 11.1: the pair is learnt only from an authenticated message,
-  // and only from one that is about the time. That is the notInTimeWindows Report this phase was
-  // sent to provoke, or a Response from an Engine that found boots and time zero timely. Anything
-  // else -- unsigned, which deliverV3 admitted only for the error it names, or a signed Report
-  // naming some other counter -- ends the discovery with that error, and its boots and time are
-  // not read.
-  const auto counter = usmStatsCounter(sync->response);
-  const bool aboutTheTime =
-      sync->response.type != PduType::Report || counter == usmStatsNotInTimeWindows;
-  if (!sync->replyAuthenticated || !aboutTheTime) co_return reportError(counter);
+  // RFC 3414 sections 3.2 step 7(b) and 11.1: the pair is learnt from an authenticated message,
+  // and only from one. That is usually the notInTimeWindows Report this phase was sent to provoke,
+  // or a Response from an Engine that found boots and time zero timely -- but any signed reply
+  // carries the Engine's own clock, whatever counter it names, and the pinned `simulator` image
+  // answers with a signed unknownEngineIDs Report. An unsigned one, which deliverV3 admitted only
+  // for the error it names, ends the discovery with that error, and its boots and time are not
+  // read.
+  if (!sync->replyAuthenticated) co_return reportError(usmStatsCounter(sync->response));
   if (sync->security.boots == bootsCeiling) co_return make_error_code(Errc::NotInTimeWindow);
 
   // The Engine has just told us where its clock is, and signed for it. This is the one place a

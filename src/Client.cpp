@@ -272,7 +272,9 @@ void Client::deliverV3(std::span<const std::byte> datagram, const net::UdpEndpoi
   // sender nothing beyond failing this one request, or a discovery and every request queued behind
   // it (ADR-0003): neither handleReport nor discoverEngine takes a boots/time pair we will trust
   // from an unauthenticated claim. (The identity phase does record one, untrusted: timely()
-  // ignores it until the time-sync phase has replaced it with a signed one.)
+  // ignores it until the time-sync phase has replaced it with a signed one. It takes the engineID
+  // unsigned too, as RFC 3414 section 4 requires; a wrong one costs a key derivation, and the real
+  // Engine's unknownEngineIDs Report corrects it.)
   //
   // Except one claim, in one place. Discovery's time-sync phase exists to provoke a
   // notInTimeWindows Report, and a genuine one is always signed -- the Engine knows the user and
@@ -655,7 +657,7 @@ net::Awaitable<net::ErrorCode> Client::discoverEngine(Target target, Credentials
   // not read.
   const auto counter = usmStatsCounter(sync->response);
   const bool aboutTheTime =
-      sync->response.type != PduType::Report || reportsNotInTimeWindows(sync->response);
+      sync->response.type != PduType::Report || counter == usmStatsNotInTimeWindows;
   if (!sync->replyAuthenticated || !aboutTheTime) co_return reportError(counter);
   if (sync->security.boots == bootsCeiling) co_return make_error_code(Errc::NotInTimeWindow);
 

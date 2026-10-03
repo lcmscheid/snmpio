@@ -1,8 +1,8 @@
 # A signed lower-boots Report rediscovers the Engine
 
 RFC 3414 never lets a non-authoritative engine's notion of an Engine's boots go down. Section 3.2
-step 7(b) deems any message carrying a lower `msgAuthoritativeEngineBoots` outside the Time Window,
-signed or not, and section 2.2.2 says an Engine that cannot recover its boots count must latch it at
+step 7(b) deems any authenticated message carrying a lower `msgAuthoritativeEngineBoots` outside the
+Time Window, and section 2.2.2 says an Engine that cannot recover its boots count must latch it at
 2147483647 rather than start again from a lower one. Against a compliant Engine, then, a lower boots
 is always a replay. Real Engines are not all compliant: a factory reset, a replaced line card, or
 firmware that loses `snmpEngineBoots` brings an Engine back with a lower count under the same
@@ -18,15 +18,15 @@ is wrong, and lets a fresh Engine Discovery establish the baseline. Rediscoverin
 of RFC 3414 section 4. The RFC does not say when a non-authoritative engine may drop what it holds
 about an Engine, and only a restart drops it today.
 
-## Considered Options
+## Considered options
 
 **Follow the RFC and stay locked out.** That is what net-snmp does. `usm_check_and_update_timeliness`
-(`snmplib/snmpusm.c`) refuses a lower boots from a remote Engine with `SNMPERR_USM_NOTINTIMEWINDOW`.
-`_sess_process_packet` (`snmplib/snmp_api.c`) answers a `notInTimeWindow` Report by resending the
-request with its retries counted, and with the same stale pair. Its command-line tools never show
-the lockout, because each invocation starts with nothing cached: rediscovering on every run is the
-recovery. A long-running process holding the cache has no such recovery, and a library is that
-process.
+(`snmplib/snmpusm.c`) refuses a lower boots from a remote Engine with `SNMPERR_USM_NOTINTIMEWINDOW`,
+so the signed Report fails to parse. `usm_handle_report` answers nothing for an incoming Report, and
+`_sess_process_packet_parse_pdu` (`snmplib/snmp_api.c`) frees it. The request is left to retransmit
+with the same stale pair until it times out. Its command-line tools never show the lockout, because
+each invocation starts with nothing cached: rediscovering on every run is the recovery. A
+long-running process holding the cache has no such recovery, and a library is that process.
 
 **Adopt the Report's pair directly.** This saves a round trip, but it writes a pair step 7(b)
 forbids, from a message that may be a replay. Rediscovering writes only the Engine's answer to a
@@ -53,8 +53,8 @@ the time-sync phase's own `msgID`, which is the exposure every first discovery a
 
 Within one boot, a time that has gone backwards is not covered. An Engine whose clock was stepped
 back without a boots increment breaks section 2.2.2 the same way, but the Report it signs names the
-cached boots, and the Client still refuses it. Whether to extend this decision to that case is
-#42.
+cached boots. The Client refuses that pair until the Engine's clock passes the last time it saw,
+so the lockout lasts about as long as the step and then heals. Whether to recover sooner is #42.
 
 `InteropFaults.RediscoversAnEngineWhoseBootsWentBackwards` runs this path against the Simulator
 release, which signs the Report. `InteropFaults.RefusesABootsRegression` keeps pinning the refusal

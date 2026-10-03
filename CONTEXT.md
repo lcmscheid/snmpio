@@ -84,11 +84,10 @@ _Avoid_: probe, handshake, engine negotiation
 
 **Time Window**:
 The 150-second interval outside which a message's boots/time pair is rejected as untimely. It is
-one-sided on the Command Generator's side of the exchange: a pair *behind* the one cached for that
-Engine is a replay, while a later boots count or a later time is the Engine saying it restarted or
-that its clock was stepped, and is adopted (RFC 3414 section 3.2 step 7b). A pair behind is never
-adopted, even when the Engine signed it. A signed notInTimeWindows Report naming a lower boots
-still means our notion is wrong, though, so the Engine is rediscovered (ADR-0010).
+one-sided on the Command Generator's side of the exchange. A pair *behind* the one cached for that
+Engine is never adopted, even when the Engine signed it, because from a compliant Engine it can only
+be a replay. A later boots count or a later time is the Engine saying it restarted or that its clock
+was stepped, and is adopted (RFC 3414 section 3.2 step 7b).
 
 **Master Key**:
 The Credentials' secret material expanded by the password-to-key algorithm, before it is bound to any

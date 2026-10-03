@@ -538,9 +538,9 @@ Of the [capability variables](#everything-else-the-harness-reads), leave `SNMPIO
 `_FAULTS_ENGINE_ID` unset, because a correct Agent cannot misbehave on request, and
 `SNMPIO_INTEROP_BROKEN_GETNEXT` and `_NO_TIME_WINDOW_CHECK` unset. Set
 `SNMPIO_INTEROP_SET_REFUSAL` only once you know which error-status the Target refuses a read-only
-SET with; unset, the refused SET still runs, held only to being refused. Name no [Writer Credentials](#writer-credentials) unless the Target is yours to
-write `sysContact.0` on; its write rows then say `skip`. Set
-`SNMPIO_INTEROP_V3_USM_REPORTS` only if the Target answers a bad digest with a usmStats Report. That
+SET with; unset, the refused SET still runs, held only to being refused. Name no
+[Writer Credentials](#writer-credentials) unless the Target is yours to write `sysContact.0` on; its
+write rows then say `skip`. Set `SNMPIO_INTEROP_V3_USM_REPORTS` only if the Target answers a bad digest with a usmStats Report. That
 Report is optional behaviour RFC 3414 allows a correct Agent, and a Target that sends it can prove
 the wrong-password test. `SNMPIO_INTEROP_V3_KEY_EXTENSIONS` does nothing here, because that test
 needs four users and a named run has one.

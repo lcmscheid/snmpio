@@ -576,7 +576,8 @@ though RFC 3414 §2.6 makes localisation a single short hash over the Master Key
    `InteropFaults.RediscoversAnEngineWhoseBootsWentBackwards`; ADR-0010 records the RFC 3414
    departure. It clears the Engine's `timeSynced` rather than the endpoint index table row 1.1.4
    suggests: an Engine already marked synced skips the time-sync phase on rediscovery, so clearing
-   the index alone would retry with the same stale pair. `ClientV3.AForcedResyncHappensAtMostOncePerRequest` pins the one-resync bound.*
+   the index alone would retry with the same stale pair.
+   `ClientV3.AForcedResyncHappensAtMostOncePerRequest` pins the one-resync bound.*
 2. **Turn the fuzz oracles back on (4.3).** Use `-UNDEBUG` or `__builtin_trap()` in the fuzzers.
    Re-run the existing corpus: an oracle that has been dead may have been hiding failures.
 3. **Safe `~Client` (3.1)**, following the seven rules there. In the same change, fix the late

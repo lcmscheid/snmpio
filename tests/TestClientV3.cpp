@@ -283,19 +283,20 @@ TEST(ClientV3, DropsAReplyClaimingAnOlderBootsCount) {
 // GETs go out one after the other. The Agent change the tests below care about is an Engine
 // whose boots counter went backwards -- a factory reset, a replaced line card, firmware that lost
 // snmpEngineBoots -- and the cases either side of it.
-struct LaterGets {
+struct LaterGetResults {
   net::ErrorCode second;
   net::ErrorCode third;
   int requestsAfterTheSecondGet = 0;
 };
 
-LaterGets afterTheCacheIsSettled(const std::function<void(ScriptedV3Agent&)>& changeTheAgent) {
+LaterGetResults afterTheCacheIsSettled(
+    const std::function<void(ScriptedV3Agent&)>& changeTheAgent) {
   Fixture f;
   ScriptedV3Agent agent(f.io, credentials(), echoAnswer);
   f.agent = &agent;
   f.expectedCompletions = 3;
 
-  LaterGets result;
+  LaterGetResults result;
   const auto target = targetFor(agent);
   f.client.asyncGet(target, credentials(), {sysDescr}, [&](net::ErrorCode first, const Response&) {
     EXPECT_FALSE(first) << "the GET that settles the cache: " << first.message();

@@ -128,8 +128,9 @@ case $agent in
     # readOnly, which RFC 3416 section 4.2.5 says an SNMPv2 entity never sends -- notWritable is
     # the status for one (lcmscheid/snmp-fault-agent#10). And it blames Varbind 0 where RFC 3416
     # names the one sent (lcmscheid/snmp-fault-agent#12); no flag gates that. It sends no usmStats
-    # Report for a bad digest. The suite asserts what the Agent does, and says on every row it
-    # touches that it is non-compliant.
+    # Report for a bad digest. And the defect it is pinned for: it skips RFC 3414 section 3.2
+    # step 7a, so noTimeWindowCheck is set. The suite asserts what the Agent does, and says on
+    # every row it touches that it is non-compliant.
     brokenGetNext=1
     noTimeWindowCheck=1
     setRefusal=readOnly

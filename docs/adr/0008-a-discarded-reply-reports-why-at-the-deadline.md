@@ -52,6 +52,15 @@ in `deliverV3`). The invariant that matters -- no reply fails a request before i
 untouched, and the cost of closing this one is checking a `request-id` we cannot read, because a
 reply whose digest failed is a reply we will not decrypt.
 
+One unauthenticated Report is dropped rather than admitted, and it is a fourth named drop: an
+unsigned `notInTimeWindows` Report answering Engine Discovery's time-sync phase (issue #25). A
+genuine one is always signed there, so an unsigned one can only be a forgery racing the Engine.
+Admitting it either let it set the Engine's baseline clock -- which is what it used to do, and which
+nothing afterwards could repair -- or let it fail the discovery outright. Dropping it keeps the phase
+waiting for the signed Report, and reports `NotInTimeWindow` at the deadline if that never comes. The
+same `msgID` bar can therefore turn a silent Target's `Timeout` into `NotInTimeWindow` during
+discovery, which is the `AuthFailed` trade above again and accepted for the same reason.
+
 The last reason wins where several replies were dropped for different reasons. Nothing is lost that
 a caller could have used: the alternative is a list, and a caller that must act on a list of
 refusals has a packet capture problem, not an error-code problem.

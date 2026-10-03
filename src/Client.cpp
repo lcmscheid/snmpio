@@ -234,13 +234,16 @@ void Client::deliverV3(std::span<const std::byte> datagram, const net::UdpEndpoi
   const bool encrypted = isEncrypted(msg->header.level);
   const bool exemptFromAuth =
       !encrypted && !isAuthenticated(msg->header.level) && msg->scoped.pdu.type == PduType::Report;
+  // Local rather than written straight into p: a verified reply can still be dropped below, and a
+  // later unsigned Report must not inherit a verdict that was about a different datagram.
+  bool authenticated = false;
   if (p.authRequired && !exemptFromAuth) {
     net::ErrorCode authEc;
     if (!verifyAuth(datagram, *msg, p.authProtocol, p.authKey, authEc)) {
       p.dropReason = make_error_code(Errc::AuthFailed);
       return;
     }
-    p.replyAuthenticated = true;
+    authenticated = true;
   }
   // RFC 3414 section 3.2 puts decryption at step 8, after the digest at step 6 and timeliness at
   // step 7. Timeliness is checked below rather than here, and has to be: an encrypted Report is
@@ -261,8 +264,22 @@ void Client::deliverV3(std::span<const std::byte> datagram, const net::UdpEndpoi
   // key, or the engineID the message was addressed to. Refusing them would turn "wrong password"
   // into "timed out". The bar it clears is the protocol's own -- an outstanding msgID, from the
   // address we sent to -- which is the same bar a spoofed v2c Response clears, and it buys the
-  // sender nothing beyond failing this one request: handleReport will not let an unauthenticated
-  // claim change anything we have cached.
+  // sender nothing beyond failing this one request or discovery: neither handleReport nor
+  // discoverEngine takes a boots/time pair we will trust from an unauthenticated claim.
+  //
+  // Except one claim, in one place. Discovery's time-sync phase exists to provoke a
+  // notInTimeWindows Report, and a genuine one is always signed -- the Engine knows the user and
+  // the key by then, and RFC 3414 section 3.2 step 7(a) has it authenticate the Report. An unsigned
+  // one is a forgery racing the Engine, and failing on it would only let the forger win the race
+  // outright. So it is dropped like any other unusable reply and the phase keeps waiting for the
+  // signed one until its deadline (ADR-0008), which reports NotInTimeWindow if that never comes.
+  // The other counters still end the discovery unsigned, deliberately: an Engine that reports them
+  // has no key to sign with, so there is no signed answer worth waiting for.
+  if (p.timeSyncPhase && isReport && !authenticated &&
+      usmStatsCounter(msg->scoped.pdu) == usmStatsNotInTimeWindows) {
+    p.dropReason = make_error_code(Errc::NotInTimeWindow);
+    return;
+  }
   // A Report is exempt from all three of the checks below. It may legitimately come from an Engine
   // other than the one we addressed -- that is what usmStatsUnknownEngineIDs means -- it carries no
   // request-id worth matching, and above all it is the message that *reports* a boots/time
@@ -280,6 +297,7 @@ void Client::deliverV3(std::span<const std::byte> datagram, const net::UdpEndpoi
 
   p.security = std::move(msg->security);
   p.response = std::move(msg->scoped.pdu);
+  p.replyAuthenticated = authenticated;
   p.answered = true;
   p.timer.cancel();
 }
@@ -615,14 +633,19 @@ net::Awaitable<net::ErrorCode> Client::discoverEngine(Target target, Credentials
   if (privKey != nullptr) sync->privKey = *privKey;
   sync->engineId = engineId;
   sync->requestId = syncId;
+  sync->timeSyncPhase = true;
 
   ec = co_await transact(std::move(target), std::move(syncDatagram), syncId, sync);
   if (ec) co_return ec;
+  // RFC 3414 sections 3.2 step 7 and 11.1: the pair is learnt only from an authenticated message.
+  // Anything that got here unsigned is a Report deliverV3 admitted for the error it names, and that
+  // error ends the discovery; its boots and time are not read.
+  if (!sync->replyAuthenticated) co_return reportError(usmStatsCounter(sync->response));
   if (sync->security.boots == bootsCeiling) co_return make_error_code(Errc::NotInTimeWindow);
 
-  // The Engine has just told us where its clock is. This is the one place a pair is taken without
-  // being compared against an earlier one, because there is no earlier one: it is the baseline
-  // every later comparison is made against.
+  // The Engine has just told us where its clock is, and signed for it. This is the one place a
+  // pair is taken without being compared against an earlier one, because there is no earlier one:
+  // it is the baseline every later comparison is made against.
   EngineState& discovered = m_engines[engineId];
   discovered.boots = sync->security.boots;
   discovered.time = sync->security.time;

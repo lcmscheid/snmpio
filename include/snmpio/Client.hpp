@@ -284,6 +284,9 @@ class Client {
     // which the protocol obliges us to accept and which therefore must not be trusted with
     // anything beyond asking us to discover the Engine again.
     bool replyAuthenticated = false;
+    // Engine Discovery's time-sync phase, the one exchange an unsigned notInTimeWindows Report is
+    // dropped from rather than admitted: a genuine one there is always signed (see deliverV3).
+    bool timeSyncPhase = false;
     // Why the last unusable reply was discarded, or empty. Read only at expiry (ADR-0008).
     net::ErrorCode dropReason;
   };

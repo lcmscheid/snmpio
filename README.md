@@ -27,9 +27,10 @@ hardware checklist.
 
 ## Using it
 
-Both files below are in [`examples/`](examples/), which is a separate CMake project that
-`find_package()`s an installed snmpio — so building it is what proves the install rules work, and
-CI builds it on every push. Neither can drift from the other.
+Both snippets below are condensed from [`examples/`](examples/), which is a separate CMake project
+that `find_package()`s an installed snmpio — so building it is what proves the install rules work,
+and CI builds it on every push: the examples and the package cannot drift apart. There is one
+example per operation; the [table below](#the-examples) says what each shows.
 
 A v2c GET, in the callback form:
 
@@ -83,15 +84,42 @@ Three things the compiler will not tell you:
 - **A Target is an address, not a hostname.** Choosing a resolver stays the caller's business
   (`CONTEXT.md`), so nothing here will quietly resolve one for you.
 
-To build and run them against the `snmpd` the [interop script](#interop-tests) starts:
+### The examples
+
+Between them, the six cover every operation, every Security Level, and every completion style.
+Each fixes its protocols in code rather than parsing them from the command line, so what you copy
+is the API, not an argument parser; [`Usm.hpp`](include/snmpio/Usm.hpp) lists the alternatives.
+
+| Example | Operation | Identity | Completion | Also shows |
+|---|---|---|---|---|
+| [`get`](examples/get.cpp) | `asyncGet` | v2c Community | callback | the three error categories in one handler |
+| [`getnext`](examples/getnext.cpp) | `asyncGetNext` | v3 noAuthNoPriv | `use_future` | the blocking style; several OIDs in one request |
+| [`getbulk`](examples/getbulk.cpp) | `asyncGetBulk` | v3 authNoPriv, SHA-512 | coroutine | `nonRepeaters` and `maxRepetitions` |
+| [`set`](examples/set.cpp) | `asyncSet` | v3 authPriv, SHA-256 / AES-128 | callback | a refusal's error-status and error-index, told apart from every other failure |
+| [`walk`](examples/walk.cpp) | `asyncWalk` | v3 authPriv, SHA-1 / AES-256 (Reeder) | coroutine | streaming; a row limit as a `total` cancellation, ending in `WalkIncomplete` |
+| [`walk-collect`](examples/walk-collect.cpp) | `asyncWalkCollect` | v3 authPriv, SHA-1 / AES-128 | coroutine | the buffering convenience over `walk` |
+
+To build them and run each against the `snmpd` the [interop script](#interop-tests) starts, whose
+users are named after what they carry and whose password is `snmpio-interop`:
 
 ```sh
 cmake --install build/default --prefix /tmp/prefix
 cmake -S examples -B build/examples -DCMAKE_PREFIX_PATH=/tmp/prefix
 cmake --build build/examples
-./build/examples/example-get 127.0.0.1 16161 public
-./build/examples/example-walk 127.0.0.1 16161 privsha1aes snmpio-interop 1.3.6.1.2.1.1
+cd build/examples
+./example-get 127.0.0.1 16161 public
+./example-getnext 127.0.0.1 16161 noauth 1.3.6.1.2.1.1.1 1.3.6.1.2.1.1.3 1.3.6.1.2.1.1.5
+./example-getbulk 127.0.0.1 16161 authsha512 snmpio-interop
+./example-set 127.0.0.1 16161 writer-privsha256aes snmpio-interop ops@example.net
+./example-walk 127.0.0.1 16161 privsha1aes256c snmpio-interop 1.3.6.1.2.1.1
+./example-walk-collect 127.0.0.1 16161 privsha1aes snmpio-interop 1.3.6.1.2.1.1
 ```
+
+Two variations show the failure paths. `set` as `privsha256aes` — the same protocols, a user that
+may only read — prints the Agent's refusal, `noAccess (error-status 6), error-index 1`. A user on
+other protocols, such as `privsha1aes`, gets no refusal at all: its digest does not match, which is
+a different failure. And `walk` with a trailing row limit, `... 1.3.6.1.2.1.1 5`, stops after five
+rows with `WalkIncomplete`.
 
 ## Errors
 

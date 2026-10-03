@@ -10,7 +10,7 @@ project(snmpio-examples CXX)
 
 find_package(snmpio REQUIRED)
 
-foreach(example get walk)
+foreach(example get getnext getbulk set walk walk-collect)
   add_executable(example-${example} ${example}.cpp)
   target_link_libraries(example-${example} PRIVATE snmpio::snmpio)
 endforeach()

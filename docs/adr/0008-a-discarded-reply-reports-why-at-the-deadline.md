@@ -18,12 +18,11 @@ completes moves — only what it says when it does.
 
 Three drops are named, and they are the ones a caller can act on: a digest that does not verify, an
 `encryptedPDU` we cannot open, and a reply that fails our own timeliness check. (A fourth was added
-later, for Engine Discovery's time-sync phase -- see the end of _Consequences_.) Every other drop —
-a datagram that does not decode, a `request-id` that does not match, a Response from the wrong
-Engine — stays silent and still reports `Timeout`. Those say nothing about the Target beyond "this
-was not the reply we were waiting for", which is what `Timeout` already means. The useful
-distinction is between a Target that said nothing and a Target that said something we refused, not
-one enumerator per branch.
+later; see the amendment below.) Every other drop — a datagram that does not decode, a `request-id`
+that does not match, a Response from the wrong Engine — stays silent and still reports `Timeout`.
+Those say nothing about the Target beyond "this was not the reply we were waiting for", which is
+what `Timeout` already means. The useful distinction is between a Target that said nothing and a
+Target that said something we refused, not one enumerator per branch.
 
 ## Consequences
 
@@ -53,15 +52,6 @@ in `deliverV3`). The invariant that matters -- no reply fails a request before i
 untouched, and the cost of closing this one is checking a `request-id` we cannot read, because a
 reply whose digest failed is a reply we will not decrypt.
 
-One unauthenticated Report is dropped rather than admitted, and it is a fourth named drop: an
-unsigned `notInTimeWindows` Report answering Engine Discovery's time-sync phase (issue #25). A
-genuine one is always signed there, so an unsigned one can only be a forgery racing the Engine.
-Admitting it either let it set the Engine's baseline clock -- which is what it used to do, and which
-nothing afterwards could repair -- or let it fail the discovery outright. Dropping it keeps the phase
-waiting for the signed Report, and reports `NotInTimeWindow` at the deadline if that never comes. The
-same `msgID` bar can therefore turn a silent Target's `Timeout` into `NotInTimeWindow` during
-discovery, which is the `AuthFailed` trade above again and accepted for the same reason.
-
 The last reason wins where several replies were dropped for different reasons. Nothing is lost that
 a caller could have used: the alternative is a list, and a caller that must act on a list of
 refusals has a packet capture problem, not an error-code problem.
@@ -69,3 +59,16 @@ refusals has a packet capture problem, not an error-code problem.
 A cancelled request reports the cancellation instead, not the drop reason. The reason a caller who
 asked for this request to stop needs is that it stopped -- what the Target was last heard doing is
 about a request that no longer exists. `Client.hpp` states that rule for both cancellation types.
+
+## Amendment, 2026-10-03: a fourth named drop, during discovery's time sync
+
+One unauthenticated Report is dropped rather than admitted: an unsigned `notInTimeWindows` Report
+answering Engine Discovery's time-sync phase (issue #25). A genuine one is always signed there, so
+an unsigned one can only be a forgery racing the Engine. Admitting it either let it set the
+Engine's baseline clock — which is what it used to do, and which nothing afterwards could repair —
+or let it fail the discovery outright. Dropping it keeps the phase waiting for the signed Report,
+and reports `NotInTimeWindow` at the deadline if that never comes. The same `msgID` bar can
+therefore turn a silent Target's `Timeout` into `NotInTimeWindow` during discovery, which is the
+`AuthFailed` trade above again and accepted for the same reason.
+`ClientV3.AnUnsignedNotInTimeWindowsAloneFailsTheTimeSyncAtItsDeadline` pins both halves: every
+retransmission still goes out, and the deadline says why.

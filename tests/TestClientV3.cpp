@@ -550,6 +550,29 @@ TEST(ClientV3, AnUnauthenticatedReportNeverSetsTheDiscoveredClock) {
   EXPECT_EQ(syncPhases, 2);
 }
 
+// The other half of the drop above, ADR-0008's: when the signed Report never comes, the phase still
+// runs to its deadline -- every retransmission goes out -- and then says why, not just Timeout.
+TEST(ClientV3, AnUnsignedNotInTimeWindowsAloneFailsTheTimeSyncAtItsDeadline) {
+  Fixture f;
+  ScriptedV3Agent agent(f.io, credentials(), echoAnswer);
+  f.agent = &agent;
+
+  int syncPhases = 0;
+  agent.setResponder(
+      [&](const ScriptedV3Agent::Request& req) -> std::optional<ScriptedV3Agent::Reply> {
+        if (req.message.security.engineId.empty()) return agent.behaveLikeACompliantAgent(req);
+        ++syncPhases;
+        return ScriptedV3Agent::report(ScriptedV3Agent::notInTimeWindows,
+                                       SecurityLevel::NoAuthNoPriv);
+      });
+
+  f.client.asyncGet(targetFor(agent, 1), credentials(), {sysDescr}, f.requestToken());
+  f.run();
+
+  EXPECT_EQ(f.ec, make_error_code(Errc::NotInTimeWindow));
+  EXPECT_EQ(syncPhases, 2) << "an unsigned Report cut the time-sync phase short";
+}
+
 // An unsigned Report in the time-sync phase that names any other counter ends the discovery with
 // the error it names, rather than letting the request go on against a clock nobody signed for.
 TEST(ClientV3, AnUnauthenticatedReportDuringTimeSyncEndsDiscoveryWithItsError) {

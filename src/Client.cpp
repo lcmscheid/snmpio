@@ -60,6 +60,11 @@ std::optional<std::uint32_t> usmStatsCounter(const Pdu& report) {
   return *(name.begin() + static_cast<std::ptrdiff_t>(prefix.size()));
 }
 
+// The one Report that is about the Engine's clock, and so the one that may carry a pair we take.
+bool reportsNotInTimeWindows(const Pdu& pdu) {
+  return pdu.type == PduType::Report && usmStatsCounter(pdu) == usmStatsNotInTimeWindows;
+}
+
 net::ErrorCode reportError(std::optional<std::uint32_t> counter) {
   if (!counter) return make_error_code(Errc::UnexpectedReport);
   switch (*counter) {
@@ -264,10 +269,10 @@ void Client::deliverV3(std::span<const std::byte> datagram, const net::UdpEndpoi
   // key, or the engineID the message was addressed to. Refusing them would turn "wrong password"
   // into "timed out". The bar it clears is the protocol's own -- an outstanding msgID, from the
   // address we sent to -- which is the same bar a spoofed v2c Response clears, and it buys the
-  // sender nothing beyond failing this one request or discovery: neither handleReport nor
-  // discoverEngine takes a boots/time pair we will trust from an unauthenticated claim. (The
-  // identity phase does record one, untrusted: timely() ignores it until the time-sync phase has
-  // replaced it with a signed one.)
+  // sender nothing beyond failing this one request, or a discovery and every request queued behind
+  // it (ADR-0003): neither handleReport nor discoverEngine takes a boots/time pair we will trust
+  // from an unauthenticated claim. (The identity phase does record one, untrusted: timely()
+  // ignores it until the time-sync phase has replaced it with a signed one.)
   //
   // Except one claim, in one place. Discovery's time-sync phase exists to provoke a
   // notInTimeWindows Report, and a genuine one is always signed -- the Engine knows the user and
@@ -277,8 +282,7 @@ void Client::deliverV3(std::span<const std::byte> datagram, const net::UdpEndpoi
   // signed one until its deadline (ADR-0008), which reports NotInTimeWindow if that never comes.
   // The other counters still end the discovery unsigned, deliberately: an Engine that reports them
   // has no key to sign with, so there is no signed answer worth waiting for.
-  if (p.timeSyncPhase && isReport && !authenticated &&
-      usmStatsCounter(msg->scoped.pdu) == usmStatsNotInTimeWindows) {
+  if (p.timeSyncPhase && !authenticated && reportsNotInTimeWindows(msg->scoped.pdu)) {
     p.dropReason = make_error_code(Errc::NotInTimeWindow);
     return;
   }
@@ -651,7 +655,7 @@ net::Awaitable<net::ErrorCode> Client::discoverEngine(Target target, Credentials
   // not read.
   const auto counter = usmStatsCounter(sync->response);
   const bool aboutTheTime =
-      sync->response.type != PduType::Report || counter == usmStatsNotInTimeWindows;
+      sync->response.type != PduType::Report || reportsNotInTimeWindows(sync->response);
   if (!sync->replyAuthenticated || !aboutTheTime) co_return reportError(counter);
   if (sync->security.boots == bootsCeiling) co_return make_error_code(Errc::NotInTimeWindow);
 

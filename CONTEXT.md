@@ -63,9 +63,11 @@ resynchronisation and are handled internally rather than surfaced to callers.
 _Avoid_: error response, failure PDU
 
 **Message ID**:
-The engine-level `msgID` from the v3 message header, which identifies an outstanding request. It is
-distinct from the PDU's `request-id` and is what outstanding requests are keyed on, because a message
-whose decryption fails must still be attributable.
+The engine-level `msgID` from the v3 message header, which identifies one transmission of an
+Outstanding Request. It is distinct from the PDU's `request-id` and is what Outstanding Requests are
+keyed on, because a message whose decryption fails must still be attributable. Each retransmission
+carries a fresh one, so one Outstanding Request may own several, and a reply to any of them counts.
+Message IDs are unpredictable, since anyone who can guess one can forge a reply that clears it.
 _Avoid_: request id, transaction id, sequence number
 
 ### Security
@@ -111,6 +113,22 @@ Extension at all, so the distinction only arises at 192 and 256 bits. Reeder is 
 **`C` suffix** (`AES192C`, `AES256C`) — the convention net-snmp, gosnmp and the Simulator all
 independently settled on; we follow it rather than invent a fourth spelling.
 _Avoid_: key expansion, key stretching, "Cisco AES" as a protocol name
+
+### Lifecycle
+
+**Outstanding Request**:
+An operation the Command Generator has initiated and not yet completed, whichever wait it is in —
+awaiting a reply, between retransmissions, or queued behind an Engine Discovery. Every Outstanding
+Request completes exactly once, whatever ends it: a reply, its deadline, a cancellation, or
+Stopping.
+_Avoid_: pending request, in-flight request (in flight is one of its waits, not all of them)
+
+**Stopping**:
+The Command Generator refusing new work and completing every Outstanding Request with
+`ClientStopped`. Destroying the Command Generator stops it, so a forgotten stop is never a dangling
+request. Distinct from cancellation, which ends one request at its caller's asking and completes
+with `operation_aborted`.
+_Avoid_: shutdown, close, abort
 
 ### Errors
 

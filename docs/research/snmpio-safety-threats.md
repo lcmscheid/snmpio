@@ -571,6 +571,11 @@ though RFC 3414 §2.6 makes localisation a single short hash over the Master Key
    step 7(b) learns the pair from any authenticated message newer than the local notion, and at
    discovery there is no local notion yet, so the signature is the whole bar. The recovery path
    is #40.*
+   *Added 2026-10-03: the recovery path is fixed by #40, with the test
+   `ClientV3.RediscoversAnEngineWhoseBootsWentBackwards`. It clears the Engine's `timeSynced`
+   rather than the endpoint index the row above suggests: an Engine already marked synced skips
+   the time-sync phase on rediscovery, so clearing the index alone would retry with the same
+   stale pair. `ClientV3.AForcedResyncHappensAtMostOncePerRequest` pins the one-resync bound.*
 2. **Turn the fuzz oracles back on (4.3).** Use `-UNDEBUG` or `__builtin_trap()` in the fuzzers.
    Re-run the existing corpus: an oracle that has been dead may have been hiding failures.
 3. **Safe `~Client` (3.1)**, following the seven rules there. In the same change, fix the late

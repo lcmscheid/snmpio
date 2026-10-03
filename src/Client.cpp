@@ -359,7 +359,9 @@ void Client::observeEngineTime(const net::UdpEndpoint& from, const UsmParameters
   // Engine that has genuinely reached it fails its own requests rather than poisoning the cache.
   if (security.boots == bootsCeiling) return;
   // RFC 3414 section 2.2.3: a later boots count always wins, and within one boot only a later time
-  // does. Anything else is a replay of something we have already seen.
+  // does. Anything else is a replay of something we have already seen. (Or an Engine whose boots
+  // really did go backwards, which handleReport recovers from by rediscovering, never through
+  // here.)
   if (security.boots < engine->boots) return;
   if (security.boots == engine->boots && security.time < engine->time) return;
   engine->boots = security.boots;
@@ -685,6 +687,29 @@ std::optional<net::ErrorCode> Client::handleReport(const net::UdpEndpoint& from,
   // and this is not.
   if (!pending.replyAuthenticated || *counter == usmStatsUnknownEngineIds) {
     m_engineAt.erase(from);
+    return std::nullopt;
+  }
+  // A signed Report naming a boots *lower* than the one we hold is the one pair observeEngineTime
+  // refuses, and refusing it here would be refusing it for good: the retry would carry the same
+  // stale pair and fail the same way, for the rest of this Client's life. It is an Engine whose
+  // counter was reset -- a factory reset, a replaced line card, firmware that lost snmpEngineBoots
+  // -- or a cache poisoned by some route #25 did not close. Either way the Engine has just signed
+  // for where its clock really is, so we forget ours and let the retry rediscover, time-sync phase
+  // included; discoverEngine takes its answer as a fresh baseline without comparing it.
+  //
+  // The flag lives on the Engine, not the endpoint, so every Target reaching this Engine stops
+  // judging timeliness until the rediscovery completes -- the same window the first discovery had.
+  //
+  // Not a replay hole. The Report carries our msgID inside the signed header and msgIDs do not
+  // repeat within a Client short of 2^31 requests, so an old capture cannot match a request still
+  // waiting for an answer.
+  // What remains is a recording from an earlier Client process that happened to reuse the msgID,
+  // and that buys one rediscovery and no more: the pair it carries is never written -- the
+  // rediscovery adopts the Engine's live, signed answer -- and mayRetry bounds it to once per
+  // request.
+  EngineState* engine = engineAt(from);
+  if (engine != nullptr && engine->timeSynced && pending.security.boots < engine->boots) {
+    engine->timeSynced = false;
     return std::nullopt;
   }
   observeEngineTime(from, pending.security);

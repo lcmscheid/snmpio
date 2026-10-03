@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <functional>
 #include <optional>
 #include <span>
 #include <vector>
@@ -276,6 +277,143 @@ TEST(ClientV3, DropsAReplyClaimingAnOlderBootsCount) {
   const auto ec = secondGetAnsweredWith(2, 1000);
   EXPECT_EQ(ec, make_error_code(Errc::NotInTimeWindow))
       << "a boots regression was accepted: " << ec.message();
+}
+
+// One GET settles the cache at the Agent's own boots 3, then `then` changes the Agent, then two
+// more GETs go out one after the other. The Agent change the tests below care about is an Engine
+// whose boots counter went backwards -- a factory reset, a replaced line card, firmware that lost
+// snmpEngineBoots -- and the cases either side of it.
+struct AfterTheCacheIsSettled {
+  net::ErrorCode second;
+  net::ErrorCode third;
+  int requestsAfterTheSecondGet = 0;
+};
+
+AfterTheCacheIsSettled afterTheCacheIsSettled(const std::function<void(ScriptedV3Agent&)>& then) {
+  Fixture f;
+  ScriptedV3Agent agent(f.io, credentials(), echoAnswer);
+  f.agent = &agent;
+  f.expectedCompletions = 3;
+
+  AfterTheCacheIsSettled result;
+  const auto target = targetFor(agent);
+  f.client.asyncGet(target, credentials(), {sysDescr}, [&](net::ErrorCode first, const Response&) {
+    EXPECT_FALSE(first) << "the GET that settles the cache: " << first.message();
+    then(agent);
+    const int requestsBeforeTheSecondGet = agent.requestsSeen();
+    f.client.asyncGet(target, credentials(), {sysDescr},
+                      [&, requestsBeforeTheSecondGet](net::ErrorCode ec, const Response&) {
+                        result.second = ec;
+                        result.requestsAfterTheSecondGet =
+                            agent.requestsSeen() - requestsBeforeTheSecondGet;
+                        f.client.asyncGet(target, credentials(), {sysUpTime},
+                                          [&](net::ErrorCode ec3, const Response&) {
+                                            result.third = ec3;
+                                            f.finish();
+                                          });
+                        f.finish();
+                      });
+    f.finish();
+  });
+  f.run();
+  return result;
+}
+
+bool isTimeSyncPhase(const ScriptedV3Agent::Request& req) {
+  return !req.message.security.engineId.empty() && req.message.security.boots == 0;
+}
+
+// Criterion: the signed notInTimeWindows Report from an Engine now at a lower boots is the Engine
+// telling us its real clock, and the cache is rediscovered from it rather than refusing it forever.
+TEST(ClientV3, RediscoversAnEngineWhoseBootsWentBackwards) {
+  int timeSyncPhases = 0;
+  std::vector<std::int32_t> bootsCarried;
+  const auto r = afterTheCacheIsSettled([&](ScriptedV3Agent& agent) {
+    agent.setBoots(1);
+    agent.setTime(50);
+    agent.setResponder([&](const ScriptedV3Agent::Request& req) {
+      if (isTimeSyncPhase(req)) ++timeSyncPhases;
+      if (!req.message.security.engineId.empty())
+        bootsCarried.push_back(req.message.security.boots);
+      return agent.behaveLikeACompliantAgent(req);
+    });
+  });
+
+  EXPECT_FALSE(r.second) << "the lower boots locked the Engine out: " << r.second.message();
+  EXPECT_FALSE(r.third) << "the request after the resync failed: " << r.third.message();
+  EXPECT_EQ(timeSyncPhases, 1) << "the Engine was not rediscovered exactly once";
+  // The stale request, the rediscovery's time-sync phase, its retry at the new boots, and the third
+  // GET at the new boots.
+  EXPECT_EQ(bootsCarried, (std::vector<std::int32_t>{3, 0, 1, 1}));
+}
+
+// The forger's half: an unsigned Report claiming a lower boots buys a round trip and nothing else.
+// The cached clock is neither lowered nor forgotten, so every request still carries boots 3, no
+// time-sync phase runs, and the request fails with the error the Report named.
+TEST(ClientV3, AnUnsignedLowerBootsReportNeverClearsTheCachedClock) {
+  int timeSyncPhases = 0;
+  std::vector<std::int32_t> bootsCarried;
+  const auto r = afterTheCacheIsSettled([&](ScriptedV3Agent& agent) {
+    agent.setBoots(1);
+    agent.setResponder([&](const ScriptedV3Agent::Request& req) {
+      if (isTimeSyncPhase(req)) ++timeSyncPhases;
+      auto reply = agent.behaveLikeACompliantAgent(req);
+      if (req.message.security.engineId.empty()) return reply;
+      bootsCarried.push_back(req.message.security.boots);
+      if (reply && reply->scoped.pdu.type == PduType::Report) {
+        reply->level = SecurityLevel::NoAuthNoPriv;
+      }
+      return reply;
+    });
+  });
+
+  EXPECT_EQ(r.second, make_error_code(Errc::NotInTimeWindow)) << r.second.message();
+  EXPECT_EQ(r.third, make_error_code(Errc::NotInTimeWindow)) << r.third.message();
+  EXPECT_EQ(timeSyncPhases, 0) << "an unsigned Report made the Client forget the Engine's clock";
+  // Each GET is one attempt and one retry, and every one of them still carries the cached boots.
+  EXPECT_EQ(bootsCarried, (std::vector<std::int32_t>{3, 3, 3, 3}));
+}
+
+// The bound: a request gets at most one forced resync. An Engine whose every Report names a boots
+// lower than the request carried -- even after rediscovery handed us its own -- fails that request
+// after exactly one rediscovery rather than sending it round again.
+TEST(ClientV3, AForcedResyncHappensAtMostOncePerRequest) {
+  const auto r = afterTheCacheIsSettled([&](ScriptedV3Agent& agent) {
+    agent.setResponder(
+        [&](const ScriptedV3Agent::Request& req) -> std::optional<ScriptedV3Agent::Reply> {
+          if (req.message.security.engineId.empty()) return agent.behaveLikeACompliantAgent(req);
+          auto report =
+              ScriptedV3Agent::report(ScriptedV3Agent::notInTimeWindows, SecurityLevel::AuthNoPriv);
+          report.boots = isTimeSyncPhase(req) ? 2 : req.message.security.boots - 1;
+          return report;
+        });
+  });
+
+  EXPECT_EQ(r.second, make_error_code(Errc::NotInTimeWindow)) << r.second.message();
+  // The stale request, the identity and time-sync phases of one rediscovery, and one retry.
+  EXPECT_EQ(r.requestsAfterTheSecondGet, 4);
+}
+
+// The direction that was always right stays as it was: a signed Report naming a *higher* boots is
+// adopted and the request retried, with no rediscovery.
+TEST(ClientV3, ASignedHigherBootsReportIsAdoptedWithoutRediscovery) {
+  int timeSyncPhases = 0;
+  int identityPhases = 0;
+  const auto r = afterTheCacheIsSettled([&](ScriptedV3Agent& agent) {
+    agent.setBoots(9);
+    agent.setResponder([&](const ScriptedV3Agent::Request& req) {
+      if (req.message.security.engineId.empty()) ++identityPhases;
+      if (isTimeSyncPhase(req)) ++timeSyncPhases;
+      return agent.behaveLikeACompliantAgent(req);
+    });
+  });
+
+  EXPECT_FALSE(r.second) << r.second.message();
+  EXPECT_FALSE(r.third) << r.third.message();
+  EXPECT_EQ(identityPhases, 0);
+  EXPECT_EQ(timeSyncPhases, 0);
+  // The stale request and its retry.
+  EXPECT_EQ(r.requestsAfterTheSecondGet, 2);
 }
 
 TEST(ClientV3, FailsWhenTheEngineNeverAgreesOnTheTimeWindow) {

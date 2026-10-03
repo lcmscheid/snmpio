@@ -134,6 +134,11 @@ TEST_F(InteropFaults, RecoversFromAnEngineRestart) {
 // higher pair the Engine will not accept, and gives up rather than climbing down to meet it. A
 // Client with no cache at all still gets in, which is what says the Agent is healthy and it was
 // the comparison that refused.
+//
+// What is refused is the Response. An Agent that instead rejected the request with a *signed*
+// notInTimeWindows Report at its lower boots would be rediscovered and answered (#40,
+// ClientV3.RediscoversAnEngineWhoseBootsWentBackwards): that is the Engine signing for a counter
+// that really was reset. The Simulator never sends that Report, so this test is not about it.
 TEST_F(InteropFaults, RefusesABootsRegression) {
   if (m_password.empty()) GTEST_SKIP() << "needs SNMPIO_INTEROP_V3_PASSWORD";
   SimulatorFaults faults(m_target.endpoint, m_controlPort);

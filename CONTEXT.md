@@ -86,7 +86,9 @@ _Avoid_: probe, handshake, engine negotiation
 The 150-second interval outside which a message's boots/time pair is rejected as untimely. It is
 one-sided on the Command Generator's side of the exchange: a pair *behind* the one cached for that
 Engine is a replay, while a later boots count or a later time is the Engine saying it restarted or
-that its clock was stepped, and is adopted (RFC 3414 section 3.2 step 7b).
+that its clock was stepped, and is adopted (RFC 3414 section 3.2 step 7b). One exception: a
+*signed* notInTimeWindows Report naming a lower boots is an Engine whose counter really was reset,
+and the Engine is rediscovered rather than refused forever.
 
 **Master Key**:
 The Credentials' secret material expanded by the password-to-key algorithm, before it is bound to any

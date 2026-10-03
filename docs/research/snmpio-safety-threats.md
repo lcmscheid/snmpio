@@ -563,6 +563,14 @@ though RFC 3414 §2.6 makes localisation a single short hash over the Master Key
    counter before adopting the pair in `discoverEngine` (`Client.cpp:619-630`). Add the test
    `ClientV3.AnUnauthenticatedReportNeverSynchronisesDiscovery`. Add a recovery path for an
    authenticated `notInTimeWindows` Report whose boots value is lower than the cache's.
+   *Added 2026-10-03, after this snapshot: fixed by #25, with the test named
+   `ClientV3.AnUnauthenticatedReportNeverSetsTheDiscoveredClock`, and with one deliberate
+   relaxation: the `notInTimeWindows` counter is not required. Any signed reply is accepted. An
+   Engine that has just booted finds boots and time zero timely and answers with a Response, and
+   the `simulator` image CI pins answers with a signed `unknownEngineIDs` Report. RFC 3414 §3.2
+   step 7(b) learns the pair from any authenticated message newer than the local notion, and at
+   discovery there is no local notion yet, so the signature is the whole bar. The recovery path
+   is #40.*
 2. **Turn the fuzz oracles back on (4.3).** Use `-UNDEBUG` or `__builtin_trap()` in the fuzzers.
    Re-run the existing corpus: an oracle that has been dead may have been hiding failures.
 3. **Safe `~Client` (3.1)**, following the seven rules there. In the same change, fix the late

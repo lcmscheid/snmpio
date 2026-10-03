@@ -280,10 +280,14 @@ class Client {
     Pdu response;
     UsmParameters security;  // what the reply's security parameters said
     bool answered = false;
-    // Whether the reply's digest was checked and matched. False for an unauthenticated Report,
-    // which the protocol obliges us to accept and which therefore must not be trusted with
-    // anything beyond asking us to discover the Engine again.
+    // Whether the accepted reply's digest was checked and matched -- that datagram's, never an
+    // earlier one dropped on the way. False for an unauthenticated Report, which the protocol
+    // obliges us to accept and which therefore must not be trusted with anything beyond failing
+    // this exchange or asking us to discover the Engine again.
     bool replyAuthenticated = false;
+    // Engine Discovery's time-sync phase, the one exchange an unsigned notInTimeWindows Report is
+    // dropped from rather than admitted: a genuine one there is always signed (see deliverV3).
+    bool timeSyncPhase = false;
     // Why the last unusable reply was discarded, or empty. Read only at expiry (ADR-0008).
     net::ErrorCode dropReason;
   };

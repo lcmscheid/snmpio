@@ -1,9 +1,11 @@
 // SNMPv3 authNoPriv GETBULK, in the coroutine form: authenticated under SHA-512, not encrypted.
 //
 //   ./example-getbulk 127.0.0.1 16161 authsha512 snmpio-interop
+#include <cstdint>
 #include <cstdlib>
 #include <iostream>
-#include <string>
+#include <utility>
+#include <vector>
 
 #include <snmpio/Client.hpp>
 
@@ -35,7 +37,7 @@ net::Awaitable<void> run(snmpio::Client& client, snmpio::Target target,
   }
   // The non-repeaters come first, then the repetitions interleaved row by row: ifDescr.1,
   // ifType.1, ifDescr.2, ifType.2, and so on. Each repetition is a GETNEXT, so it knows nothing of
-  // columns: on a Target with fewer than four interfaces, the later rows run on into ifType and
+  // columns: from an Agent with fewer than four interfaces, the later rows run on into ifType and
   // ifMtu. Stopping at the column is the caller's job, and the Walk's (walk.cpp). The Agent may
   // also send fewer rows than asked, to stay under its message size, and past the end of the MIB
   // view each one is EndOfMibView.

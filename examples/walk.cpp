@@ -6,12 +6,15 @@
 //
 // With a limit, the Walk is cancelled once that many rows have been printed, and ends in
 // Errc::WalkIncomplete -- a Walk stopped early never reports itself as a whole one.
+#include <charconv>
 #include <cstddef>
 #include <cstdlib>
 #include <iostream>
 #include <optional>
 #include <span>
 #include <string>
+#include <string_view>
+#include <system_error>
 
 #include <snmpio/Client.hpp>
 
@@ -20,34 +23,43 @@ namespace net = snmpio::net;
 net::Awaitable<void> run(snmpio::Client& client, snmpio::Target target,
                          snmpio::Credentials credentials, snmpio::Oid base,
                          std::optional<std::size_t> limit) {
-  // The default is GETBULK, ten rows a round trip. Zero walks with GETNEXT instead, one row a
-  // round trip: slower, and what a Target that mishandles GETBULK needs.
+  // GETBULK, ten rows a round trip, is the default; it is spelled out here only to show the knob.
+  // Zero walks with GETNEXT instead, one row a round trip: slower, and what an Agent that
+  // mishandles GETBULK needs.
   snmpio::WalkOptions options;
   options.maxRepetitions = 10;
 
   // A `total` cancellation lets the batch in hand finish and then stops the Walk cleanly, where a
   // `terminal` one would drop it at once. Returning false from the handler is the other way to
   // stop; the signal is the one that also reaches a Walk from outside it, a deadline say.
-  net::asio::cancellation_signal stop;
+  net::asio::cancellation_signal cancelWalk;
   std::size_t rows = 0;
-  auto onBatch = [&](std::span<const snmpio::Varbind> batch) {
+  bool withheld = false;  // rows of a batch the limit kept from being printed
+  auto onBatch = [&rows, &withheld, &cancelWalk, limit](std::span<const snmpio::Varbind> batch) {
     for (const auto& vb : batch) {
-      if (limit && rows == *limit) break;
+      if (limit && rows == *limit) {
+        withheld = true;
+        break;
+      }
       std::cout << vb.name.toString() << " = " << snmpio::toString(vb.val) << "\n";
       ++rows;
     }
     // The handler runs on the Client's strand, which is where the Walk observes its cancellation
     // state, so emitting from here needs no hop.
-    if (limit && rows == *limit) stop.emit(net::asio::cancellation_type::total);
+    if (limit && rows == *limit) cancelWalk.emit(net::asio::cancellation_type::total);
     return true;
   };
 
   net::ErrorCode ec;
   co_await client.asyncWalk(
       std::move(target), std::move(credentials), std::move(base), options, onBatch,
-      net::asio::bind_cancellation_slot(stop.slot(),
+      net::asio::bind_cancellation_slot(cancelWalk.slot(),
                                         net::asio::redirect_error(net::asio::use_awaitable, ec)));
 
+  // The Walk looks at the signal before its next request, so when the batch that crossed the
+  // limit was also its last, it completes as a whole one -- as it was, but not as printed. What
+  // the handler withheld makes this an incomplete Walk all the same.
+  if (!ec && withheld) ec = snmpio::make_error_code(snmpio::Errc::WalkIncomplete);
   if (ec) std::cerr << "walk ended after " << rows << " rows: " << ec.message() << "\n";
   client.stop();
 }
@@ -79,7 +91,16 @@ int main(int argc, char** argv) {
     return 2;
   }
   std::optional<std::size_t> limit;
-  if (argc == 7) limit = std::strtoul(argv[6], nullptr, 10);
+  if (argc == 7) {
+    const std::string_view arg = argv[6];
+    std::size_t n = 0;
+    const auto [end, err] = std::from_chars(arg.data(), arg.data() + arg.size(), n);
+    if (err != std::errc{} || end != arg.data() + arg.size() || n == 0) {
+      std::cerr << "bad limit: " << arg << "\n";
+      return 2;
+    }
+    limit = n;
+  }
 
   net::IoContext io;
   snmpio::Client client(io.get_executor());

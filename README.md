@@ -27,10 +27,10 @@ hardware checklist.
 
 ## Using it
 
-Both snippets below are cut from [`examples/`](examples/), which is a separate CMake project that
-`find_package()`s an installed snmpio — so building it is what proves the install rules work, and
-CI builds it on every push. Neither can drift from the other. There is one example per operation;
-the [table below](#the-examples) says what each shows.
+Both snippets below are condensed from [`examples/`](examples/), which is a separate CMake project
+that `find_package()`s an installed snmpio — so building it is what proves the install rules work,
+and CI builds it on every push: the examples and the package cannot drift apart. There is one
+example per operation; the [table below](#the-examples) says what each shows.
 
 A v2c GET, in the callback form:
 

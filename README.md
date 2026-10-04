@@ -4,16 +4,22 @@ An async C++20 library for SNMPv2c and SNMPv3 command generation — GET, GETNEX
 subtree walks — built directly on Asio with no net-snmp dependency. Manager side only.
 
 The domain vocabulary this codebase uses is defined in [`CONTEXT.md`](CONTEXT.md); the decisions
-that shaped it are in [`docs/adr/`](docs/adr).
+that shaped it are in [`docs/adr/`](docs/adr). What it defends against, and the test that holds
+each safety invariant, is in the [threat model](docs/threat-model.md).
 
 ## Status
 
-**Stage 4 of 6.** SNMPv2c and SNMPv3 both work end to end over UDP: GET, GETNEXT, GETBULK, SET and
+**Stage 4 of 7.** SNMPv2c and SNMPv3 both work end to end over UDP: GET, GETNEXT, GETBULK, SET and
 Walk, at all three Security Levels. Engine Discovery, time synchronisation and Report routing happen
 underneath and are never surfaced. `authPriv` speaks DES, AES-128, and AES-192/256 under both the
 Blumenthal and the Reeder key extension. Stage 5's automated half is done too: every operation
 reaches `snmpd` and both Simulator images in CI, and what stage 5 still needs is a run of the
 hardware checklist.
+
+Stage 6 makes snmpio safe to depend on for a system that polls many Targets from a thread pool. The
+[threat model](docs/threat-model.md) lists every invariant that stage holds, and says which are not
+held yet: destroying a Client with Outstanding Requests, unpredictable Message IDs, and bounded
+caches and Walks are among them. The sanitizer builds the rest is made under are done.
 
 | Stage | Deliverable | State |
 |---|---|---|
@@ -23,7 +29,8 @@ hardware checklist.
 | 3 | Async engine discovery, time sync, Report handling | **done** |
 | 4 | Privacy: AES-128, then AES-192/256 under both key extensions, DES behind the legacy provider | **done** |
 | 5 | Interop matrix vs the Simulator, `snmpd`, and real vendor gear | automated half **done**; the [hardware checklist](#pre-release-hardware-checklist) remains |
-| 6 | Docs, cancellation semantics, error taxonomy, packaging | |
+| 6 | Safe to depend on: the [threat model](docs/threat-model.md), sanitizer and stress harness, destroying a Client stops it, hardening against a hostile network | sanitizer builds **done**; the rest in progress |
+| 7 | Docs, packaging and release | |
 
 ## Using it
 

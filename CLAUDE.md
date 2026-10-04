@@ -10,7 +10,7 @@ automated half is done; the hardware checklist remains.
 
 - **`CONTEXT.md`** — the domain glossary. Its _Avoid:_ lists are binding: this codebase says
   Target, not "device"; Command Generator, not "manager"; Credentials, not "auth config".
-- **`docs/adr/`** — eight decisions, several of which look wrong until you read why. If a change
+- **`docs/adr/`** — ten decisions, several of which look wrong until you read why. If a change
   contradicts one, say so explicitly rather than quietly overriding it.
 
 ## Build

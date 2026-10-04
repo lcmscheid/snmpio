@@ -23,7 +23,10 @@ Single-context. This repo has no `CONTEXT-MAP.md` and does not need one.
 │   ├── 0004-walks-stream-by-default.md
 │   ├── 0005-support-obsolete-crypto-including-des-and-the-reeder-draft.md
 │   ├── 0006-a-deliberately-misbehaving-simulator-is-the-primary-test-target.md
-│   └── 0007-apache-2-0-matching-the-simulator.md
+│   ├── 0007-apache-2-0-matching-the-simulator.md
+│   ├── 0008-a-discarded-reply-reports-why-at-the-deadline.md
+│   ├── 0009-destroying-a-client-stops-it.md
+│   └── 0010-a-signed-lower-boots-report-rediscovers-the-engine.md
 ├── docs/research/             ← the sizing and prior-art note behind the staged plan
 ├── include/snmpio/ · src/ · tests/ · fuzz/
 ```

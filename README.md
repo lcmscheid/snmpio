@@ -239,7 +239,8 @@ claims to:
   package builds with whatever flags they choose, and CI's install-and-consume job checks that.
 
 `docs/research/snmpio-safety-threats.md` cites the source for each: §3.4 for the compiler bug, §4–5
-for the rest.
+for the rest. The one addition is sizing Asio's recycling cache to zero, which older Asio needs
+because it lacks one of the note's macros; `CMakeLists.txt` cites the Asio header at the definition.
 
 CI runs the suite under ASan+UBSan and under TSan on every commit, and runs one interop cell —
 against `snmpd` — from an ASan+UBSan build. There is deliberately no MemorySanitizer build, which

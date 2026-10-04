@@ -57,7 +57,12 @@ endif()
 # ---------------------------------------------------------------------------
 # Resolved now rather than at first use: the Asio choice appears in public headers, so a consumer
 # that gets it wrong should find out at configure time, not from a wall of template errors.
+# Asio's own macros and headers carry the flavour's prefix -- BOOST_ASIO_VERSION and
+# <boost/asio/version.hpp> under Boost, ASIO_VERSION and <asio/version.hpp> standalone -- and the
+# sanitizer builds below name both.
 if(SNMP_USE_BOOST_ASIO)
+  set(SNMPIO_ASIO_MACRO_PREFIX BOOST_ASIO)
+  set(SNMPIO_ASIO_HEADER_PREFIX boost/asio)
   # Boost.System has been header-only since 1.69 and some distributions no longer ship a
   # boost_system component at all, so ask for the component and fall back to Boost::headers.
   find_package(Boost 1.77 QUIET CONFIG OPTIONAL_COMPONENTS system)
@@ -75,6 +80,8 @@ if(SNMP_USE_BOOST_ASIO)
     set(SNMPIO_ASIO_TARGET Boost::headers)
   endif()
 else()
+  set(SNMPIO_ASIO_MACRO_PREFIX ASIO)
+  set(SNMPIO_ASIO_HEADER_PREFIX asio)
   # 1.21 is where per-operation cancellation arrived, which the Walk's total/terminal split needs.
   # Only the CONFIG path can be checked; the include-directory fallback below is a bare header
   # tree with no version to read.
@@ -164,7 +171,9 @@ target_link_libraries(snmpio PRIVATE snmpio_warnings)
 # abort instead of reading past the end (research note 5.2). Both are ABI-neutral, so a consumer
 # built without them links against this library unchanged. PRIVATE on our own targets only --
 # imposing them through the exported interface would be choosing a consumer's build flags. Each
-# macro is ignored by the other library, so both are set whichever is in use.
+# macro is ignored by the other library, so both are set whichever is in use. A list rather than an
+# INTERFACE target: a target linked even PRIVATE to a static library is exported with it, and its
+# definitions would then sit in the installed snmpioTargets.cmake.
 set(SNMPIO_STDLIB_HARDENING
   _GLIBCXX_ASSERTIONS
   _LIBCPP_HARDENING_MODE=_LIBCPP_HARDENING_MODE_FAST)
@@ -172,20 +181,17 @@ target_compile_definitions(snmpio PRIVATE ${SNMPIO_STDLIB_HARDENING})
 
 # Asio hands freed handler and coroutine-frame memory to a thread-local cache and reuses it, so a
 # use-after-free in a sanitizer build touches a live recycled block and goes unreported. None of
-# these macros is in Asio's documented macro table; detail/recycling_allocator.hpp,
-# impl/awaitable.hpp and detail/thread_info_base.hpp are where they are read (research note 4.1).
-# The small-block one is absent from Asio 1.28.1 and 1.30.2 -- CI's Ubuntu ships 1.28.1 -- so the
-# cache is also sized to zero, which every one of those versions reads: the cache's loops are then
-# empty, and every block goes straight back to the heap. Both spellings, because which one is read
-# depends on the Asio flavour (ADR-0002). Every sanitizer build defines them -- ASan, TSan and the
-# fuzzers.
+# these macros is in Asio's documented macro table. The two DISABLE ones are read in
+# detail/recycling_allocator.hpp and impl/awaitable.hpp (research note 4.1), but the small-block one
+# is absent from Asio 1.28.1 and 1.30.2, and CI's Ubuntu ships 1.28.1. So the cache is also sized to
+# zero: detail/thread_info_base.hpp reads the size in 1.28.1 and 1.38.2 alike, the cache's loops are
+# then empty, and every block goes straight back to the heap. That size makes Asio declare a
+# zero-length array, a GNU extension -Wpedantic would flag were Asio's headers not system ones.
+# Every sanitizer build defines these -- ASan, TSan and the fuzzers.
 set(SNMPIO_ASIO_NO_RECYCLING
-  ASIO_DISABLE_AWAITABLE_FRAME_RECYCLING
-  ASIO_DISABLE_SMALL_BLOCK_RECYCLING
-  ASIO_RECYCLING_ALLOCATOR_CACHE_SIZE=0
-  BOOST_ASIO_DISABLE_AWAITABLE_FRAME_RECYCLING
-  BOOST_ASIO_DISABLE_SMALL_BLOCK_RECYCLING
-  BOOST_ASIO_RECYCLING_ALLOCATOR_CACHE_SIZE=0)
+  ${SNMPIO_ASIO_MACRO_PREFIX}_DISABLE_AWAITABLE_FRAME_RECYCLING
+  ${SNMPIO_ASIO_MACRO_PREFIX}_DISABLE_SMALL_BLOCK_RECYCLING
+  ${SNMPIO_ASIO_MACRO_PREFIX}_RECYCLING_ALLOCATOR_CACHE_SIZE=0)
 
 # Public, so everything linking snmpio is built the same way: a recycling-off translation unit
 # freeing a frame a recycling-on one allocated would be the mismatch the macros exist to avoid.
@@ -204,15 +210,9 @@ if(SNMPIO_TSAN)
   # before Asio annotated them for TSan (asio 39278c4, first in 1.38.2) every handler hand-off
   # between threads is a race it cannot see and a green run means "not detected". Older Asio gets
   # its fenced blocks switched off instead (research note 4.2).
-  # Each flavour caches its own answer, so switching SNMP_USE_BOOST_ASIO in an existing build
-  # directory asks again rather than reusing the other flavour's result.
-  if(SNMP_USE_BOOST_ASIO)
-    set(asioMacroPrefix BOOST_ASIO)
-    set(asioHeaderDir boost/asio)
-  else()
-    set(asioMacroPrefix ASIO)
-    set(asioHeaderDir asio)
-  endif()
+  # Asked afresh on every configure: a cached answer would outlive a switch of flavour or of Asio
+  # install in an existing build directory, and the check is one small compile.
+  unset(SNMPIO_ASIO_FENCES_TSAN_AWARE CACHE)
   include(CheckCXXSourceCompiles)
   include(CMakePushCheckState)
   cmake_push_check_state(RESET)
@@ -220,16 +220,16 @@ if(SNMPIO_TSAN)
   set(CMAKE_REQUIRED_LIBRARIES ${SNMPIO_ASIO_TARGET})
   set(CMAKE_REQUIRED_INCLUDES ${SNMPIO_ASIO_INCLUDE_DIRS})
   check_cxx_source_compiles("
-    #include <${asioHeaderDir}/version.hpp>
-    #if ${asioMacroPrefix}_VERSION < 103802
+    #include <${SNMPIO_ASIO_HEADER_PREFIX}/version.hpp>
+    #if ${SNMPIO_ASIO_MACRO_PREFIX}_VERSION < 103802
     #error fenced blocks not annotated for TSan
     #endif
-    int main() { return 0; }" SNMPIO_${asioMacroPrefix}_FENCES_TSAN_AWARE)
+    int main() { return 0; }" SNMPIO_ASIO_FENCES_TSAN_AWARE)
   cmake_pop_check_state()
-  if(NOT SNMPIO_${asioMacroPrefix}_FENCES_TSAN_AWARE)
+  if(NOT SNMPIO_ASIO_FENCES_TSAN_AWARE)
     message(STATUS "snmpio: Asio predates 1.38.2; TSan build disables its fenced blocks")
     target_compile_definitions(snmpio_sanitizers INTERFACE
-      ASIO_DISABLE_FENCED_BLOCK BOOST_ASIO_DISABLE_FENCED_BLOCK)
+      ${SNMPIO_ASIO_MACRO_PREFIX}_DISABLE_FENCED_BLOCK)
   endif()
 endif()
 target_link_libraries(snmpio PUBLIC snmpio_sanitizers)

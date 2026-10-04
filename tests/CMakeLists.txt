@@ -32,6 +32,7 @@ add_executable(snmpio_tests
 
 target_link_libraries(snmpio_tests PRIVATE snmpio snmpio_warnings GTest::gtest GTest::gtest_main)
 target_include_directories(snmpio_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_compile_definitions(snmpio_tests PRIVATE ${SNMPIO_STDLIB_HARDENING})
 
 include(GoogleTest)
 gtest_discover_tests(snmpio_tests DISCOVERY_TIMEOUT 30)

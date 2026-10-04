@@ -22,8 +22,19 @@ option(SNMP_USE_BOOST_ASIO "Build against Boost.Asio rather than standalone Asio
 option(SNMPIO_BUILD_TESTS "Build the unit tests" ${SNMPIO_IS_TOP_LEVEL})
 option(SNMPIO_BUILD_FUZZERS "Build the libFuzzer targets (requires Clang)" OFF)
 option(SNMPIO_SANITIZE "Enable address and undefined-behaviour sanitizers" OFF)
+option(SNMPIO_TSAN "Enable the thread sanitizer (Clang; not together with SNMPIO_SANITIZE)" OFF)
 option(SNMPIO_WERROR "Treat warnings as errors" OFF)
 option(SNMPIO_CLANG_TIDY "Run clang-tidy as part of the build" OFF)
+
+# TSan and ASan cannot share a process, and GCC with TSan cannot build Asio warning-free: it warns
+# that TSan does not model std::atomic_thread_fence, which Asio's fenced blocks use (research note
+# 4.2). Clang is the one compiler the TSan build is tested with.
+if(SNMPIO_TSAN AND SNMPIO_SANITIZE)
+  message(FATAL_ERROR "SNMPIO_TSAN and SNMPIO_SANITIZE cannot be combined; pick one.")
+endif()
+if(SNMPIO_TSAN AND NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+  message(FATAL_ERROR "SNMPIO_TSAN requires Clang; configure with -DCMAKE_CXX_COMPILER=clang++.")
+endif()
 
 # clang-tidy needs a compilation database whenever it is run out of band, so always emit one.
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
@@ -46,7 +57,12 @@ endif()
 # ---------------------------------------------------------------------------
 # Resolved now rather than at first use: the Asio choice appears in public headers, so a consumer
 # that gets it wrong should find out at configure time, not from a wall of template errors.
+# Asio's own macros and headers carry the flavour's prefix -- BOOST_ASIO_VERSION and
+# <boost/asio/version.hpp> under Boost, ASIO_VERSION and <asio/version.hpp> standalone -- and the
+# sanitizer builds below name both.
 if(SNMP_USE_BOOST_ASIO)
+  set(SNMPIO_ASIO_MACRO_PREFIX BOOST_ASIO)
+  set(SNMPIO_ASIO_HEADER_PREFIX boost/asio)
   # Boost.System has been header-only since 1.69 and some distributions no longer ship a
   # boost_system component at all, so ask for the component and fall back to Boost::headers.
   find_package(Boost 1.77 QUIET CONFIG OPTIONAL_COMPONENTS system)
@@ -64,6 +80,8 @@ if(SNMP_USE_BOOST_ASIO)
     set(SNMPIO_ASIO_TARGET Boost::headers)
   endif()
 else()
+  set(SNMPIO_ASIO_MACRO_PREFIX ASIO)
+  set(SNMPIO_ASIO_HEADER_PREFIX asio)
   # 1.21 is where per-operation cancellation arrived, which the Walk's total/terminal split needs.
   # Only the CONFIG path can be checked; the include-directory fallback below is a bare header
   # tree with no version to read.
@@ -149,11 +167,70 @@ else()
 endif()
 target_link_libraries(snmpio PRIVATE snmpio_warnings)
 
+# Standard-library hardening: bounds-checked operator[], front() on an empty container and the like
+# abort instead of reading past the end (research note 5.2). Both are ABI-neutral, so a consumer
+# built without them links against this library unchanged. PRIVATE on our own targets only --
+# imposing them through the exported interface would be choosing a consumer's build flags. Each
+# macro is ignored by the other library, so both are set whichever is in use. A list rather than an
+# INTERFACE target: a target linked even PRIVATE to a static library is exported with it, and its
+# definitions would then sit in the installed snmpioTargets.cmake.
+set(SNMPIO_STDLIB_HARDENING
+  _GLIBCXX_ASSERTIONS
+  _LIBCPP_HARDENING_MODE=_LIBCPP_HARDENING_MODE_FAST)
+target_compile_definitions(snmpio PRIVATE ${SNMPIO_STDLIB_HARDENING})
+
+# Asio hands freed handler and coroutine-frame memory to a thread-local cache and reuses it, so a
+# use-after-free in a sanitizer build touches a live recycled block and goes unreported. None of
+# these macros is in Asio's documented macro table. The two DISABLE ones are read in
+# detail/recycling_allocator.hpp and impl/awaitable.hpp (research note 4.1), but the small-block one
+# is absent from Asio 1.28.1 and 1.30.2, and CI's Ubuntu ships 1.28.1. So the cache is also sized to
+# zero: detail/thread_info_base.hpp reads the size in 1.28.1 and 1.38.2 alike, the cache's loops are
+# then empty, and every block goes straight back to the heap. That size makes Asio declare a
+# zero-length array, a GNU extension -Wpedantic would flag were Asio's headers not system ones.
+# Every sanitizer build defines these -- ASan, TSan and the fuzzers.
+set(SNMPIO_ASIO_NO_RECYCLING
+  ${SNMPIO_ASIO_MACRO_PREFIX}_DISABLE_AWAITABLE_FRAME_RECYCLING
+  ${SNMPIO_ASIO_MACRO_PREFIX}_DISABLE_SMALL_BLOCK_RECYCLING
+  ${SNMPIO_ASIO_MACRO_PREFIX}_RECYCLING_ALLOCATOR_CACHE_SIZE=0)
+
+# Public, so everything linking snmpio is built the same way: a recycling-off translation unit
+# freeing a frame a recycling-on one allocated would be the mismatch the macros exist to avoid.
 add_library(snmpio_sanitizers INTERFACE)
 if(SNMPIO_SANITIZE AND NOT MSVC)
   target_compile_options(snmpio_sanitizers INTERFACE
     -fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=undefined)
   target_link_options(snmpio_sanitizers INTERFACE -fsanitize=address,undefined)
+  target_compile_definitions(snmpio_sanitizers INTERFACE ${SNMPIO_ASIO_NO_RECYCLING})
+endif()
+if(SNMPIO_TSAN)
+  target_compile_options(snmpio_sanitizers INTERFACE -fsanitize=thread -fno-omit-frame-pointer)
+  target_link_options(snmpio_sanitizers INTERFACE -fsanitize=thread)
+  target_compile_definitions(snmpio_sanitizers INTERFACE ${SNMPIO_ASIO_NO_RECYCLING})
+  # TSan does not model std::atomic_thread_fence, which Asio's fenced blocks are built on, so
+  # before Asio annotated them for TSan (asio 39278c4, first in 1.38.2) every handler hand-off
+  # between threads is a race it cannot see and a green run means "not detected". Older Asio gets
+  # its fenced blocks switched off instead (research note 4.2).
+  # Asked afresh on every configure: a cached answer would outlive a switch of flavour or of Asio
+  # install in an existing build directory, and the check is one small compile.
+  unset(SNMPIO_ASIO_FENCES_TSAN_AWARE CACHE)
+  include(CheckCXXSourceCompiles)
+  include(CMakePushCheckState)
+  cmake_push_check_state(RESET)
+  set(CMAKE_REQUIRED_QUIET ON)
+  set(CMAKE_REQUIRED_LIBRARIES ${SNMPIO_ASIO_TARGET})
+  set(CMAKE_REQUIRED_INCLUDES ${SNMPIO_ASIO_INCLUDE_DIRS})
+  check_cxx_source_compiles("
+    #include <${SNMPIO_ASIO_HEADER_PREFIX}/version.hpp>
+    #if ${SNMPIO_ASIO_MACRO_PREFIX}_VERSION < 103802
+    #error fenced blocks not annotated for TSan
+    #endif
+    int main() { return 0; }" SNMPIO_ASIO_FENCES_TSAN_AWARE)
+  cmake_pop_check_state()
+  if(NOT SNMPIO_ASIO_FENCES_TSAN_AWARE)
+    message(STATUS "snmpio: Asio predates 1.38.2; TSan build disables its fenced blocks")
+    target_compile_definitions(snmpio_sanitizers INTERFACE
+      ${SNMPIO_ASIO_MACRO_PREFIX}_DISABLE_FENCED_BLOCK)
+  endif()
 endif()
 target_link_libraries(snmpio PUBLIC snmpio_sanitizers)
 

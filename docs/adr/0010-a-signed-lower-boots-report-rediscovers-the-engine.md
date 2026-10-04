@@ -54,7 +54,9 @@ the time-sync phase's own `msgID`, which is the exposure every first discovery a
 Within one boot, a time that has gone backwards is not covered. An Engine whose clock was stepped
 back without a boots increment breaks section 2.2.2 the same way, but the Report it signs names the
 cached boots. The Client refuses that pair until the Engine's clock passes the last time it saw,
-so the lockout lasts about as long as the step and then heals. Whether to recover sooner is #42.
+so the lockout lasts about as long as the step and then heals. Recovering sooner was declined
+(#42): it would act on a same-boots pair step 7(b) deems untimely, for a case that already fixes
+itself and that only an Engine breaking the RFC can cause.
 
 `InteropFaults.RediscoversAnEngineWhoseBootsWentBackwards` runs this path against the Simulator
 release, which signs the Report. `InteropFaults.RefusesABootsRegression` keeps pinning the refusal

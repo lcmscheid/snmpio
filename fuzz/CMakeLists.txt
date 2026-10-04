@@ -4,11 +4,16 @@ if(NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang")
     "SNMPIO_BUILD_FUZZERS requires Clang; configure with -DCMAKE_CXX_COMPILER=clang++.")
 endif()
 
+# -UNDEBUG because the asserts -- the fuzzers' and the library's they instrument -- are the oracles, and the build type -- RelWithDebInfo unless
+# told otherwise -- defines NDEBUG and would compile every one of them out, leaving a fuzzer that
+# only finds crashes. Target options come after the build type's flags, so this one wins.
 add_library(snmpio_fuzz_options INTERFACE)
 target_compile_options(snmpio_fuzz_options INTERFACE
   -g -O1 -fsanitize=fuzzer-no-link,address,undefined -fno-omit-frame-pointer
-  -fno-sanitize-recover=undefined)
+  -fno-sanitize-recover=undefined -UNDEBUG)
 target_link_options(snmpio_fuzz_options INTERFACE -fsanitize=fuzzer,address,undefined)
+target_compile_definitions(snmpio_fuzz_options INTERFACE
+  ${SNMPIO_ASIO_NO_RECYCLING} ${SNMPIO_STDLIB_HARDENING})
 
 # The library itself has to be instrumented, or coverage feedback sees nothing.
 add_library(snmpio_fuzzed STATIC

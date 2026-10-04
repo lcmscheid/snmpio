@@ -13,19 +13,27 @@ jobs:
   # ADR-0002: both Asio flavours are built on every commit -- Boost.Asio is the default, but the
   # untested one rots, and because the choice appears in every public signature it cannot be
   # repaired later without a break.
+  #
+  # The TSan cell is on clang-20 rather than the runner's clang 18, which predates the fix for
+  # llvm#72006 -- clang touching a coroutine frame after it suspends, a race of the compiler's own
+  # making (research note 3.4). This Ubuntu's Asio is 1.28.1, whose fences TSan cannot see;
+  # CMakeLists.txt says how the TSan build deals with that, and the configure log says it did.
   build:
-    name: ${{ matrix.compiler }} / ${{ matrix.asio }}${{ matrix.sanitize && ' / asan+ubsan' || '' }}
+    name: ${{ matrix.compiler }} / ${{ matrix.asio }}${{ matrix.sanitizer != 'none' && format(' / {0}', matrix.sanitizer) || '' }}
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
         compiler: [gcc, clang]
         asio: [boost, standalone]
-        sanitize: [false]
+        sanitizer: [none]
         include:
           - compiler: clang
             asio: boost
-            sanitize: true
+            sanitizer: asan+ubsan
+          - compiler: clang-20
+            asio: boost
+            sanitizer: tsan
     steps:
       - uses: actions/checkout@v5
 
@@ -38,14 +46,25 @@ jobs:
           else
             sudo apt-get install -y libasio-dev
           fi
+          if [ "${{ matrix.compiler }}" = "clang-20" ]; then
+            sudo apt-get install -y clang-20 libclang-rt-20-dev
+          fi
+
+      # The runner's 32 bits of mmap randomisation put mappings where TSan's shadow memory expects
+      # none, and it can die at startup with "unexpected memory mapping"
+      # (actions/runner-images#9491). 28 is the kernel's old default.
+      - name: Narrow ASLR for TSan
+        if: matrix.sanitizer == 'tsan'
+        run: sudo sysctl vm.mmap_rnd_bits=28
 
       - name: Configure
         run: |
           cmake -S . -B build -G Ninja \
-            -DCMAKE_BUILD_TYPE=${{ matrix.sanitize && 'Debug' || 'RelWithDebInfo' }} \
-            -DCMAKE_CXX_COMPILER=${{ matrix.compiler == 'gcc' && 'g++' || 'clang++' }} \
+            -DCMAKE_BUILD_TYPE=${{ matrix.sanitizer != 'none' && 'Debug' || 'RelWithDebInfo' }} \
+            -DCMAKE_CXX_COMPILER=${{ matrix.compiler == 'gcc' && 'g++' || matrix.compiler == 'clang-20' && 'clang++-20' || 'clang++' }} \
             -DSNMP_USE_BOOST_ASIO=${{ matrix.asio == 'boost' && 'ON' || 'OFF' }} \
-            -DSNMPIO_SANITIZE=${{ matrix.sanitize && 'ON' || 'OFF' }} \
+            -DSNMPIO_SANITIZE=${{ matrix.sanitizer == 'asan+ubsan' && 'ON' || 'OFF' }} \
+            -DSNMPIO_TSAN=${{ matrix.sanitizer == 'tsan' && 'ON' || 'OFF' }} \
             -DSNMPIO_WERROR=ON
 
       - name: Build
@@ -72,6 +91,16 @@ jobs:
             -DSNMPIO_BUILD_TESTS=OFF \
             -DSNMPIO_BUILD_FUZZERS=ON
           cmake --build build-fuzz
+
+      # The fuzzers' asserts are their oracles and are live whatever the build type
+      # (fuzz/CMakeLists.txt), so the seed corpus is replayed on its own first: a regression an
+      # existing seed already reaches fails here, by name, before any mutation is involved.
+      - name: Replay the seed corpus
+        run: |
+          for target in FuzzBerValue FuzzBerVarbindList FuzzOidText FuzzV2cMessage \
+                        FuzzV3Message; do
+            ./build-fuzz/fuzz/$target fuzz/corpus -runs=0
+          done
 
       # A short run per commit, so a regression that the seed corpus already covers is caught
       # immediately. Long campaigns belong in a scheduled job, not on the PR path.
@@ -110,13 +139,21 @@ jobs:
   # everything about it this job needs: where each Agent is pinned, why there are two Simulators,
   # and each Agent's capability flags. None of that is repeated here, so the two cannot drift, and
   # a failure here is reproduced with the one command the job ran.
+  #
+  # One cell runs the suite from an ASan+UBSan build against snmpd: replies from an Agent we did not
+  # write drive the decoder and the Client down paths the Scripted Agent never takes, and this is
+  # where a memory error on one of them would show.
   interop:
-    name: interop (${{ matrix.agent }})
+    name: interop (${{ matrix.agent }}${{ matrix.sanitize && ' / asan+ubsan' || '' }})
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
         agent: [snmpd, simulator, simulator-release]
+        sanitize: [false]
+        include:
+          - agent: snmpd
+            sanitize: true
     steps:
       - uses: actions/checkout@v5
 
@@ -127,7 +164,8 @@ jobs:
 
       - name: Build
         run: |
-          cmake -S . -B build -G Ninja -DSNMPIO_WERROR=ON
+          cmake -S . -B build -G Ninja -DSNMPIO_WERROR=ON \
+            ${{ matrix.sanitize && '-DCMAKE_BUILD_TYPE=Debug -DCMAKE_CXX_COMPILER=clang++ -DSNMPIO_SANITIZE=ON' || '' }}
           cmake --build build
 
       # It returns once the Agent answers, and fails with the Agent's log if it never does. The
@@ -183,8 +221,26 @@ jobs:
       - name: Build the examples against it
         run: |
           cmake -S examples -B build/examples -G Ninja \
-            -DCMAKE_PREFIX_PATH="$RUNNER_TEMP/prefix"
+            -DCMAKE_PREFIX_PATH="$RUNNER_TEMP/prefix" -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
           cmake --build build/examples
+
+      # Standard-library hardening is PRIVATE to our own targets: choosing it for a consumer would
+      # be choosing their build flags. So the library must compile with it and the examples, which
+      # see only what the installed package exports, must not. grep exits 1 for "no match" and 2 for
+      # a file it could not read, and only the first is a pass -- a missing file proves nothing.
+      - name: Hardening stays ours
+        run: |
+          pattern='_GLIBCXX_ASSERTIONS|_LIBCPP_HARDENING_MODE'
+          grep -qE "$pattern" build/compile_commands.json \
+            || { echo "the library was built without standard-library hardening"; exit 1; }
+          status=0
+          grep -qE "$pattern" build/examples/compile_commands.json \
+            "$RUNNER_TEMP"/prefix/lib*/cmake/snmpio/*.cmake || status=$?
+          case $status in
+            1) ;;
+            0) echo "an installed consumer inherited standard-library hardening"; exit 1 ;;
+            *) echo "nothing to check: the consumer's files are missing"; exit 1 ;;
+          esac
 
   style:
     name: clang-format + clang-tidy

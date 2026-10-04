@@ -42,6 +42,16 @@
       }
     },
     {
+      "name": "tsan",
+      "inherits": "default",
+      "displayName": "TSan (Clang only)",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "CMAKE_CXX_COMPILER": "clang++",
+        "SNMPIO_TSAN": "ON"
+      }
+    },
+    {
       "name": "tidy",
       "inherits": "default",
       "displayName": "clang-tidy in the build",
@@ -66,6 +76,7 @@
     { "name": "standalone", "configurePreset": "standalone" },
     { "name": "debug", "configurePreset": "debug" },
     { "name": "asan", "configurePreset": "asan" },
+    { "name": "tsan", "configurePreset": "tsan" },
     { "name": "tidy", "configurePreset": "tidy" },
     { "name": "fuzz", "configurePreset": "fuzz" }
   ],
@@ -79,6 +90,7 @@
     { "name": "default", "inherits": "base", "configurePreset": "default" },
     { "name": "standalone", "inherits": "base", "configurePreset": "standalone" },
     { "name": "debug", "inherits": "base", "configurePreset": "debug" },
-    { "name": "asan", "inherits": "base", "configurePreset": "asan" }
+    { "name": "asan", "inherits": "base", "configurePreset": "asan" },
+    { "name": "tsan", "inherits": "base", "configurePreset": "tsan" }
   ]
 }

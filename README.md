@@ -177,7 +177,7 @@ here:
 ## Building
 
 ```sh
-cmake --preset default      # or: standalone, debug, asan, tidy, fuzz
+cmake --preset default      # or: standalone, debug, asan, tsan, tidy, fuzz
 cmake --build --preset default
 ctest --preset default
 ```
@@ -200,6 +200,7 @@ To avoid the Boost dependency, use the `standalone` preset — standalone Asio i
 | `standalone` | Standalone Asio, `RelWithDebInfo` |
 | `debug` | Boost.Asio, `Debug` |
 | `asan` | Boost.Asio, `Debug`, address + undefined-behaviour sanitizers |
+| `tsan` | Clang, Boost.Asio, `Debug`, thread sanitizer |
 | `tidy` | Clang with `clang-tidy` folded into the build |
 | `fuzz` | Clang, fuzzers on, tests off |
 
@@ -212,11 +213,38 @@ CLion, Qt Creator) will offer these directly.
 | `SNMPIO_BUILD_TESTS` | on if top-level | Build the GoogleTest suite |
 | `SNMPIO_BUILD_FUZZERS` | `OFF` | Build the libFuzzer targets (Clang only) |
 | `SNMPIO_SANITIZE` | `OFF` | Address and undefined-behaviour sanitizers |
+| `SNMPIO_TSAN` | `OFF` | Thread sanitizer (Clang only; not with `SNMPIO_SANITIZE`) |
 | `SNMPIO_WERROR` | `OFF` | Treat warnings as errors |
 
 The Asio choice appears in every public signature, so it is resolved at configure time rather than
 at first use — a consumer who gets it wrong finds out from CMake instead of from a page of template
 errors. CI builds both.
+
+### Sanitizer and hardening builds
+
+A green sanitizer run should mean the sanitizer looked, so each build is set up to see what it
+claims to:
+
+- **Asio's memory recycling is off** in every sanitizer build — `asan`, `tsan` and `fuzz`.
+  Otherwise Asio hands a freed handler or coroutine frame to a thread-local cache and reuses it, and
+  a use-after-free touches a live block that ASan has no reason to report.
+- **`tsan` knows Asio's synchronisation.** TSan does not model `std::atomic_thread_fence`, which
+  Asio's fenced blocks are built on. Asio 1.38.2 annotates them for TSan; on anything older, the
+  `tsan` build switches them off and the configure log says so. Use a current Clang: the CI cell is
+  on clang-20, because clang 18 predates the fix for a coroutine race of the compiler's own making
+  (llvm#72006).
+- **Standard-library hardening** — `_GLIBCXX_ASSERTIONS`, and libc++'s fast hardening mode where
+  libc++ is used — is on for this repository's own targets in every build, so an out-of-bounds
+  `operator[]` aborts instead of reading on. It is never exported: a consumer of the installed
+  package builds with whatever flags they choose, and CI's install-and-consume job checks that.
+
+`docs/research/snmpio-safety-threats.md` cites the source for each: §3.4 for the compiler bug, §4–5
+for the rest.
+
+CI runs the suite under ASan+UBSan and under TSan on every commit, and runs one interop cell —
+against `snmpd` — from an ASan+UBSan build. There is deliberately no MemorySanitizer build, which
+would need OpenSSL and the standard library instrumented too, and no GCC ASan build alongside
+Clang's.
 
 ## Naming
 
@@ -588,7 +616,15 @@ mkdir -p .fuzz-work
 ```
 
 The first directory is where libFuzzer writes what it finds; `fuzz/corpus` is passed read-only so
-the curated seeds stay curated.
+the curated seeds stay curated. To replay the seeds alone, as CI does before it fuzzes:
+
+```sh
+./build/fuzz/fuzz/FuzzV2cMessage fuzz/corpus -runs=0
+```
+
+The fuzzers' `assert`s are their oracles, so they are live in every fuzz build: the build type
+defines `NDEBUG`, and the fuzz targets undefine it. The targets are also built under ASan+UBSan with
+Asio's recycling off and standard-library hardening on, as the sanitizer builds are.
 
 Five targets, each asserting a round-trip identity rather than merely "does not crash":
 

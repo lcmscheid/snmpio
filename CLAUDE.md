@@ -22,6 +22,7 @@ Presets only — `cmake --preset <name>`, each writing to `build/<preset>/`.
 | `default` | Boost.Asio, `RelWithDebInfo` (the project default, ADR-0002) |
 | `standalone` | Standalone Asio — needs `pacman -S asio` |
 | `debug` · `asan` | Debug, optionally ASan + UBSan |
+| `tsan` | Clang, Debug, TSan — fenced blocks off on Asio before 1.38.2 |
 | `tidy` · `fuzz` | clang-tidy folded into the build; Clang fuzzers |
 
 ```sh

@@ -1,7 +1,7 @@
 # snmpio
 
 An async C++20 library for SNMPv2c and SNMPv3 command generation — GET, GETNEXT, GETBULK, SET and
-subtree walks — built directly on Asio with no net-snmp dependency. Manager side only.
+subtree walks — built directly on Asio with no net-snmp dependency. No Agent side.
 
 The domain vocabulary this codebase uses is defined in [`CONTEXT.md`](CONTEXT.md); the decisions
 that shaped it are in [`docs/adr/`](docs/adr). What it defends against, and the test that holds
@@ -17,9 +17,9 @@ reaches `snmpd` and both Simulator images in CI, and what stage 5 still needs is
 hardware checklist.
 
 Stage 6 makes snmpio safe to depend on for a system that polls many Targets from a thread pool. The
-[threat model](docs/threat-model.md) lists every invariant that stage holds, and says which are not
-held yet: destroying a Client with Outstanding Requests, unpredictable Message IDs, and bounded
-caches and Walks are among them. The sanitizer builds the rest is made under are done.
+[threat model](docs/threat-model.md) lists every invariant that stage holds, names the test that
+holds each one, and says which are not held yet. The sanitizer builds the rest is made under are
+done.
 
 | Stage | Deliverable | State |
 |---|---|---|

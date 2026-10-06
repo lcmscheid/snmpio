@@ -1,29 +1,34 @@
 # snmpio
 
 An async C++20 library for SNMPv2c and SNMPv3 command generation — GET, GETNEXT, GETBULK, SET and
-subtree walks — built directly on Asio with no net-snmp dependency. Manager side only.
+subtree walks — built directly on Asio with no net-snmp dependency. No Agent side.
 
 The domain vocabulary this codebase uses is defined in [`CONTEXT.md`](CONTEXT.md); the decisions
-that shaped it are in [`docs/adr/`](docs/adr).
+that shaped it are in [`docs/adr/`](docs/adr). What it defends against, and the test that holds
+each safety invariant, is in the [threat model](docs/threat-model.md).
 
 ## Status
 
-**Stage 4 of 6.** SNMPv2c and SNMPv3 both work end to end over UDP: GET, GETNEXT, GETBULK, SET and
+**Stage 4 of 7.** SNMPv2c and SNMPv3 both work end to end over UDP: GET, GETNEXT, GETBULK, SET and
 Walk, at all three Security Levels. Engine Discovery, time synchronisation and Report routing happen
 underneath and are never surfaced. `authPriv` speaks DES, AES-128, and AES-192/256 under both the
 Blumenthal and the Reeder key extension. Stage 5's automated half is done too: every operation
 reaches `snmpd` and both Simulator images in CI, and what stage 5 still needs is a run of the
 hardware checklist.
 
+Stage 6 has begun. Its sanitizer builds are done, and the rest of it is measured against the
+[threat model](docs/threat-model.md).
+
 | Stage | Deliverable | State |
 |---|---|---|
 | 0 | CMake skeleton, OID/value types, BER encode/decode + fuzz targets | **done** |
 | 1 | v2c GET / GETNEXT / GETBULK / SET and Walk over Asio UDP | **done** |
 | 2 | v3 message framing, USM auth (MD5, SHA-1, SHA-2), password-to-key, key localization | **done** |
-| 3 | Async engine discovery, time sync, Report handling | **done** |
+| 3 | Async Engine Discovery, time sync, Report handling | **done** |
 | 4 | Privacy: AES-128, then AES-192/256 under both key extensions, DES behind the legacy provider | **done** |
 | 5 | Interop matrix vs the Simulator, `snmpd`, and real vendor gear | automated half **done**; the [hardware checklist](#pre-release-hardware-checklist) remains |
-| 6 | Docs, cancellation semantics, error taxonomy, packaging | |
+| 6 | Safe to depend on: the [threat model](docs/threat-model.md), sanitizer and stress harness, destroying a Client stops it, hardening against a hostile network | sanitizer builds **done**; the rest in progress |
+| 7 | Docs, packaging and release | |
 
 ## Using it
 

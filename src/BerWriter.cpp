@@ -206,13 +206,13 @@ void Writer::write(const Value& v) {
 }
 
 void Writer::write(const Varbind& vb) {
-  auto s = beginSequence();
+  const auto s = beginSequence();
   objectIdentifier(vb.name);
   write(vb.val);
 }
 
 void Writer::varbindList(std::span<const Varbind> vbs) {
-  auto s = beginSequence();
+  const auto s = beginSequence();
   for (const auto& vb : vbs) write(vb);
 }
 

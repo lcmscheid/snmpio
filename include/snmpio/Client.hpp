@@ -242,10 +242,10 @@ class Client {
   auto spawn(net::Awaitable<Result> coro, Token token) {
     return net::asio::async_initiate<Token, Signature>(
         [this](auto handler, net::Awaitable<Result> c) {
-          auto ex = net::asio::get_associated_executor(handler, m_strand);
+          const auto ex = net::asio::get_associated_executor(handler, m_strand);
           // Read before the handler is moved from. Without this the caller's cancellation slot
           // stops at the token and never reaches the coroutine, which then cannot be cancelled.
-          auto slot = net::asio::get_associated_cancellation_slot(handler);
+          const auto slot = net::asio::get_associated_cancellation_slot(handler);
           net::asio::co_spawn(m_strand, std::move(c),
                               net::asio::bind_cancellation_slot(
                                   slot, net::asio::bind_executor(

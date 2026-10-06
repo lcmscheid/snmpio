@@ -480,7 +480,7 @@ net::Awaitable<Client::RequestResult> Client::doRequestV2c(Target target, Commun
   auto datagram = encodeV2cMessage(community.value, pdu, ec);
   if (ec) co_return RequestResult{ec, Response{}};
 
-  auto pending = std::make_shared<Pending>(co_await net::asio::this_coro::executor);
+  const auto pending = std::make_shared<Pending>(co_await net::asio::this_coro::executor);
   pending->from = target.endpoint;
   pending->community = community.value;
   pending->requestId = pdu.requestId;
@@ -586,7 +586,7 @@ net::Awaitable<net::ErrorCode> Client::discoverEngine(Target target, Credentials
                                   AuthProtocol::None, {}, ec);
   if (ec) co_return ec;
 
-  auto identify = std::make_shared<Pending>(co_await net::asio::this_coro::executor);
+  const auto identify = std::make_shared<Pending>(co_await net::asio::this_coro::executor);
   identify->from = target.endpoint;
   identify->v3 = true;
   identify->requestId = identifyId;
@@ -637,7 +637,7 @@ net::Awaitable<net::ErrorCode> Client::discoverEngine(Target target, Credentials
                       *key, ec, creds.privProtocol, keySpan(privKey));
   if (ec) co_return ec;
 
-  auto sync = std::make_shared<Pending>(co_await net::asio::this_coro::executor);
+  const auto sync = std::make_shared<Pending>(co_await net::asio::this_coro::executor);
   sync->from = target.endpoint;
   sync->v3 = true;
   sync->authRequired = true;
@@ -780,7 +780,7 @@ net::Awaitable<Client::RequestResult> Client::doRequestV3(Target target, Credent
                                     creds.privProtocol, keySpan(privKey));
     if (ec) co_return RequestResult{ec, Response{}};
 
-    auto pending = std::make_shared<Pending>(co_await net::asio::this_coro::executor);
+    const auto pending = std::make_shared<Pending>(co_await net::asio::this_coro::executor);
     pending->from = target.endpoint;
     pending->v3 = true;
     pending->authRequired = isAuthenticated(creds.level);

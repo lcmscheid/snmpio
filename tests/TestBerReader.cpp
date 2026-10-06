@@ -284,7 +284,7 @@ TEST(ReaderScope, ClampsReadsToTheEnclosingElement) {
   const auto buf = bytes({0x30, 0x03, 0x02, 0x01, 0x07, 0x05, 0x00});
   Reader r(buf);
   {
-    auto s = r.enter(tag::sequence);
+    const auto s = r.enter(tag::sequence);
     EXPECT_EQ(r.integer(), 7);
     EXPECT_TRUE(r.atEnd()) << "the NULL is outside this Scope";
   }
@@ -297,7 +297,7 @@ TEST(ReaderScope, FlagsUnconsumedContent) {
   const auto buf = bytes({0x30, 0x06, 0x02, 0x01, 0x07, 0x02, 0x01, 0x08});
   Reader r(buf);
   {
-    auto s = r.enter(tag::sequence);
+    const auto s = r.enter(tag::sequence);
     EXPECT_EQ(r.integer(), 7);
     // The second INTEGER is left unread on purpose.
   }
@@ -309,7 +309,7 @@ TEST(ReaderScope, RejectsAPrimitiveWhereAConstructedWasExpected) {
   const auto buf = bytes({0x04, 0x01, 0x00});
   Reader r(buf);
   {
-    auto s = r.enter(tag::sequence);
+    const auto s = r.enter(tag::sequence);
     EXPECT_FALSE(r.ok());
   }
   EXPECT_EQ(r.error(), make_error_code(Errc::UnexpectedTag));

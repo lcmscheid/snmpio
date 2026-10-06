@@ -388,7 +388,7 @@ std::optional<Varbind> Reader::readVarbind() {
   if (m_ec) return std::nullopt;
   Varbind vb;
   {
-    auto s = enter(tag::sequence);
+    const auto s = enter(tag::sequence);
     auto name = objectIdentifier();
     if (!name) return std::nullopt;
     auto val = anyValue();
@@ -404,7 +404,7 @@ std::optional<std::vector<Varbind>> Reader::varbindList() {
   if (m_ec) return std::nullopt;
   std::vector<Varbind> out;
   {
-    auto s = enter(tag::sequence);
+    const auto s = enter(tag::sequence);
     while (ok() && !atEnd()) {
       auto vb = readVarbind();
       if (!vb) return std::nullopt;

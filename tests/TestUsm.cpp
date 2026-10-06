@@ -27,7 +27,8 @@ Octets fromHex(std::string_view s) {
   Octets out;
   for (std::size_t i = 0; i + 1 < s.size(); i += 2) {
     const auto nibble = [](char c) {
-      return static_cast<unsigned>(c <= '9' ? c - '0' : (c | 0x20) - 'a' + 10);
+      const unsigned u = static_cast<unsigned char>(c);
+      return u <= '9' ? u - '0' : (u | 0x20U) - 'a' + 10;
     };
     out.push_back(static_cast<std::byte>((nibble(s[i]) << 4) | nibble(s[i + 1])));
   }
@@ -292,7 +293,7 @@ TEST(Privacy, RoundTripsUnderEveryProtocol) {
   Octets plaintext;
   for (int i = 0; i < 21; ++i) plaintext.push_back(static_cast<std::byte>(0x40 + i));
 
-  for (auto p : protocols) {
+  for (const auto p : protocols) {
     net::ErrorCode ec;
     const auto key = localizedPrivKey(privCreds(AuthProtocol::Sha256, p), privEngineId(), ec);
     ASSERT_FALSE(ec) << ec.message();

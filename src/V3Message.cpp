@@ -41,7 +41,7 @@ std::size_t encodeUsmContent(ber::Writer& w, const UsmParameters& usm, std::size
 }  // namespace
 
 void encodeScopedPdu(ber::Writer& w, const ScopedPdu& s) {
-  auto scope = w.beginSequence();
+  const auto scope = w.beginSequence();
   w.octetString(s.contextEngineId);
   w.octetString(s.contextName);
   encodePdu(w, s.pdu);
@@ -50,7 +50,7 @@ void encodeScopedPdu(ber::Writer& w, const ScopedPdu& s) {
 std::optional<ScopedPdu> decodeScopedPdu(ber::Reader& r) {
   ScopedPdu s;
   {
-    auto scope = r.enter(ber::tag::sequence);
+    const auto scope = r.enter(ber::tag::sequence);
     auto engine = r.octetString();
     auto context = r.octetString();
     if (!engine || !context) return std::nullopt;
@@ -107,7 +107,7 @@ std::vector<std::byte> encodeV3Message(const V3Header& header, const UsmParamete
   ber::Writer body(256);
   body.integer(versionV3);
   {
-    auto scope = body.beginSequence();
+    const auto scope = body.beginSequence();
     body.integer(header.msgId);
     body.integer(header.maxSize);
     const auto flags = encodeFlags(header);
@@ -150,7 +150,7 @@ std::optional<V3Message> decodeV3Message(std::span<const std::byte> datagram, ne
   ber::Reader r(datagram);
   V3Message msg;
   {
-    auto messageScope = r.enter(ber::tag::sequence);
+    const auto messageScope = r.enter(ber::tag::sequence);
     const auto version = r.integer();
     if (!version) {
       ec = r.error();
@@ -162,7 +162,7 @@ std::optional<V3Message> decodeV3Message(std::span<const std::byte> datagram, ne
     }
 
     {
-      auto headerScope = r.enter(ber::tag::sequence);
+      const auto headerScope = r.enter(ber::tag::sequence);
       const auto msgId = r.integer();
       const auto maxSize = r.integer();
       const auto flags = r.octetString();
@@ -203,7 +203,7 @@ std::optional<V3Message> decodeV3Message(std::span<const std::byte> datagram, ne
     const auto paramsBase = static_cast<std::size_t>(params->data() - datagram.data());
     ber::Reader sub(*params);
     {
-      auto usmScope = sub.enter(ber::tag::sequence);
+      const auto usmScope = sub.enter(ber::tag::sequence);
       auto engineId = sub.octetString();
       const auto boots = sub.integer();
       const auto time = sub.integer();

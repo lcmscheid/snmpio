@@ -36,6 +36,7 @@ Checks: >
   -performance-enum-size,
   -readability-braces-around-statements,
   -readability-identifier-length,
+  -readability-trailing-comma,
   -readability-use-concise-preprocessor-directives,
 
 # Why each of those is off:
@@ -63,6 +64,11 @@ Checks: >
 #       Single-line guard clauses (`if (m_ec) return;`) are deliberate and dense on purpose.
 #   readability-identifier-length
 #       Rejects `v`, `t`, `b`, `o` in two-line functions where a longer name is worse.
+#   readability-trailing-comma
+#       Fights clang-format: a trailing comma makes it put every element of a braced list on its
+#       own line, which explodes the byte tables in the tests -- laid out a TLV per line on
+#       purpose -- into one byte per line. It also misfires on the argument comma after an empty
+#       braced init (`f(T{}, x)`), calling that a trailing comma.
 #   readability-use-concise-preprocessor-directives
 #       Suggests #elifdef, which is C++23. This library is C++20.
 
@@ -74,6 +80,11 @@ CheckOptions:
   # The threshold is raised, not disabled, so a genuinely tangled function still trips it.
   readability-function-cognitive-complexity.Threshold: 35
   readability-function-cognitive-complexity.IgnoreMacros: true
+
+  # The codec's bit work masks and shifts by the specification's own constants -- `b & 0x7F`,
+  # `v << 8` -- and an int literal that is positive cannot carry a sign bit into the result. The
+  # check stays on for what it is for: a genuinely signed operand, such as a plain char.
+  bugprone-signed-bitwise.IgnorePositiveIntegerLiterals: true
 
   # POD value types are all-public by design; they are data, not encapsulated state.
   misc-non-private-member-variables-in-classes.IgnoreClassesWithAllMemberVariablesBeingPublic: true

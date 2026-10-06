@@ -16,16 +16,15 @@ Blumenthal and the Reeder key extension. Stage 5's automated half is done too: e
 reaches `snmpd` and both Simulator images in CI, and what stage 5 still needs is a run of the
 hardware checklist.
 
-Stage 6 makes snmpio safe to depend on for a system that polls many Targets from a thread pool. The
-[threat model](docs/threat-model.md) lists every invariant stage 6 is to hold, and names the test
-holding each one or the ticket that will. The sanitizer builds the rest is made under are done.
+Stage 6 has begun. Its sanitizer builds are done, and the rest of it is measured against the
+[threat model](docs/threat-model.md).
 
 | Stage | Deliverable | State |
 |---|---|---|
 | 0 | CMake skeleton, OID/value types, BER encode/decode + fuzz targets | **done** |
 | 1 | v2c GET / GETNEXT / GETBULK / SET and Walk over Asio UDP | **done** |
 | 2 | v3 message framing, USM auth (MD5, SHA-1, SHA-2), password-to-key, key localization | **done** |
-| 3 | Async engine discovery, time sync, Report handling | **done** |
+| 3 | Async Engine Discovery, time sync, Report handling | **done** |
 | 4 | Privacy: AES-128, then AES-192/256 under both key extensions, DES behind the legacy provider | **done** |
 | 5 | Interop matrix vs the Simulator, `snmpd`, and real vendor gear | automated half **done**; the [hardware checklist](#pre-release-hardware-checklist) remains |
 | 6 | Safe to depend on: the [threat model](docs/threat-model.md), sanitizer and stress harness, destroying a Client stops it, hardening against a hostile network | sanitizer builds **done**; the rest in progress |

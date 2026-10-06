@@ -52,6 +52,10 @@ positions:
 - How many requests are outstanding at once. Nothing applies backpressure: the table of
   Outstanding Requests grows with the caller's concurrency, by design, and bounding it is the
   caller's job (research §1.4.2).
+- A retransmitted SET being applied twice. Ordering SETs is the caller's policy, through
+  `snmpSetSerialNo` (RFC 3414 §11.1; research §1.2.4). That, and the other rules only the caller
+  can keep, such as binding completion tokens to their own executor, are to be documented: #48.
+- OSS-Fuzz integration (research §4.4), which the stage 6 spec leaves out.
 - Callers breaking the API's preconditions, such as destroying the `io_context` while it still
   has work for a Client.
 
@@ -67,7 +71,7 @@ Security Level:
 |---|---|---|
 | **v2c** | Guess the `request-id`, spoof the Target's address, and know the Community; then forge any Response. | Everything. The Community is in cleartext, so they can read it and then forge any Response. |
 | **v3 `noAuthNoPriv`** | Guess the Message ID and spoof the Target's address; then forge any Response. | Everything. |
-| **v3 `authNoPriv`** | Guess the Message ID and spoof the Target's address. Then only an unauthenticated Report gets through: it fails the request with the error it names (during Engine Discovery, that Engine Discovery and every request queued behind it), or forces one Engine Discovery. It cannot forge a Response, or set the Engine's clock. | Reads every Varbind. Can drop or delay replies, and can replay them while the Message ID is still outstanding and the Time Window allows. Cannot forge. A captured digest is an offline password-guessing oracle. |
+| **v3 `authNoPriv`** | Guess the Message ID and spoof the Target's address. Then only two unauthenticated replies get through. An unsigned Report fails the request with the error it names (during Engine Discovery's time-sync phase, that Engine Discovery and every request queued behind it), or forces one Engine Discovery. An answer to Engine Discovery's identity phase chooses the engineID (see below), or, carrying none, fails that Engine Discovery. It cannot forge a Response, or set the Engine's clock. | Reads every Varbind. Can drop or delay replies, and can replay them while the Message ID is still outstanding and the Time Window allows. Cannot forge. A captured digest is an offline password-guessing oracle. |
 | **v3 `authPriv`** | As `authNoPriv`. | Sees the header fields only: the Message ID, the engineID, the user name, boots and time, and sizes. Cannot read the Scoped PDU. Otherwise as `authNoPriv`. |
 
 Two further surfaces are inherent to USM, and no Command Generator closes them:
@@ -93,13 +97,14 @@ wherever the network is not trusted.
 
 ## Invariants
 
-The status words are the research note's. **Held** means a test or fuzzer named in the row fails
-if the invariant breaks. **Partly held** names what is tested and the ticket for the rest. **Not
-yet held** names the ticket, and says when the code breaks the invariant today. Tests are named as
-gtest prints them (`Suite.Name`) and fuzzers by their target. Since #28, CI runs every test under
-both ASan+UBSan and TSan, and runs the interop suite against `snmpd` under ASan+UBSan. Our own
-targets build with the standard library's assertions on; libc++'s mode is set too, but no CI cell
-compiles against libc++ yet (#44). The wider OpenSSF hardening flags are not yet applied: #46.
+The status words are this page's own; the research note grades the code as Exposed, Partly handled
+or Handled instead. **Held** means a test or fuzzer named in the row fails if the invariant breaks.
+**Partly held** names what is tested and the ticket for the rest. **Not yet held** names the ticket,
+and says when the code breaks the invariant today. Tests are named as gtest prints them
+(`Suite.Name`) and fuzzers by their target. Since #28, CI runs every test under both ASan+UBSan and
+TSan, and runs the interop suite against `snmpd` under ASan+UBSan. Our own targets build with the
+standard library's assertions on; libc++'s mode is set too, but no CI cell compiles against libc++
+yet (#44). The wider OpenSSF hardening flags are not yet applied: #46.
 
 ### Lifecycle
 
@@ -129,9 +134,10 @@ compiles against libc++ yet (#44). The wider OpenSSF hardening flags are not yet
 | R2 | At `authNoPriv` and `authPriv`, a v3 reply other than an exempt Report counts only if its digest verifies under the Localized Key. It is decrypted only after its digest has verified. | **Partly held.** A wrong key and a tampered digest are pinned; every other unauthenticated reply is #30's oracle (R6). | `ClientV3.DropsAReplyEncryptedWithAnotherKey`, `ClientV3.SurfacesAWrongDigestReport`, `V3Message.RejectsATamperedMessage`, `V3Message.RejectsTheWrongKey`, `V3Message.AuthenticationCoversTheCiphertext`, `V3Message.AVerifiedMessageIsNotSelfAuthenticating` |
 | R3 | A digest whose width is not exactly the protocol's is rejected, including a 1-octet and an empty one (the CVE-2008-0960 class). | **Not yet held: #34.** The check exists (research §1.5.3), but no test pins it. | — |
 | R4 | A v3 reply counts only if its Security Level, user name, `contextEngineID` and `contextName` match the request (RFC 3412 §7.2 step 12). A mismatch is a silent drop. | **Not yet held: #34.** Broken today: an `authPriv` request accepts an `authNoPriv` reply, so its data crossed the wire unencrypted and the caller is never told (research §1.1.5). | — |
-| R5 | **No reply that snmpio drops fails a request before its deadline.** Every retransmission still goes out. At the deadline the request reports the last named reason it dropped a reply, or `Timeout` if it named none (ADR-0008). | **Held** by tests; the fuzzer is #30. | `ClientGet.IgnoresAResponseQuotingTheWrongCommunity`, `ClientV3.KeepsRetransmittingThroughRepliesItDrops`, `ClientV3.TimesOutAgainstASilentTarget`, `ClientV3.DropsAReplyEncryptedWithAnotherKey`, `ClientV3.DropsAResponseFromOutsideTheTimeWindow`, `ClientV3.AnUnsignedNotInTimeWindowsAloneFailsTheTimeSyncAtItsDeadline`, `InteropFaults.DropsMalformedBerAndTimesOut` |
-| R6 | **At `authNoPriv` and `authPriv`, no unauthenticated datagram completes a request before its deadline, with one exception: an unsigned Report.** An unsigned Report that clears the Message ID and source-address check fails the request with the error its counter names, or forces one Engine Discovery. During Engine Discovery it fails that Engine Discovery, and with it every request queued behind it (ADR-0003). RFC 3414 §3.2 requires the exception, because an Engine that does not know the user, the key or the engineID has nothing to sign with. ADR-0008 accepts it. The unsigned `notInTimeWindows` Report that answers Engine Discovery's time-sync phase is dropped, not admitted (ADR-0008's amendment). At v2c and `noAuthNoPriv` every datagram is unauthenticated, so the rule there is R1's match, or for v3 the Message ID and source-address match: a datagram that fails it is dropped, and one that passes it completes the request; that is all those levels promise. | **Partly held.** The exception and its limits are pinned. The general rule, that every other unauthenticated datagram is only ever dropped, is #30's oracle at every Security Level. | `ClientV3.SurfacesAnUnknownUserName`, `ClientV3.RediscoversWhenTheEngineIdChanges`, `ClientV3.AnUnsignedLowerBootsReportNeverClearsTheCachedClock`, `ClientV3.AnUnauthenticatedReportDuringTimeSyncEndsDiscoveryWithItsError`, `ClientV3.AnUnsignedNotInTimeWindowsAloneFailsTheTimeSyncAtItsDeadline`. The fuzzer: #30. |
+| R5 | **No reply that snmpio drops fails a request before its deadline.** Every retransmission still goes out. At the deadline the request reports the last named reason it dropped a reply, or `Timeout` if it named none (ADR-0008). | **Held** by tests; the fuzzer is #30. Retransmitting through drops is pinned at v3; at v2c, the drop and the `Timeout`. | `ClientGet.IgnoresAResponseQuotingTheWrongCommunity`, `ClientV3.KeepsRetransmittingThroughRepliesItDrops`, `ClientV3.TimesOutAgainstASilentTarget`, `ClientV3.DropsAReplyEncryptedWithAnotherKey`, `ClientV3.DropsAResponseFromOutsideTheTimeWindow`, `ClientV3.AnUnsignedNotInTimeWindowsAloneFailsTheTimeSyncAtItsDeadline`, `InteropFaults.DropsMalformedBerAndTimesOut` |
+| R6 | **At `authNoPriv` and `authPriv`, no unauthenticated datagram completes or fails a request before its deadline, except the two RFC 3414 makes unavoidable.** Both must first clear the Message ID and source-address check. (1) **An unsigned Report**, because an Engine that does not know the user, the key or the engineID has nothing to sign with (RFC 3414 §3.2; ADR-0008). For a request it either fails the request with the error its counter names, or forces one Engine Discovery (`unknownEngineIDs`, or `notInTimeWindows`). In Engine Discovery's time-sync phase it ends that Engine Discovery with its error, and with it every request queued behind it, except an unsigned `notInTimeWindows`, which is dropped (ADR-0008's amendment). (2) **The answer to Engine Discovery's identity phase**, Response or Report, which is unauthenticated by design (RFC 3414 §4; E1). It is read only for its engineID, and one that carries none fails that Engine Discovery with `UnknownEngineId`. Every other unauthenticated datagram is dropped. | **Partly held.** Exception (1) and its limits are pinned. Exception (2)'s empty-engineID failure has no test, and the rule that everything else is dropped is #30's oracle. | `ClientV3.SurfacesAnUnknownUserName`, `ClientV3.RediscoversWhenTheEngineIdChanges`, `ClientV3.AnUnsignedLowerBootsReportNeverClearsTheCachedClock`, `ClientV3.AnUnauthenticatedReportDuringTimeSyncEndsDiscoveryWithItsError`, `ClientV3.AnUnsignedNotInTimeWindowsAloneFailsTheTimeSyncAtItsDeadline`. The fuzzer: #30. |
 | R7 | **Message IDs and `request-id`s are unpredictable**, never collide with an Outstanding Request, and are fresh for each retransmission. A reply to any of a request's transmissions still counts. | **Not yet held: #33.** Broken today: one sequential counter serves every Target, so any polled Agent can predict the IDs in use for every other Target, and a retransmission reuses its ID (research §1.2). The counter does keep IDs unique for 2^31 requests. | — |
+| R8 | **At v2c and `noAuthNoPriv`, where nothing is authenticated, only a datagram that matches the request completes or fails it.** A v2c Response matches on its `request-id`, source address and Community (R1). At `noAuthNoPriv` every reply must match the Message ID and source address, and a Response must also match the request's engineID and `request-id`. A matching Report fails the request or forces one Engine Discovery, as in R6 (1); Engine Discovery's identity phase is as in R6 (2). Anything else is dropped. These are the only oracles #30 can hold at these levels; they bound an off-path attacker, not an on-path one. | **Partly held.** The Community check is pinned; the source-address check is #34; the rest is #30's oracle. | `ClientGet.IgnoresAResponseQuotingTheWrongCommunity`. The fuzzer: #30. |
 
 ### Engine state
 
@@ -161,7 +167,7 @@ compiles against libc++ yet (#44). The wider OpenSSF hardening flags are not yet
 | B4 | **No Walk runs forever**, and a collecting Walk never buffers without limit. A row limit or a whole-Walk deadline ends it with `WalkIncomplete`. | **Not yet held: #36.** Broken today: an Agent returning strictly increasing OIDs is walked forever, and `asyncWalkCollect` buffers all of it (research §1.4.3). | — |
 | B5 | Out-of-range `retries` and `maxRepetitions` are refused with an argument error, never clamped. | **Not yet held: #36.** | — |
 | B6 | `tooBig` shrinks `maxRepetitions`, and gives up rather than looping once it cannot shrink further. | **Held.** | `ClientWalk.HalvesMaxRepetitionsWhenTheAgentSaysTooBig`, `ClientWalk.GivesUpWhenTooBigSurvivesEveryReduction`, `InteropFaults.DegradesMaxRepetitionsWhenTheAgentSaysTooBig` |
-| B7 | **Key derivation does not block the caller's threads per Engine.** A password costs one Master Key derivation per Client, and none when the caller supplies the Master Key. | **Not yet held: #37.** Broken today: the megabyte hash runs on the Client's strand once per new Engine, 4 to 16 ms each (research §5.4). | — |
+| B7 | **Key derivation does not block the caller's threads per Engine.** A password costs one Master Key derivation per Client, and none when the caller supplies the Master Key. | **Not yet held: #37.** Broken today: the megabyte hash runs on the Client's strand once per new Engine, 4 to 16 ms each (research §5.4). The legacy provider load and the per-call algorithm fetches also run on the strand: #47 (research §3.6). | — |
 
 ### The codec
 
@@ -196,7 +202,8 @@ Key the Client holds at that moment, and nothing can stop that. It is also best 
 cannot reach copies outside snmpio's own storage, such as the `std::string`s in the caller's
 Credentials, temporaries the compiler spilled, or pages the kernel swapped out. Wiping is hygiene,
 not a boundary. A caller who wants passwords never to enter the I/O process at all can supply a
-Master Key instead (#37).
+Master Key instead (#37). The examples will take their passwords from the environment, never `argv`,
+and never one password for both keys (#37; research §1.6.3).
 
 ## Keeping this page true
 

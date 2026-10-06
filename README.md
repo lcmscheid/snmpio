@@ -17,9 +17,8 @@ reaches `snmpd` and both Simulator images in CI, and what stage 5 still needs is
 hardware checklist.
 
 Stage 6 makes snmpio safe to depend on for a system that polls many Targets from a thread pool. The
-[threat model](docs/threat-model.md) lists every invariant that stage holds, names the test that
-holds each one, and says which are not held yet. The sanitizer builds the rest is made under are
-done.
+[threat model](docs/threat-model.md) lists every invariant stage 6 is to hold, and names the test
+holding each one or the ticket that will. The sanitizer builds the rest is made under are done.
 
 | Stage | Deliverable | State |
 |---|---|---|

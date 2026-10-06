@@ -1,7 +1,7 @@
 # SNMP Client
 
 An async C++20 library for SNMPv2c and SNMPv3 command generation — GET, GETNEXT, GETBULK, SET and
-subtree walks — built directly on Asio with no net-snmp dependency. Manager side only.
+subtree walks — built directly on Asio with no net-snmp dependency. No Agent side.
 
 ## Language
 

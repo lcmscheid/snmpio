@@ -31,6 +31,8 @@ Checks: >
   -cppcoreguidelines-pro-bounds-array-to-pointer-decay,
   -cppcoreguidelines-pro-type-reinterpret-cast,
   -misc-include-cleaner,
+  -misc-static-assert,
+  -cert-dcl03-c,
   -modernize-use-trailing-return-type,
   -modernize-return-braced-init-list,
   -performance-enum-size,
@@ -56,6 +58,11 @@ Checks: >
 #   misc-include-cleaner
 #       Wants every transitively-used declaration included directly, including implementation
 #       details of libstdc++. Revisit if it ever gets a stable notion of a public header.
+#   misc-static-assert, cert-dcl03-c (its alias)
+#       Flags every compiled-in assert(), whatever its condition: glibc's C++ assert expands to
+#       `(cond) ? void (1 ? 1 : bool (cond)) : __assert_fail(...)`, and the check takes the
+#       constant `1 ? 1 : ...` for the assert's condition. Seen on glibc 2.44 with both 22.1.8 and
+#       23.1.1.
 #   modernize-use-trailing-return-type, modernize-return-braced-init-list
 #       Pure style, and not this codebase's style.
 #   performance-enum-size

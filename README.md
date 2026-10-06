@@ -274,7 +274,9 @@ because it was noisy once is a check that will not catch the real defect later.
 
 ```sh
 cmake --preset default                          # always writes compile_commands.json
-clang-tidy -p build/default src/*.cpp tests/*.cpp fuzz/*.cpp
+clang-tidy -p build/default src/*.cpp tests/*.cpp
+cmake --preset fuzz                             # fuzz/ has its own flags (-UNDEBUG)
+clang-tidy -p build/fuzz fuzz/*.cpp
 ```
 
 Both clang tools are whatever Arch's `clang` package ships; CI runs them in an `archlinux:latest`

@@ -266,8 +266,13 @@ jobs:
             | xargs clang-format --dry-run --Werror
 
       # Static analysis, plus the naming convention the formatter cannot check. tests/ and fuzz/
-      # carry their own overlay relaxing the checks that only make sense for library code.
+      # carry their own overlay relaxing the checks that only make sense for library code. fuzz/
+      # is linted against its own configure: the fuzzers build with -UNDEBUG, and under any other
+      # build's flags their asserts -- the oracles -- compile out unseen. Configuring builds
+      # nothing, so the second configure costs seconds.
       - name: clang-tidy
         run: |
           cmake -S . -B build -G Ninja -DCMAKE_CXX_COMPILER=clang++
-          clang-tidy -p build src/*.cpp tests/*.cpp fuzz/*.cpp
+          clang-tidy -p build src/*.cpp tests/*.cpp
+          cmake --preset fuzz
+          clang-tidy -p build/fuzz fuzz/*.cpp

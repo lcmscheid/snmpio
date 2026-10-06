@@ -255,7 +255,7 @@ TEST(V3Message, RejectsTrailingDataInsideTheSecurityParameters) {
   ber::Writer body(256);
   body.integer(versionV3);
   {
-    auto scope = body.beginSequence();
+    const auto scope = body.beginSequence();
     body.integer(1);
     body.integer(defaultMaxMessageSize);
     body.octetString(bytes({0x04}));
@@ -278,7 +278,7 @@ TEST(V3Message, RejectsAnEncryptedPduTheFlagsDidNotClaim) {
   ber::Writer body(64);
   body.integer(versionV3);
   {
-    auto scope = body.beginSequence();
+    const auto scope = body.beginSequence();
     body.integer(1);
     body.integer(defaultMaxMessageSize);
     body.octetString(bytes({0x04}));  // reportable, and claiming no privacy

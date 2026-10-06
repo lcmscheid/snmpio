@@ -92,7 +92,7 @@ bool isPduTag(ber::TagType t) noexcept {
 }
 
 void encodePdu(ber::Writer& w, const Pdu& p) {
-  auto scope = w.beginConstructed(static_cast<ber::TagType>(p.type));
+  const auto scope = w.beginConstructed(static_cast<ber::TagType>(p.type));
   w.integer(p.requestId);
   w.integer(p.errorStatus);
   w.integer(p.errorIndex);
@@ -114,7 +114,7 @@ std::optional<Pdu> decodePdu(ber::Reader& r) {
   Pdu p;
   p.type = static_cast<PduType>(*t);
   {
-    auto scope = r.enter(*t);
+    const auto scope = r.enter(*t);
     const auto requestId = r.integer();
     const auto errorStatus = r.integer();
     const auto errorIndex = r.integer();
@@ -131,7 +131,7 @@ std::optional<Pdu> decodePdu(ber::Reader& r) {
 
 std::optional<std::int32_t> messageVersion(std::span<const std::byte> datagram) noexcept {
   ber::Reader r(datagram);
-  auto scope = r.enter(ber::tag::sequence);
+  const auto scope = r.enter(ber::tag::sequence);
   return r.integer();
 }
 
@@ -139,7 +139,7 @@ std::vector<std::byte> encodeV2cMessage(std::string_view community, const Pdu& p
                                         net::ErrorCode& ec) {
   ber::Writer w(256);
   {
-    auto scope = w.beginSequence();
+    const auto scope = w.beginSequence();
     w.integer(versionV2c);
     w.octetString(community);
     encodePdu(w, pdu);
@@ -154,7 +154,7 @@ std::optional<V2cMessage> decodeV2cMessage(std::span<const std::byte> datagram,
   ber::Reader r(datagram);
   V2cMessage msg;
   {
-    auto scope = r.enter(ber::tag::sequence);
+    const auto scope = r.enter(ber::tag::sequence);
     const auto version = r.integer();
     auto community = r.octetString();
     if (!version || !community) {

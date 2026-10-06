@@ -179,7 +179,7 @@ TEST(ClientV3, ResynchronisesAfterANotInTimeWindowsReport) {
         }
         if (!isAuthenticated(req.message.header.level)) return std::nullopt;
 
-        auto untimely = [](std::int32_t boots, std::int32_t time) {
+        const auto untimely = [](std::int32_t boots, std::int32_t time) {
           auto r =
               ScriptedV3Agent::report(ScriptedV3Agent::notInTimeWindows, SecurityLevel::AuthNoPriv);
           r.boots = boots;
@@ -979,8 +979,8 @@ TEST(ClientV3Walk, CollectsTheWholeSubtreeAcrossSeveralRounds) {
 // pairs are here together because the two extensions are mutually incompatible (ADR-0005): a
 // Command Generator that derived one where the Agent derived the other would fail exactly here.
 TEST(ClientV3, AuthPrivRoundTripsUnderEveryPrivacyProtocol) {
-  for (auto priv : {PrivProtocol::Des, PrivProtocol::Aes128, PrivProtocol::Aes192,
-                    PrivProtocol::Aes256, PrivProtocol::Aes192C, PrivProtocol::Aes256C}) {
+  for (const auto priv : {PrivProtocol::Des, PrivProtocol::Aes128, PrivProtocol::Aes192,
+                          PrivProtocol::Aes256, PrivProtocol::Aes192C, PrivProtocol::Aes256C}) {
     Fixture f;
     ScriptedV3Agent agent(f.io, privCredentials(priv), echoAnswer);
     f.agent = &agent;

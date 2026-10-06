@@ -68,7 +68,7 @@ TEST(CompletionOracle, RejectsAHandlerDroppedWithoutBeingCalled) {
   net::IoContext io;
   CompletionOracle oracle(io);
   {
-    auto dropped = oracle.handler([](net::ErrorCode) {});
+    const auto dropped = oracle.handler([](net::ErrorCode) {});
   }
   EXPECT_EQ(oracle.destructions(), 1);
   EXPECT_FALSE(oracle.completedExactlyOnce({net::ErrorCode{}}));

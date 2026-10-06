@@ -113,7 +113,7 @@ TEST(WriterOid, SizePredictionMatchesTheEncoding) {
 TEST(WriterScope, PatchesShortFormLengths) {
   Writer w;
   {
-    auto s = w.beginSequence();
+    const auto s = w.beginSequence();
     w.integer(7);
   }
   EXPECT_EQ(w.take(), bytes({0x30, 0x03, 0x02, 0x01, 0x07}));
@@ -125,7 +125,7 @@ TEST(WriterScope, WidensThePlaceholderWhenContentExceeds127Octets) {
   Writer w;
   const std::vector<std::byte> payload(200, std::byte{0xAB});
   {
-    auto s = w.beginSequence();
+    const auto s = w.beginSequence();
     w.octetString(payload);
   }
   const auto out = w.take();
@@ -137,7 +137,7 @@ TEST(WriterScope, WidensThePlaceholderWhenContentExceeds127Octets) {
 
   Reader r(out);
   {
-    auto s = r.enter(tag::sequence);
+    const auto s = r.enter(tag::sequence);
     const auto v = r.octetString();
     ASSERT_TRUE(v.has_value()) << r.error().message();
     EXPECT_EQ(v->size(), 200U);
@@ -148,11 +148,11 @@ TEST(WriterScope, WidensThePlaceholderWhenContentExceeds127Octets) {
 TEST(WriterScope, NestsSeveralDeep) {
   Writer w;
   {
-    auto outer = w.beginSequence();
+    const auto outer = w.beginSequence();
     {
-      auto middle = w.beginSequence();
+      const auto middle = w.beginSequence();
       {
-        auto inner = w.beginSequence();
+        const auto inner = w.beginSequence();
         w.integer(1);
       }
     }
@@ -163,7 +163,7 @@ TEST(WriterScope, NestsSeveralDeep) {
 TEST(WriterScope, RejectsAPrimitiveTag) {
   Writer w;
   {
-    auto s = w.beginConstructed(tag::octetString);
+    const auto s = w.beginConstructed(tag::octetString);
   }
   EXPECT_FALSE(w.ok());
   EXPECT_EQ(w.error(), make_error_code(Errc::UnexpectedTag));

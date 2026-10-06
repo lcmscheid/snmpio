@@ -119,7 +119,7 @@ TEST(CompletionOracle, CountsOnlyTheLiveHandlerAcrossMoves) {
 // disruptions the Client supports today. Destruction is the fourth disruption, and its column
 // arrives with ADR-0009's implementation (#31).
 //
-// Every cell runs through the public API against a scripted Agent on loopback, and every one is
+// Every cell runs through the public API against a Scripted Agent on loopback, and every one is
 // disrupted from inside the Agent, at the moment the datagram that marks its wait arrives -- so
 // which wait a cell exercises is decided by the script, never by a timer racing the Client.
 //
@@ -131,14 +131,18 @@ TEST(CompletionOracle, CountsOnlyTheLiveHandlerAcrossMoves) {
 
 enum class Wait : std::uint8_t {
   AwaitingAReply,  // the first attempt is out and the Target is silent
-  // The first deadline passed and a retransmission went out. A request has no suspension between
-  // attempts other than the send itself, so this is the wait a retransmitting request sits in.
+  // The first deadline passed and a retransmission went out. CONTEXT.md's wait, seen from the
+  // caller; inside the Client it is the same reply wait as above, on a later attempt -- there is no
+  // suspension between attempts other than the send itself -- so this cell pins that the wait
+  // behaves the same once the request has retransmitted, not a separate code path.
   BetweenRetransmissions,
   QueuedBehindDiscovery,  // parked on an Engine Discovery, before any exchange of its own
   MidWalk,                // a Walk's second round is in flight, its first batch delivered
 };
 
 enum class Disruption : std::uint8_t { Terminal, Total, Stop };
+
+using Cell = std::tuple<Wait, Disruption>;
 
 // Client.hpp's cancellation rule and ADR-0004's Walk rule, as a table. Stopping is ClientStopped
 // in every wait; a cancellation is operation_aborted wherever no reply counted; and a Walk reads
@@ -151,13 +155,38 @@ net::ErrorCode expectedCode(Wait wait, Disruption disruption) {
   return net::asio::error::operation_aborted;
 }
 
-// Four deadlines: the three attempts silentTarget allows, and one to spare.
-constexpr auto quietPeriod = std::chrono::milliseconds(200);
+// Every attempt's deadline, in every cell. Long enough that "at once" and "after the deadline"
+// cannot be confused under a sanitizer on a loaded machine, short enough to keep the matrix fast.
+constexpr auto deadline = std::chrono::milliseconds(100);
+// Longer than the deadline the request could still have running when it completed, so anything
+// it left behind reaches the Agent first.
+constexpr auto quietPeriod = 2 * deadline;
+// What a terminal cancellation or a stop may take to complete the request. Waiting out the
+// deadline instead, as total does, takes the whole deadline, less the moment between the attempt
+// going out and the Agent seeing it.
+constexpr auto atOnce = deadline / 2;
+// A request that never completes would otherwise hang the test, since the Agent's pending receive
+// keeps run() going; this turns it into a failure the oracle can report.
+constexpr auto backstopAfter = std::chrono::seconds(10);
+
+template <typename Agent>
+Target matrixTarget(const Agent& agent, int retries = 1) {
+  auto t = targetFor(agent, retries);
+  t.timeout = deadline;
+  return t;
+}
 
 // One cell's world: one io_context on the test thread, so a hung operation is a hung test rather
 // than a flake.
 struct Rig {
-  explicit Rig(Disruption d) : disruption(d) {}
+  explicit Rig(Disruption d) : disruption(d) {
+    backstop.expires_after(backstopAfter);
+    backstop.async_wait([this](net::ErrorCode ec) {
+      if (ec) return;  // cancelled: the cell completed and finished on its own
+      ADD_FAILURE() << "the request had not completed after " << backstopAfter.count() << " s";
+      finish();
+    });
+  }
 
   net::IoContext io;
   Client client{io.get_executor()};
@@ -166,8 +195,17 @@ struct Rig {
   Disruption disruption;
   std::function<void()> closeAgent = [] {};
   net::SteadyTimer quiet{io};
+  net::SteadyTimer backstop{io};
+  std::chrono::steady_clock::time_point disruptedAt;
+  std::chrono::steady_clock::time_point completedAt;
+
+  void finish() {
+    client.stop();
+    closeAgent();
+  }
 
   void disrupt() {
+    disruptedAt = std::chrono::steady_clock::now();
     switch (disruption) {
       case Disruption::Terminal:
         signal.emit(net::asio::cancellation_type::terminal);
@@ -190,11 +228,12 @@ struct Rig {
     return net::asio::bind_cancellation_slot(
         signal.slot(),
         oracle.handler([this, then = std::move(then)](net::ErrorCode ec, auto&&... rest) mutable {
+          completedAt = std::chrono::steady_clock::now();
           then(ec, std::forward<decltype(rest)>(rest)...);
           quiet.expires_after(quietPeriod);
           quiet.async_wait([this](net::ErrorCode) {
-            client.stop();
-            closeAgent();
+            backstop.cancel();
+            finish();
           });
         }));
   }
@@ -205,13 +244,13 @@ struct Rig {
 
 // A GET against a silent Target, disrupted as attempt `disruptAt` reaches it.
 void silentTarget(Rig& rig, int disruptAt) {
-  ScriptedAgent agent(rig.io, [&rig, disruptAt, seen = 0](const V2cMessage&) mutable {
-    if (++seen == disruptAt) rig.disrupt();
+  ScriptedAgent agent(rig.io, [&rig, disruptAt, attempts = 0](const V2cMessage&) mutable {
+    if (++attempts == disruptAt) rig.disrupt();
     return std::optional<Pdu>{};
   });
   rig.closeAgent = [&agent] { agent.close(); };
 
-  rig.client.asyncGet(targetFor(agent, 2), publicCommunity, {sysDescr}, rig.token());
+  rig.client.asyncGet(matrixTarget(agent, 2), publicCommunity, {sysDescr}, rig.token());
   rig.io.run();
 
   EXPECT_EQ(agent.requestsSeen(), disruptAt) << "an attempt went out after the disruption";
@@ -228,12 +267,12 @@ void queuedBehindDiscovery(Rig& rig) {
     p.varbinds = request.varbinds;
     return p;
   });
-  agent.setOnDatagram([&rig, seen = 0](std::span<const std::byte>) mutable {
-    if (seen++ == 0) rig.disrupt();
+  agent.setOnDatagram([&rig, datagrams = 0](std::span<const std::byte>) mutable {
+    if (datagrams++ == 0) rig.disrupt();
   });
   rig.closeAgent = [&agent] { agent.close(); };
 
-  rig.client.asyncGet(targetFor(agent), credentials(), {sysDescr}, rig.token());
+  rig.client.asyncGet(matrixTarget(agent), credentials(), {sysDescr}, rig.token());
   rig.io.run();
 
   // The data plane is answered only for an exchange of the request's own. Reaching it would mean
@@ -249,15 +288,15 @@ void midWalk(Rig& rig) {
     rows.emplace_back(systemGroup.child(i).child(0), Gauge32{i});
 
   ScriptedAgent agent(
-      rig.io, [&rig, table = test::tableAgent(rows), seen = 0](const V2cMessage& msg) mutable {
+      rig.io, [&rig, table = test::tableAgent(rows), rounds = 0](const V2cMessage& msg) mutable {
         auto reply = table(msg);
-        if (++seen == 2) rig.disrupt();
+        if (++rounds == 2) rig.disrupt();
         return reply;
       });
   rig.closeAgent = [&agent] { agent.close(); };
 
   std::vector<Varbind> collected;
-  rig.client.asyncWalkCollect(targetFor(agent), publicCommunity, systemGroup, WalkOptions{2},
+  rig.client.asyncWalkCollect(matrixTarget(agent), publicCommunity, systemGroup, WalkOptions{2},
                               rig.token([&collected](net::ErrorCode, std::vector<Varbind> vbs) {
                                 collected = std::move(vbs);
                               }));
@@ -274,7 +313,7 @@ void midWalk(Rig& rig) {
   }
 }
 
-class DisruptionMatrix : public testing::TestWithParam<std::tuple<Wait, Disruption>> {};
+class DisruptionMatrix : public testing::TestWithParam<Cell> {};
 
 TEST_P(DisruptionMatrix, CompletesExactlyOnceWithTheRulesCode) {
   const auto [wait, disruption] = GetParam();
@@ -296,6 +335,11 @@ TEST_P(DisruptionMatrix, CompletesExactlyOnceWithTheRulesCode) {
   }
 
   EXPECT_TRUE(rig.oracle.completedExactlyOnce({expectedCode(wait, disruption)}));
+  // Client.hpp: terminal drops the request at once, and so does Stopping; only total may wait out
+  // the deadline of the exchange in flight. The codes alone cannot tell the two apart.
+  if (disruption != Disruption::Total) {
+    EXPECT_LT(rig.completedAt - rig.disruptedAt, atOnce) << "waited for the deadline";
+  }
 }
 
 // Switches rather than tables indexed by the enum, so that reordering one cannot mislabel a cell.
@@ -325,7 +369,7 @@ std::string_view nameOf(Disruption disruption) {
   return "Unknown";
 }
 
-std::string cellName(const testing::TestParamInfo<std::tuple<Wait, Disruption>>& info) {
+std::string cellName(const testing::TestParamInfo<Cell>& info) {
   return std::string(nameOf(std::get<0>(info.param))) + "_" +
          std::string(nameOf(std::get<1>(info.param)));
 }

@@ -316,7 +316,7 @@ TEST(ClientWalk, ACancelledWalkAgainstASilentTargetIsIncompleteNotTimedOut) {
   EXPECT_EQ(f.collected.size(), 2U) << "the batch that did arrive is kept";
 }
 
-// The rest of Client.hpp's cancellation rule -- every wait, under both types and stop() -- is
+// The rest of Client.hpp's cancellation rule -- every wait, under both types -- and Stopping are
 // TestDisruptionMatrix.cpp's. This is the one case it does not cover: a reply that counts.
 TEST(ClientCancel, ATotalSignalStillTakesTheReplyAlreadyOnItsWay) {
   Fixture f;

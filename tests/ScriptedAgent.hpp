@@ -105,6 +105,26 @@ inline Pdu respondWithError(ErrorStatus status, std::int32_t index) {
   return p;
 }
 
+// An Agent serving a small in-order table, honouring GETNEXT and GETBULK alike.
+inline ScriptedAgent::Responder tableAgent(std::vector<Varbind> table) {
+  return [table = std::move(table)](const V2cMessage& msg) -> std::optional<Pdu> {
+    const Oid& from = msg.pdu.varbinds.at(0).name;
+    const auto count = msg.pdu.type == PduType::GetBulk
+                           ? static_cast<std::size_t>(msg.pdu.maxRepetitions())
+                           : std::size_t{1};
+
+    std::vector<Varbind> out;
+    for (const auto& vb : table) {
+      if (out.size() >= count) break;
+      if (from < vb.name) out.push_back(vb);
+    }
+    if (out.size() < count) {
+      out.emplace_back(Oid{1, 3, 6, 1, 2, 1, 2}, ValueException::EndOfMibView);
+    }
+    return respondWith(std::move(out));
+  };
+}
+
 }  // namespace snmpio::test
 
 #endif  // SNMPIO_TESTS_SCRIPTEDAGENT_HPP

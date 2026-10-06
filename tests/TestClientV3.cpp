@@ -902,11 +902,11 @@ TEST(ClientV3, CancellingTheRequestThatStartedDiscoveryLeavesTheQueueIntact) {
   EXPECT_EQ(f.response.varbinds[0].name, sysUpTime);
 }
 
-// The same rule as TestClient.cpp's ClientCancel suite, in the other wait a request can be in:
-// parked on an Engine Discovery. The signal is emitted from the Agent, as the discovery request
-// reaches it, which is the one moment both requests are suspended on the discovery rather than on
-// a reply of their own. That it is answered there and not later is countable: a request ended in
-// the discovery wait never sends a datagram of its own.
+// TestDisruptionMatrix.cpp's QueuedBehindDiscovery_* cells, with a sibling waiter: a request parked
+// on an Engine Discovery. The signal is emitted from the Agent, as the discovery request reaches
+// it, which is the one moment both requests are suspended on the discovery rather than on a reply
+// of their own. That it is answered there and not later is countable: a request ended in the
+// discovery wait never sends a datagram of its own.
 class QueuedBehindDiscovery : public testing::TestWithParam<net::asio::cancellation_type> {};
 
 TEST_P(QueuedBehindDiscovery, IsAbortedAndLeavesTheDiscoveryRunning) {
@@ -945,19 +945,6 @@ TEST_P(QueuedBehindDiscovery, IsAbortedAndLeavesTheDiscoveryRunning) {
 INSTANTIATE_TEST_SUITE_P(ClientV3, QueuedBehindDiscovery,
                          testing::Values(net::asio::cancellation_type::terminal,
                                          net::asio::cancellation_type::total));
-
-TEST(ClientV3, StoppingDuringDiscoveryFailsTheQueuedRequests) {
-  Fixture f;
-  ScriptedV3Agent agent(f.io, credentials(), echoAnswer);
-  f.agent = &agent;
-  agent.setResponder([](const ScriptedV3Agent::Request&) { return std::nullopt; });
-
-  f.client.asyncGet(targetFor(agent, 5), credentials(), {sysDescr}, f.requestToken());
-  net::asio::post(f.io, [&] { f.client.stop(); });
-  f.run();
-
-  EXPECT_EQ(f.ec, make_error_code(Errc::ClientStopped));
-}
 
 TEST(ClientV3Walk, CollectsTheWholeSubtreeAcrossSeveralRounds) {
   Fixture f;

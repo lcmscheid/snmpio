@@ -13,6 +13,7 @@ namespace {
 using test::respondWith;
 using test::respondWithError;
 using test::ScriptedAgent;
+using test::tableAgent;
 using test::targetFor;
 
 const Community publicCommunity{Community("public")};
@@ -154,26 +155,6 @@ TEST(ClientGetBulk, SendsNonRepeatersAndMaxRepetitionsInThePduSlotsThatCarryThem
 
 const Oid systemGroup{1, 3, 6, 1, 2, 1, 1};
 
-// An Agent serving a small in-order table, honouring GETNEXT and GETBULK alike.
-ScriptedAgent::Responder tableAgent(std::vector<Varbind> table) {
-  return [table = std::move(table)](const V2cMessage& msg) -> std::optional<Pdu> {
-    const Oid& from = msg.pdu.varbinds.at(0).name;
-    const auto count = msg.pdu.type == PduType::GetBulk
-                           ? static_cast<std::size_t>(msg.pdu.maxRepetitions())
-                           : std::size_t{1};
-
-    std::vector<Varbind> out;
-    for (const auto& vb : table) {
-      if (out.size() >= count) break;
-      if (from < vb.name) out.push_back(vb);
-    }
-    if (out.size() < count) {
-      out.emplace_back(Oid{1, 3, 6, 1, 2, 1, 2}, ValueException::EndOfMibView);
-    }
-    return respondWith(std::move(out));
-  };
-}
-
 std::vector<Varbind> smallTable() {
   // emplace_back, not push_back of a Varbind temporary: moving a Varbind moves the Value variant,
   // and GCC 13 mis-analyses that move as reading the Opaque alternative's uninitialised vector.
@@ -309,50 +290,6 @@ TEST(ClientWalk, StreamsBatchesAndReportsAnEarlyStopAsIncomplete) {
   EXPECT_EQ(seen.size(), 4U);
 }
 
-TEST(ClientWalk, ATotalCancellationFinishesTheBatchAndKeepsWhatItGot) {
-  Fixture f;
-  // ADR-0004's `total`: stop cleanly at a batch boundary, keep what arrived, and say so. The
-  // Agent fires the signal itself while answering the second round, so there is no timer to race.
-  net::asio::cancellation_signal signal;
-  auto table = tableAgent(smallTable());
-  ScriptedAgent agent(f.io, [&signal, &table](const V2cMessage& msg) {
-    auto reply = table(msg);
-    signal.emit(net::asio::cancellation_type::total);
-    return reply;
-  });
-  f.agent = &agent;
-
-  f.client.asyncWalkCollect(targetFor(agent), publicCommunity, systemGroup, WalkOptions{2},
-                            net::asio::bind_cancellation_slot(signal.slot(), f.collectToken()));
-  f.run();
-
-  EXPECT_EQ(f.ec, Errc::WalkIncomplete);
-  // The in-flight batch was finished, not dropped -- but the Walk did not reach the end.
-  EXPECT_EQ(f.collected.size(), 2U);
-}
-
-TEST(ClientWalk, ATerminalCancellationDropsTheWalkImmediately) {
-  Fixture f;
-  // The other half of ADR-0004's split. Terminal does not wait for a boundary, and the caller is
-  // told the operation was aborted rather than that the Subtree ended.
-  net::asio::cancellation_signal signal;
-  auto table = tableAgent(smallTable());
-  ScriptedAgent agent(f.io, [&signal, &table](const V2cMessage& msg) {
-    auto reply = table(msg);
-    signal.emit(net::asio::cancellation_type::terminal);
-    return reply;
-  });
-  f.agent = &agent;
-
-  f.client.asyncWalkCollect(targetFor(agent), publicCommunity, systemGroup, WalkOptions{2},
-                            net::asio::bind_cancellation_slot(signal.slot(), f.collectToken()));
-  f.run();
-
-  EXPECT_EQ(f.ec, net::asio::error::operation_aborted);
-  EXPECT_NE(f.ec, Errc::WalkIncomplete) << "aborted is not the same as incomplete";
-  EXPECT_TRUE(f.collected.empty()) << "terminal drops everything, it does not hand back a prefix";
-}
-
 TEST(ClientWalk, ACancelledWalkAgainstASilentTargetIsIncompleteNotTimedOut) {
   Fixture f;
   // The Agent answers once, then goes quiet at the same moment the Walk is cancelled. The
@@ -379,46 +316,8 @@ TEST(ClientWalk, ACancelledWalkAgainstASilentTargetIsIncompleteNotTimedOut) {
   EXPECT_EQ(f.collected.size(), 2U) << "the batch that did arrive is kept";
 }
 
-// One rule, whichever wait the request is in: terminal drops it at once, total stops it cleanly
-// but still takes a reply already on its way. The v3 half of the same rule -- a request queued
-// behind an Engine Discovery -- is pinned in TestClientV3.cpp.
-TEST(ClientCancel, ATerminalSignalAbortsARequestWaitingForAReply) {
-  Fixture f;
-  net::asio::cancellation_signal signal;
-  ScriptedAgent agent(f.io, [&signal](const V2cMessage&) -> std::optional<Pdu> {
-    signal.emit(net::asio::cancellation_type::terminal);
-    return std::nullopt;
-  });
-  f.agent = &agent;
-
-  f.client.asyncGet(targetFor(agent, 2), publicCommunity, {sysDescr},
-                    net::asio::bind_cancellation_slot(signal.slot(), f.requestToken()));
-  f.run();
-
-  EXPECT_EQ(f.ec, net::asio::error::operation_aborted);
-  EXPECT_EQ(agent.requestsSeen(), 1) << "terminal stops the retransmissions too";
-}
-
-TEST(ClientCancel, ATotalSignalAgainstASilentTargetIsAbortedNotTimedOut) {
-  Fixture f;
-  // The wait ran out, but the reason this request ended is the caller's signal, not the Target's
-  // silence -- and a caller must be able to tell the two apart.
-  net::asio::cancellation_signal signal;
-  ScriptedAgent agent(f.io, [&signal](const V2cMessage&) -> std::optional<Pdu> {
-    signal.emit(net::asio::cancellation_type::total);
-    return std::nullopt;
-  });
-  f.agent = &agent;
-
-  f.client.asyncGet(targetFor(agent, 2), publicCommunity, {sysDescr},
-                    net::asio::bind_cancellation_slot(signal.slot(), f.requestToken()));
-  f.run();
-
-  EXPECT_EQ(f.ec, net::asio::error::operation_aborted);
-  EXPECT_NE(f.ec, Errc::Timeout);
-  EXPECT_EQ(agent.requestsSeen(), 1) << "total stops the retransmissions";
-}
-
+// The rest of Client.hpp's cancellation rule -- every wait, under both types and stop() -- is
+// TestDisruptionMatrix.cpp's. This is the one case it does not cover: a reply that counts.
 TEST(ClientCancel, ATotalSignalStillTakesTheReplyAlreadyOnItsWay) {
   Fixture f;
   // The half that separates total from terminal: the exchange in flight is allowed to finish.
@@ -435,22 +334,6 @@ TEST(ClientCancel, ATotalSignalStillTakesTheReplyAlreadyOnItsWay) {
 
   EXPECT_FALSE(f.ec) << f.ec.message();
   ASSERT_EQ(f.response.varbinds.size(), 1U);
-}
-
-TEST(Client, FailsOutstandingRequestsWhenItStops) {
-  Fixture f;
-  ScriptedAgent agent(f.io, [](const V2cMessage&) { return std::nullopt; });
-
-  Target target = targetFor(agent);
-  target.timeout = std::chrono::seconds(30);  // long enough that only stop() can end this
-  f.agent = &agent;
-  f.client.asyncGet(target, publicCommunity, {sysDescr}, f.requestToken());
-
-  net::SteadyTimer fuse(f.io, std::chrono::milliseconds(20));
-  fuse.async_wait([&f](net::ErrorCode) { f.client.stop(); });
-
-  f.run();
-  EXPECT_EQ(f.ec, Errc::ClientStopped);
 }
 
 }  // namespace

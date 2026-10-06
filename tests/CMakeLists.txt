@@ -17,6 +17,7 @@ add_executable(snmpio_tests
   TestBerWriter.cpp
   TestClient.cpp
   TestClientV3.cpp
+  TestDisruptionMatrix.cpp
   TestError.cpp
   TestInterop.cpp
   TestInteropFaults.cpp

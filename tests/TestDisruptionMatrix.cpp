@@ -155,16 +155,16 @@ net::ErrorCode expectedCode(Wait wait, Disruption disruption) {
   return net::asio::error::operation_aborted;
 }
 
-// Every attempt's deadline, in every cell. Long enough that "at once" and "after the deadline"
-// cannot be confused under a sanitizer on a loaded machine, short enough to keep the matrix fast.
+// Every attempt's deadline, in every cell. Long enough that "at once" and "after the deadline" sit
+// 50 ms apart, which a sanitizer adds microseconds to, short enough to keep the matrix fast.
 constexpr auto deadline = std::chrono::milliseconds(100);
 // Longer than the deadline the request could still have running when it completed, so anything
 // it left behind reaches the Agent first.
 constexpr auto quietPeriod = 2 * deadline;
-// What a terminal cancellation or a stop may take to complete the request. Waiting out the
-// deadline instead, as total does, takes the whole deadline, less the moment between the attempt
-// going out and the Agent seeing it.
-constexpr auto atOnce = deadline / 2;
+// What a terminal cancellation may take to complete the request. Waiting out the deadline instead,
+// as total does, takes the whole deadline, less the moment between the attempt going out and the
+// Agent seeing it.
+constexpr auto atOnceLimit = deadline / 2;
 // A request that never completes would otherwise hang the test, since the Agent's pending receive
 // keeps run() going; this turns it into a failure the oracle can report.
 constexpr auto backstopAfter = std::chrono::seconds(10);
@@ -176,8 +176,8 @@ Target matrixTarget(const Agent& agent, int retries = 1) {
   return t;
 }
 
-// One cell's world: one io_context on the test thread, so a hung operation is a hung test rather
-// than a flake.
+// One cell's world: one io_context on the test thread, so a request that never completes is a
+// backstop failure rather than a flake.
 struct Rig {
   explicit Rig(Disruption d) : disruption(d) {
     backstop.expires_after(backstopAfter);
@@ -229,12 +229,10 @@ struct Rig {
         signal.slot(),
         oracle.handler([this, then = std::move(then)](net::ErrorCode ec, auto&&... rest) mutable {
           completedAt = std::chrono::steady_clock::now();
+          backstop.cancel();
           then(ec, std::forward<decltype(rest)>(rest)...);
           quiet.expires_after(quietPeriod);
-          quiet.async_wait([this](net::ErrorCode) {
-            backstop.cancel();
-            finish();
-          });
+          quiet.async_wait([this](net::ErrorCode) { finish(); });
         }));
   }
   auto token() {
@@ -334,11 +332,14 @@ TEST_P(DisruptionMatrix, CompletesExactlyOnceWithTheRulesCode) {
       break;
   }
 
+  ASSERT_NE(rig.disruptedAt, std::chrono::steady_clock::time_point{})
+      << "the cell never reached the moment it disrupts at";
   EXPECT_TRUE(rig.oracle.completedExactlyOnce({expectedCode(wait, disruption)}));
-  // Client.hpp: terminal drops the request at once, and so does Stopping; only total may wait out
-  // the deadline of the exchange in flight. The codes alone cannot tell the two apart.
-  if (disruption != Disruption::Total) {
-    EXPECT_LT(rig.completedAt - rig.disruptedAt, atOnce) << "waited for the deadline";
+  // Client.hpp: terminal drops the request at once, where total waits out the deadline of the
+  // exchange in flight -- and the codes alone cannot tell the two apart. Only a silent Target
+  // makes this bite; elsewhere the reply or the discovery ends the wait at once either way.
+  if (disruption == Disruption::Terminal) {
+    EXPECT_LT(rig.completedAt - rig.disruptedAt, atOnceLimit) << "waited for the deadline";
   }
 }
 

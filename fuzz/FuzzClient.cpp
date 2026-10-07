@@ -8,6 +8,7 @@
 // completion is judged against the threat model (docs/threat-model.md):
 //
 //   L1  every Outstanding Request completes exactly once, and its handler is destroyed once;
+//   R5  no reply the Client drops fails a request before its deadline;
 //   R6  at authNoPriv and authPriv, nothing unauthenticated completes or fails a request before its
 //       deadline, except an unsigned Report and the answer to Engine Discovery's identity phase;
 //   R8  at v2c and noAuthNoPriv, only a datagram that matches the request completes or fails it.
@@ -16,8 +17,8 @@
 // datagram the Agent sends is recorded as it goes out and classified once the run is over (Ledger,
 // below), by the rule the threat model gives, and a completion must be one some datagram entitled.
 // A completion nothing entitled has to be one a deadline produced, and a deadline cannot pass
-// early: a request that reports one in less time than its Target allows for a single exchange broke
-// the rule.
+// early: a request that reports one sooner than its Target's whole deadline, every retry included,
+// broke the rule.
 //
 // The classification is coarser than the Client's matching, never finer. It ignores the Time
 // Window, which the Client checks and it does not, and it credits a discovery's answer to every
@@ -196,12 +197,16 @@ class Ledger {
 
     if (seen->owner == HostileAgent::Owner::Discovery) {
       // The identity phase reads only the engineID, and fails without one. The time-sync phase
-      // fails with a Report's error, or on a signed pair at the boots ceiling.
+      // fails with a Report's error, except an unsigned notInTimeWindows, which it drops (R6 (1),
+      // ADR-0008's amendment), or on a signed pair at the boots ceiling.
       if (seen->engineId.empty()) {
         if (msg->security.engineId.empty()) grantDiscovery(Errc::UnknownEngineId);
         return;
       }
-      if (isReport) m_discoveryErrors.push_back(reportError(msg->scoped.pdu));
+      if (isReport) {
+        const auto error = reportError(msg->scoped.pdu);
+        if (verified || error != Errc::NotInTimeWindow) m_discoveryErrors.push_back(error);
+      }
       if (verified && msg->security.boots == std::numeric_limits<std::int32_t>::max()) {
         grantDiscovery(Errc::NotInTimeWindow);
       }
@@ -226,7 +231,7 @@ class Ledger {
   void credit(const HostileAgent::Seen& seen, Grant grant) {
     switch (seen.owner) {
       case HostileAgent::Owner::Request:
-        if (seen.request < m_entitlements.size()) grant(m_entitlements[seen.request]);
+        if (seen.requestIndex < m_entitlements.size()) grant(m_entitlements[seen.requestIndex]);
         return;
       case HostileAgent::Owner::Discovery:
         return;
@@ -308,10 +313,11 @@ void judge(std::size_t request, const Outcome& outcome, const Ledger& ledger,
     violated(rule, where + ", which no matching Response entitled it to");
   }
 
-  // A deadline cannot pass early, and every deadline is at least one full exchange.
+  // A deadline cannot pass early, and every deadline is at least the Target's whole one: each
+  // attempt's timeout, every retry included.
   const bool atDeadline = outcome.elapsed >= target.timeout * (target.retries + 1);
   if (code == Errc::Timeout) {
-    if (!atDeadline) violated("R5", where + ", before a whole exchange could time out");
+    if (!atDeadline) violated("R5", where + ", before its deadline could pass");
     return;
   }
   if (profile.mode != Mode::V2c) {

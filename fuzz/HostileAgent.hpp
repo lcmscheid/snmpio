@@ -126,7 +126,7 @@ inline Pdu usmReport(std::uint32_t counter) {
 class HostileAgent {
  public:
   enum class Owner : std::uint8_t {
-    Request,    // a Get the fuzzer initiated; `request` says which
+    Request,    // a Get the fuzzer initiated; `requestIndex` says which
     Discovery,  // either phase of Engine Discovery
     Unknown,    // a request this Agent could not read
   };
@@ -134,7 +134,7 @@ class HostileAgent {
   // What the Agent learnt from the request that carried one Message ID (v3) or request-id (v2c).
   struct Seen {
     Owner owner = Owner::Unknown;
-    std::size_t request = 0;
+    std::size_t requestIndex = 0;
     SecurityLevel level = SecurityLevel::NoAuthNoPriv;
     Octets engineId;
   };
@@ -174,6 +174,15 @@ class HostileAgent {
   }
 
  private:
+  // What one reply is, by the script's choice.
+  enum class ReplyKind : std::uint8_t { Compliant, Rewritten, Mutated, Resigned, Noise };
+
+  // A v2c reply before it is encoded: every field the script can rewrite.
+  struct V2cReply {
+    std::string community;
+    Pdu pdu;
+  };
+
   // A v3 reply before it is encoded: every field the script can rewrite, and the keys it is
   // signed and encrypted with.
   struct V3Reply {
@@ -209,7 +218,7 @@ class HostileAgent {
       s.owner = Owner::Discovery;
     } else if (const auto index = requestIndex(pdu)) {
       s.owner = Owner::Request;
-      s.request = *index;
+      s.requestIndex = *index;
     }
     return s;
   }
@@ -238,6 +247,43 @@ class HostileAgent {
     return (std::size_t{m_script->byte()} + 1) % 4;
   }
 
+  // Sends one request its replies, each the compliant reply made into what the script chooses. The
+  // choice's top bit sends it from the second socket. Only v3 has a digest to sign again, so at v2c
+  // `resign` does nothing and a Resigned reply is a Mutated one.
+  template <typename Reply, typename Rewrite, typename Encode, typename Resign>
+  void sendReplies(const Reply& compliant, Rewrite rewrite, Encode encode, Resign resign) {
+    for (auto n = replyCount(); n > 0; --n) {
+      const auto choice = m_script->byte();
+      const bool fromTarget = (choice & 0x80U) == 0;
+      Reply reply = compliant;
+      Octets bytes;
+      switch (static_cast<ReplyKind>(choice % 5)) {
+        case ReplyKind::Compliant:
+          bytes = encode(reply);
+          break;
+        case ReplyKind::Rewritten:
+          rewrite(reply);
+          bytes = encode(reply);
+          break;
+        case ReplyKind::Mutated:
+          rewrite(reply);
+          bytes = encode(reply);
+          mutate(bytes);
+          break;
+        case ReplyKind::Resigned:
+          rewrite(reply);
+          bytes = encode(reply);
+          mutate(bytes);
+          resign(bytes, reply);
+          break;
+        case ReplyKind::Noise:
+          bytes = m_script->bytes(std::size_t{m_script->byte()} * 2);
+          break;
+      }
+      send(bytes, fromTarget);
+    }
+  }
+
   // ---- v2c ----
 
   void answerV2c(std::span<const std::byte> datagram) {
@@ -246,38 +292,20 @@ class HostileAgent {
     if (!msg) return;
     remember(msg->pdu.requestId, seenFrom(msg->pdu));
 
-    for (auto n = replyCount(); n > 0; --n) {
-      const auto kind = m_script->byte();
-      const bool fromTarget = (kind & 0x80U) == 0;
-      std::string community = msg->community;
-      Pdu pdu = respondTo(msg->pdu);
-      Octets bytes;
-      switch (kind % 5) {
-        case 0:
-          bytes = encodeV2cMessage(community, pdu, ec);
-          break;
-        case 1:
-          rewriteV2c(community, pdu);
-          bytes = encodeV2cMessage(community, pdu, ec);
-          break;
-        case 2:
-        case 3:
-          rewriteV2c(community, pdu);
-          bytes = encodeV2cMessage(community, pdu, ec);
-          mutate(bytes);
-          break;
-        default:
-          bytes = m_script->bytes(std::size_t{m_script->byte()} * 2);
-          break;
-      }
-      send(bytes, fromTarget);
-    }
+    sendReplies(
+        V2cReply{msg->community, respondTo(msg->pdu)},
+        [this](V2cReply& reply) { rewriteV2c(reply); },
+        [](const V2cReply& reply) {
+          net::ErrorCode encodeEc;
+          return encodeV2cMessage(reply.community, reply.pdu, encodeEc);
+        },
+        [](Octets& /*bytes*/, const V2cReply& /*reply*/) {});
   }
 
-  void rewriteV2c(std::string& community, Pdu& pdu) {
-    rewriteId(pdu.requestId);
-    rewritePdu(pdu);
-    if (m_script->pick(2) == 1) community = "private";
+  void rewriteV2c(V2cReply& reply) {
+    rewriteId(reply.pdu.requestId);
+    rewritePdu(reply.pdu);
+    if (m_script->pick(2) == 1) reply.community = "private";
   }
 
   // ---- v3 ----
@@ -299,36 +327,12 @@ class HostileAgent {
     seen.engineId = msg->security.engineId;
     remember(msg->header.msgId, std::move(seen));
 
-    for (auto n = replyCount(); n > 0; --n) {
-      const auto kind = m_script->byte();
-      const bool fromTarget = (kind & 0x80U) == 0;
-      V3Reply reply = compliantV3(*msg, authenticated, readable);
-      Octets bytes;
-      switch (kind % 5) {
-        case 0:
-          bytes = encode(reply);
-          break;
-        case 1:
-          rewriteV3(reply, *msg);
-          bytes = encode(reply);
-          break;
-        case 2:
-          rewriteV3(reply, *msg);
-          bytes = encode(reply);
-          mutate(bytes);
-          break;
-        case 3:
-          rewriteV3(reply, *msg);
-          bytes = encode(reply);
-          mutate(bytes);
-          resign(bytes, reply);
-          break;
-        default:
-          bytes = m_script->bytes(std::size_t{m_script->byte()} * 2);
-          break;
-      }
-      send(bytes, fromTarget);
-    }
+    const V3Message& request = *msg;
+    sendReplies(
+        compliantV3(request, authenticated, readable),
+        [this, &request](V3Reply& reply) { rewriteV3(reply, request); },
+        [this](const V3Reply& reply) { return encode(reply); },
+        [this](Octets& bytes, const V3Reply& reply) { resign(bytes, reply); });
   }
 
   // What a compliant Agent answers, in the order RFC 3414 section 3.2 checks things.

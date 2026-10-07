@@ -95,19 +95,28 @@ jobs:
       # The fuzzers' asserts are their oracles and are live whatever the build type
       # (fuzz/CMakeLists.txt), so the seed corpus is replayed on its own first: a regression an
       # existing seed already reaches fails here, by name, before any mutation is involved.
+      #
+      # FuzzClient's seeds are scripts for its Agent, not datagrams (fuzz/HostileAgent.hpp), so it
+      # has a corpus and a work directory of its own.
       - name: Replay the seed corpus
         run: |
           for fuzzer in build-fuzz/fuzz/Fuzz*; do
-            "$fuzzer" fuzz/corpus -runs=0
+            corpus=fuzz/corpus
+            if [ "$(basename "$fuzzer")" = FuzzClient ]; then corpus=fuzz/corpus-client; fi
+            "$fuzzer" "$corpus" -runs=0
           done
 
       # A short run per commit, so a regression that the seed corpus already covers is caught
       # immediately. Long campaigns belong in a scheduled job, not on the PR path.
       - name: Fuzz
         run: |
-          mkdir -p .fuzz-work
+          mkdir -p .fuzz-work .fuzz-work-client
           for fuzzer in build-fuzz/fuzz/Fuzz*; do
-            "$fuzzer" .fuzz-work fuzz/corpus -max_total_time=60 -print_final_stats=1
+            work=.fuzz-work corpus=fuzz/corpus
+            if [ "$(basename "$fuzzer")" = FuzzClient ]; then
+              work=.fuzz-work-client corpus=fuzz/corpus-client
+            fi
+            "$fuzzer" "$work" "$corpus" -max_total_time=60 -print_final_stats=1
           done
 
       - name: Upload crashes

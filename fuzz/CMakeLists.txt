@@ -19,6 +19,7 @@ target_compile_definitions(snmpio_fuzz_options INTERFACE
 add_library(snmpio_fuzzed STATIC
   ${CMAKE_SOURCE_DIR}/src/BerReader.cpp
   ${CMAKE_SOURCE_DIR}/src/BerWriter.cpp
+  ${CMAKE_SOURCE_DIR}/src/Client.cpp
   ${CMAKE_SOURCE_DIR}/src/Error.cpp
   ${CMAKE_SOURCE_DIR}/src/Oid.cpp
   ${CMAKE_SOURCE_DIR}/src/Pdu.cpp
@@ -26,18 +27,28 @@ add_library(snmpio_fuzzed STATIC
   ${CMAKE_SOURCE_DIR}/src/V3Message.cpp
   ${CMAKE_SOURCE_DIR}/src/Value.cpp)
 target_include_directories(snmpio_fuzzed PUBLIC ${CMAKE_SOURCE_DIR}/include)
-target_link_libraries(snmpio_fuzzed PUBLIC snmpio_fuzz_options PRIVATE OpenSSL::Crypto)
+target_link_libraries(snmpio_fuzzed
+  PUBLIC snmpio_fuzz_options ${SNMPIO_ASIO_TARGET} Threads::Threads PRIVATE OpenSSL::Crypto)
+if(SNMPIO_ASIO_INCLUDE_DIRS)
+  target_include_directories(snmpio_fuzzed SYSTEM PUBLIC ${SNMPIO_ASIO_INCLUDE_DIRS})
+endif()
 target_compile_features(snmpio_fuzzed PUBLIC cxx_std_20)
 if(SNMP_USE_BOOST_ASIO)
   target_compile_definitions(snmpio_fuzzed PUBLIC SNMPIO_USE_BOOST_ASIO=1)
+else()
+  target_compile_definitions(snmpio_fuzzed PUBLIC ASIO_STANDALONE=1)
 endif()
 
-foreach(target FuzzBerValue FuzzBerVarbindList FuzzOidText FuzzV2cMessage FuzzV3Message)
+foreach(target FuzzBerValue FuzzBerVarbindList FuzzClient FuzzOidText FuzzV2cMessage FuzzV3Message)
   add_executable(${target} ${target}.cpp)
   target_link_libraries(${target} PRIVATE snmpio_fuzzed)
 endforeach()
 
+# FuzzClient's seeds are scripts for its Agent rather than datagrams, so they are a corpus of their
+# own: the datagram fuzzers gain nothing from them, and FuzzClient nothing from datagrams.
 add_custom_target(fuzz_corpus
   COMMAND ${CMAKE_COMMAND} -E copy_directory
     ${CMAKE_CURRENT_SOURCE_DIR}/corpus ${CMAKE_CURRENT_BINARY_DIR}/corpus
+  COMMAND ${CMAKE_COMMAND} -E copy_directory
+    ${CMAKE_CURRENT_SOURCE_DIR}/corpus-client ${CMAKE_CURRENT_BINARY_DIR}/corpus-client
   COMMENT "Staging the seed corpus")

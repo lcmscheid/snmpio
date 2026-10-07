@@ -16,8 +16,8 @@ Blumenthal and the Reeder key extension. Stage 5's automated half is done too: e
 reaches `snmpd` and both Simulator images in CI, and what stage 5 still needs is a run of the
 hardware checklist.
 
-Stage 6 has begun. Its sanitizer builds are done, and the rest of it is measured against the
-[threat model](docs/threat-model.md).
+Stage 6 has begun. Its sanitizer builds and the stateful Client fuzzer are done, and the rest of it
+is measured against the [threat model](docs/threat-model.md).
 
 | Stage | Deliverable | State |
 |---|---|---|
@@ -27,7 +27,7 @@ Stage 6 has begun. Its sanitizer builds are done, and the rest of it is measured
 | 3 | Async Engine Discovery, time sync, Report handling | **done** |
 | 4 | Privacy: AES-128, then AES-192/256 under both key extensions, DES behind the legacy provider | **done** |
 | 5 | Interop matrix vs the Simulator, `snmpd`, and real vendor gear | automated half **done**; the [hardware checklist](#pre-release-hardware-checklist) remains |
-| 6 | Safe to depend on: the [threat model](docs/threat-model.md), sanitizer and stress harness, destroying a Client stops it, hardening against a hostile network | sanitizer builds **done**; the rest in progress |
+| 6 | Safe to depend on: the [threat model](docs/threat-model.md), sanitizer and stress harness, destroying a Client stops it, hardening against a hostile network | sanitizer builds and Client fuzzer **done**; the rest in progress |
 | 7 | Docs, packaging and release | |
 
 ## Using it
@@ -633,11 +633,20 @@ the curated seeds stay curated. To replay the seeds alone, as CI does before it 
 ./build/fuzz/fuzz/FuzzV2cMessage fuzz/corpus -runs=0
 ```
 
+`FuzzClient` takes `fuzz/corpus-client` instead, and a work directory of its own: its inputs are
+scripts for its Agent, not datagrams.
+
+```sh
+mkdir -p .fuzz-work-client
+./build/fuzz/fuzz/FuzzClient .fuzz-work-client fuzz/corpus-client
+```
+
 The fuzzers' `assert`s are their oracles, so they are live in every fuzz build: the build type
 defines `NDEBUG`, and the fuzz targets undefine it. The targets are also built under ASan+UBSan with
 Asio's recycling off and standard-library hardening on, as the sanitizer builds are.
 
-Five targets, each asserting a round-trip identity rather than merely "does not crash":
+Five targets over the codec, each asserting a round-trip identity rather than merely "does not
+crash":
 
 - `FuzzBerValue` — anything the value decoder accepts must re-encode and decode back identically.
 - `FuzzBerVarbindList` — the same, over the nesting path: scope entry, length patching, and the
@@ -650,6 +659,16 @@ Five targets, each asserting a round-trip identity rather than merely "does not 
   then used to index the datagram, which is exactly the shape of bug a fuzzer under ASan finds and
   review does not; decryption then hands a buffer of noise to the BER decoder, which is the same
   shape one layer down.
+
+And one over the Client:
+
+- `FuzzClient` — a real Client with Outstanding Requests, at v2c and each v3 Security Level, against
+  a Scripted Agent on loopback that answers with what the input chooses: compliant replies, replies
+  with chosen fields rewritten, mutated bytes, mutated bytes signed again with the real key, noise,
+  or any of them from the wrong address. Every completion is checked against the threat model:
+  exactly once, and only as some datagram the rules accept entitled it, or at a deadline. Its
+  oracle, and where it is coarser than the rules, is in
+  [the threat model](docs/threat-model.md#the-client-fuzzer).
 
 ## What stage 4 contains
 

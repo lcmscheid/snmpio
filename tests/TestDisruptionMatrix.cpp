@@ -115,9 +115,8 @@ TEST(CompletionOracle, CountsOnlyTheLiveHandlerAcrossMoves) {
 
 // ---------------------------------------------------------------------------
 // The disruption matrix: the three waits an Outstanding Request can be in (CONTEXT.md), plus the
-// first of them inside a Walk, where ADR-0004 reads `total` differently -- crossed with the three
-// disruptions the Client supports today. Destruction is the fourth disruption, and its column
-// arrives with ADR-0009's implementation (#31).
+// first of them inside a Walk, where ADR-0004 reads `total` differently -- crossed with the four
+// disruptions: the two cancellation types, stop(), and destroying the Client (ADR-0009).
 //
 // Every cell runs through the public API against a Scripted Agent on loopback, and every one is
 // disrupted from inside the Agent, at the moment the datagram that marks its wait arrives -- so
@@ -140,15 +139,20 @@ enum class Wait : std::uint8_t {
   MidWalk,                // a Walk's second round is in flight, its first batch delivered
 };
 
-enum class Disruption : std::uint8_t { Terminal, Total, Stop };
+enum class Disruption : std::uint8_t { Terminal, Total, Stop, Destroy };
 
 using Cell = std::tuple<Wait, Disruption>;
 
 // Client.hpp's cancellation rule and ADR-0004's Walk rule, as a table. Stopping is ClientStopped
-// in every wait; a cancellation is operation_aborted wherever no reply counted; and a Walk reads
-// `total` as finish the batch in flight, then report that the Walk is incomplete.
+// in every wait, and destruction is Stopping (ADR-0009); a cancellation is operation_aborted
+// wherever no reply counted; and a Walk reads `total` as finish the batch in flight, then report
+// that the Walk is incomplete.
+bool endsInStopping(Disruption disruption) {
+  return disruption == Disruption::Stop || disruption == Disruption::Destroy;
+}
+
 net::ErrorCode expectedCode(Wait wait, Disruption disruption) {
-  if (disruption == Disruption::Stop) return make_error_code(Errc::ClientStopped);
+  if (endsInStopping(disruption)) return make_error_code(Errc::ClientStopped);
   if (disruption == Disruption::Total && wait == Wait::MidWalk) {
     return make_error_code(Errc::WalkIncomplete);
   }
@@ -161,9 +165,9 @@ constexpr auto deadline = std::chrono::milliseconds(100);
 // Longer than the deadline the request could still have running when it completed, so anything
 // it left behind reaches the Agent first.
 constexpr auto quietPeriod = 2 * deadline;
-// What a terminal cancellation may take to complete the request. Waiting out the deadline instead,
-// as total does, takes the whole deadline, less the moment between the attempt going out and the
-// Agent seeing it.
+// What a terminal cancellation or Stopping may take to complete the request. Waiting out the
+// deadline instead, as total does, takes the whole deadline, less the moment between the attempt
+// going out and the Agent seeing it.
 constexpr auto atOnceLimit = deadline / 2;
 // A request that never completes would otherwise hang the test, since the Agent's pending receive
 // keeps run() going; this turns it into a failure the oracle can report.
@@ -189,7 +193,8 @@ struct Rig {
   }
 
   net::IoContext io;
-  Client client{io.get_executor()};
+  // Optional so that the Destroy column can end it mid-request. Every other column leaves it be.
+  std::optional<Client> client{std::in_place, io.get_executor()};
   CompletionOracle oracle{io};
   net::asio::cancellation_signal signal;
   Disruption disruption;
@@ -200,7 +205,7 @@ struct Rig {
   std::chrono::steady_clock::time_point completedAt;
 
   void finish() {
-    client.stop();
+    if (client) client->stop();
     closeAgent();
   }
 
@@ -214,7 +219,10 @@ struct Rig {
         signal.emit(net::asio::cancellation_type::total);
         break;
       case Disruption::Stop:
-        client.stop();
+        client->stop();
+        break;
+      case Disruption::Destroy:
+        client.reset();
         break;
     }
   }
@@ -248,7 +256,7 @@ void silentTarget(Rig& rig, int disruptAt) {
   });
   rig.closeAgent = [&agent] { agent.close(); };
 
-  rig.client.asyncGet(matrixTarget(agent, 2), publicCommunity, {sysDescr}, rig.token());
+  rig.client->asyncGet(matrixTarget(agent, 2), publicCommunity, {sysDescr}, rig.token());
   rig.io.run();
 
   EXPECT_EQ(agent.requestsSeen(), disruptAt) << "an attempt went out after the disruption";
@@ -270,7 +278,7 @@ void queuedBehindDiscovery(Rig& rig) {
   });
   rig.closeAgent = [&agent] { agent.close(); };
 
-  rig.client.asyncGet(matrixTarget(agent), credentials(), {sysDescr}, rig.token());
+  rig.client->asyncGet(matrixTarget(agent), credentials(), {sysDescr}, rig.token());
   rig.io.run();
 
   // The data plane is answered only for an exchange of the request's own. Reaching it would mean
@@ -294,10 +302,10 @@ void midWalk(Rig& rig) {
   rig.closeAgent = [&agent] { agent.close(); };
 
   std::vector<Varbind> collected;
-  rig.client.asyncWalkCollect(matrixTarget(agent), publicCommunity, systemGroup, WalkOptions{2},
-                              rig.token([&collected](net::ErrorCode, std::vector<Varbind> vbs) {
-                                collected = std::move(vbs);
-                              }));
+  rig.client->asyncWalkCollect(matrixTarget(agent), publicCommunity, systemGroup, WalkOptions{2},
+                               rig.token([&collected](net::ErrorCode, std::vector<Varbind> vbs) {
+                                 collected = std::move(vbs);
+                               }));
   rig.io.run();
 
   EXPECT_EQ(agent.requestsSeen(), 2) << "the Walk went on to a third round";
@@ -308,6 +316,11 @@ void midWalk(Rig& rig) {
   }
   if (rig.disruption == Disruption::Terminal) {
     EXPECT_TRUE(collected.empty()) << "terminal handed back a prefix";
+  }
+  // Stopping began as the second round reached the Agent, which still answered it: that batch must
+  // never reach the batch handler, whatever became of the reply (threat model, L6).
+  if (endsInStopping(rig.disruption)) {
+    EXPECT_EQ(collected.size(), 2U) << "a batch was delivered after Stopping began";
   }
 }
 
@@ -336,9 +349,10 @@ TEST_P(DisruptionMatrix, CompletesExactlyOnceWithTheRulesCode) {
       << "the cell never reached the moment it disrupts at";
   EXPECT_TRUE(rig.oracle.completedExactlyOnce({expectedCode(wait, disruption)}));
   // Client.hpp: terminal drops the request at once, where total waits out the deadline of the
-  // exchange in flight -- and the codes alone cannot tell the two apart. Only a silent Target
-  // makes this bite; elsewhere the reply or the discovery ends the wait at once either way.
-  if (disruption == Disruption::Terminal) {
+  // exchange in flight -- and the codes alone cannot tell the two apart. Stopping is at once too,
+  // whatever the request was doing when it began. Only a silent Target makes this bite; elsewhere
+  // the reply or the discovery ends the wait at once either way.
+  if (disruption != Disruption::Total) {
     EXPECT_LT(rig.completedAt - rig.disruptedAt, atOnceLimit) << "waited for the deadline";
   }
 }
@@ -366,6 +380,8 @@ std::string_view nameOf(Disruption disruption) {
       return "Total";
     case Disruption::Stop:
       return "Stop";
+    case Disruption::Destroy:
+      return "Destroy";
   }
   return "Unknown";
 }
@@ -379,7 +395,8 @@ INSTANTIATE_TEST_SUITE_P(
     Client, DisruptionMatrix,
     testing::Combine(testing::Values(Wait::AwaitingAReply, Wait::BetweenRetransmissions,
                                      Wait::QueuedBehindDiscovery, Wait::MidWalk),
-                     testing::Values(Disruption::Terminal, Disruption::Total, Disruption::Stop)),
+                     testing::Values(Disruption::Terminal, Disruption::Total, Disruption::Stop,
+                                     Disruption::Destroy)),
     cellName);
 
 }  // namespace

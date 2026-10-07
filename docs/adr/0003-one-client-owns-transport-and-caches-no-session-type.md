@@ -20,3 +20,9 @@ waiting on. All of this state is confined to the client's own internal strand â€
 operation from any thread is safe, and internal state is only ever touched on that strand â€” so none
 of the caches need locking. "Same device, two users" and "same engine, two addresses" both fall out
 for free instead of being special cases.
+
+## Amendment, 2026-10-08: one atomic outside the strand
+
+All of the state is still confined to the strand but one flag: the one Stopping sets, an atomic
+written on whichever thread calls `stop()` or destroys the Client, so that Stopping takes effect at
+once. ADR-0009's amendment of the same date says why.

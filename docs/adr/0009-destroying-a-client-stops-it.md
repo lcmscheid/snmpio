@@ -39,3 +39,17 @@ who needs to move one holds a `std::unique_ptr<Client>`.
 
 ADR-0003 is unchanged: one Client still owns the transport and the caches. They are now reached
 through a shared implementation rather than held directly.
+
+## Amendment, 2026-10-08: the batch guarantee is the strand's
+
+The Consequences above say a batch handler is never called after destruction begins. That holds as
+the strand sees it: for a destruction on the strand, or one that happens-before the strand reaches
+the batch. A destruction on another thread can race a batch the strand is already delivering, and
+the handler can then run after `~Client` has returned. Closing that window would mean `~Client`
+waiting for the handler, which it must never do: it may be running on the strand, or with the
+`io_context` stopped. Whether to wait off the strand only is #62.
+
+The Stopping flag is also the one piece of state not confined to the strand, against ADR-0003's
+"internal state is only ever touched on that strand". It is an atomic, written by `stop()` and
+`~Client` on the calling thread, so that Stopping takes effect before the strand gets round to the
+cleanup. ADR-0003 carries the matching amendment.

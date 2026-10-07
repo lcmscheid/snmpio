@@ -143,16 +143,7 @@ class Client::Impl {
     // Dispatched rather than posted: stop() is usually the last thing before the io_context
     // drains, and a posted cleanup would never run. Owning `self`, because the Client that asked
     // may be gone by the time it runs.
-    try {
-      net::asio::dispatch(self->m_strand, [self] { self->finishStopping(); });
-    } catch (...) {
-      // Scheduling the cleanup allocates. If that fails, the flag must not stay set: it would
-      // make every later stop(), and the destructor, a no-op against a Client whose sockets are
-      // still open -- half-stopped, with a run() that never returns. The caller gets the
-      // exception instead, and stopping again is a real retry.
-      self->m_stopping = false;
-      throw;
-    }
+    net::asio::dispatch(self->m_strand, [self] { self->finishStopping(); });
   }
 
   net::Awaitable<RequestResult> doRequest(Ref self, Target target, Auth auth, Pdu pdu);

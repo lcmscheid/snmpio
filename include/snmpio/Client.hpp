@@ -33,8 +33,9 @@ struct Response {
 // The SNMPv2c Command Generator.
 //
 // One Client owns the transport and the caches; there is no session type, and ADR-0003 explains
-// at length why not. Everything internal lives on the Client's own strand, so initiating an
-// operation from any thread is safe and none of the state needs locking.
+// at length why not. Everything internal lives on the Client's own strand -- all but the flag
+// Stopping sets, an atomic (ADR-0009) -- so initiating an operation from any thread is safe and
+// none of the state needs locking.
 //
 // Completion follows the Asio convention throughout: every operation takes a completion token and
 // reports failure as an ErrorCode. Three categories can show up there -- the system's, for socket

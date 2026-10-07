@@ -122,12 +122,12 @@ constexpr auto rethrow = [](const std::exception_ptr& e) {
 // Everything the Client knows, shared by every coroutine working on it (ADR-0009), so that the
 // Client itself can go at any time and the coroutines still have something to finish against.
 //
-// Every coroutine here is a member taking `Ref self` first, and that parameter is the whole of how
-// the frame keeps `this` alive across its suspensions (C++ Core Guidelines CP.53): the body reaches
-// the members through `this` as usual, and passes `self` on to each coroutine it starts. Nothing
-// holds a pointer to the Client itself. The cycle this makes -- the state owns the sockets and
-// timers, and their pending waits own the frames -- is what Stopping breaks, by closing the one
-// and cancelling the other.
+// Every coroutine here that touches the state is a member taking `Ref self` first, and that
+// parameter is the whole of how the frame keeps `this` alive across its suspensions (C++ Core
+// Guidelines CP.53): the body reaches the members through `this` as usual, and passes `self` on to
+// each coroutine it starts. Nothing holds a pointer to the Client itself. The cycle this makes --
+// the state owns the sockets and timers, and their pending waits own the frames -- is what Stopping
+// breaks, by closing the one and cancelling the other.
 class Client::Impl {
  public:
   using Ref = std::shared_ptr<Impl>;
@@ -141,7 +141,7 @@ class Client::Impl {
     // Dispatched rather than posted: stop() is usually the last thing before the io_context
     // drains, and a posted cleanup would never run. Owning `self`, because the Client that asked
     // may be gone by the time it runs.
-    net::asio::dispatch(self->m_strand, [self] { self->close(); });
+    net::asio::dispatch(self->m_strand, [self] { self->finishStopping(); });
   }
 
   net::Awaitable<RequestResult> doRequest(Ref self, Target target, Auth auth, Pdu pdu);
@@ -206,7 +206,7 @@ class Client::Impl {
 
   // Stopping's second half, on the strand: closes the sockets, which ends the receive loops, and
   // wakes everything waiting, which then finds the flag set and completes with ClientStopped.
-  void close();
+  void finishStopping();
 
   std::int32_t nextId() noexcept;
 
@@ -308,7 +308,7 @@ net::Awaitable<Client::CollectResult> Client::doWalkCollect(Target target, Auth 
                                options);
 }
 
-void Client::Impl::close() {
+void Client::Impl::finishStopping() {
   // close() hands back the same ErrorCode it writes to the out-parameter; std::ignore says the
   // discard is deliberate rather than forgotten.
   net::ErrorCode ignored;
@@ -621,9 +621,11 @@ net::Awaitable<net::ErrorCode> Client::Impl::transact(Ref self, Target target,
   // Terminal drops the exchange whatever else happened, including a reply that landed while the
   // signal was on its way; total lets that reply count, and ends the request otherwise. Both are
   // ahead of dropReason as well as of ec: the caller asked for this to stop, so that is the
-  // honest answer rather than what the Target was last heard doing.
+  // honest answer rather than what the Target was last heard doing. A reply accepted as Stopping
+  // began does not count either: every Outstanding Request completes with ClientStopped then, and
+  // one whose reply was in hand is still outstanding until this returns.
   if (aborted()) co_return net::ErrorCode(net::asio::error::operation_aborted);
-  if (pending->answered) co_return net::ErrorCode{};
+  if (pending->answered && !m_stopping) co_return net::ErrorCode{};
   // Spelled out rather than reusing softCancelled(). Not style: GCC 16 emits a spurious
   // -Wmismatched-new-delete from inside Asio's coroutine frame allocator, blamed on doRequestV3,
   // for almost any perturbation of this block's inlining -- reusing the lambda, hoisting it, or

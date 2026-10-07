@@ -270,6 +270,8 @@ class Client {
   // coroutines (ADR-0009). Defined in Client.cpp.
   class Impl;
 
+  // The same strand Impl runs on, kept here as well so that spawn's initiation can hold it without
+  // reaching through `this` or m_impl.
   net::Strand m_strand;
   std::shared_ptr<Impl> m_impl;
 };

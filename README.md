@@ -83,8 +83,8 @@ Three things the compiler will not tell you:
   `authPriv` level with `PrivProtocol::None` is `Errc::UnsupportedPrivProtocol` rather than an
   `authNoPriv` request.
 - **`io.run()` returns only after the Client stops.** The Client's receive loop is outstanding
-  work. `stop()` ends it, and so does destroying the Client, which stops it (ADR-0009): everything
-  in flight completes with `Errc::ClientStopped`, exactly once, on its own executor. Like a socket,
+  work. `stop()` ends it, and so does destroying the Client, which stops it (ADR-0009): every
+  Outstanding Request completes with `Errc::ClientStopped`, exactly once, on its own executor. Like a socket,
   a Client can be destroyed with requests outstanding, from any thread, even from inside one of its
   own completion handlers. The only lifetime rule left is Asio's own: the `io_context` must outlive
   the work scheduled on it. Completions can run after the Client is gone, so a handler must not

@@ -143,20 +143,32 @@ TEST(ClientLifetime, DestroyedFromAnotherThreadStopsItsOutstandingRequests) {
   EXPECT_TRUE(oracle.completedExactlyOnce({make_error_code(Errc::ClientStopped)}));
 }
 
+// Runs `then` after `hops` trips through the io_context. Nothing in the public API lands an event
+// at a chosen step inside the Client, so the sweeps below try every step in turn: which hop count
+// lands in which step is Asio's business and may change, and the rule has to hold at all of them.
+void afterHops(net::IoContext& io, int hops, std::function<void()> then) {
+  // Built inside out, one post wrapped around the next, so that nothing here recurses.
+  for (int i = 0; i < hops; ++i) {
+    then = [&io, next = std::move(then)]() mutable { net::asio::post(io, std::move(next)); };
+  }
+  then();
+}
+
+constexpr int sweepHops = 8;
+
 // The matrix's mid-Walk cell destroys the Client before the Agent answers, and its cleanup then
 // reaches the strand ahead of the reply. The case worth guarding is the other order: the reply
 // already read, or already accepted with the Walk not yet resumed to hand it on, when destruction
-// begins. Nothing in the public API lands there on purpose, so this sweeps the moment: destruction
-// is put off by `hops` trips through the io_context after the reply has gone, which walks it across
-// the reply's own path through the Client, one scheduler step at a time. Which hop count lands in
-// which step is Asio's business and may change; the rule holds at every one of them.
+// begins. So destruction is put off by a sweep of hops after the reply has gone, which walks it
+// across the reply's own path through the Client one scheduler step at a time.
 TEST(ClientLifetime, ABatchHandlerIsNeverCalledOnceDestructionHasBegun) {
   // More rounds than the sweep has hops, so that every Walk is still going when destruction begins.
   std::vector<Varbind> rows;
   for (std::uint32_t i = 1; i <= 40; ++i)
     rows.emplace_back(systemGroup.child(i).child(0), Gauge32{i});
 
-  for (int hops = 0; hops < 8; ++hops) {
+  for (int hops = 0; hops < sweepHops; ++hops) {
+    SCOPED_TRACE(testing::Message() << "destroyed " << hops << " hops after the reply");
     net::IoContext io;
     std::optional<Client> client{std::in_place, io.get_executor()};
     bool destroying = false;
@@ -164,17 +176,16 @@ TEST(ClientLifetime, ABatchHandlerIsNeverCalledOnceDestructionHasBegun) {
     int lateBatches = 0;
     std::optional<net::ErrorCode> result;
 
-    std::function<void(int)> destroyAfter = [&](int remaining) {
-      if (remaining > 0) {
-        net::asio::post(io, [&destroyAfter, remaining] { destroyAfter(remaining - 1); });
-        return;
-      }
-      destroying = true;
-      client.reset();
-    };
     // The second round's reply is sent as soon as this returns; destruction follows it.
     ScriptedAgent agent(io, [&, table = tableAgent(rows), seen = 0](const V2cMessage& msg) mutable {
-      if (++seen == 2) net::asio::post(io, [&destroyAfter, hops] { destroyAfter(hops); });
+      if (++seen == 2) {
+        net::asio::post(io, [&, hops] {
+          afterHops(io, hops, [&] {
+            destroying = true;
+            client.reset();
+          });
+        });
+      }
       return table(msg);
     });
 
@@ -192,18 +203,55 @@ TEST(ClientLifetime, ABatchHandlerIsNeverCalledOnceDestructionHasBegun) {
     io.run();
 
     // How many batches arrived before destruction began depends on the hop; none may arrive after.
-    EXPECT_EQ(lateBatches, 0) << "destroyed " << hops << " hops after the reply";
-    EXPECT_GE(batches, 1) << "destroyed " << hops << " hops after the reply";
-    ASSERT_TRUE(result.has_value()) << "destroyed " << hops << " hops after the reply";
-    EXPECT_EQ(*result, Errc::ClientStopped) << "destroyed " << hops << " hops after the reply";
+    EXPECT_EQ(lateBatches, 0);
+    EXPECT_GE(batches, 1);
+    ASSERT_TRUE(result.has_value());
+    EXPECT_EQ(*result, Errc::ClientStopped);
+  }
+}
+
+// The same sweep for a single request. A reply accepted as destruction begins leaves the request
+// outstanding until it resumes, and it then completes with ClientStopped like every other one. The
+// completion runs on the strand straight after the request ends, with no hop between, so a success
+// seen once destruction had begun is a request that ended after it.
+TEST(ClientLifetime, AReplyAcceptedAsDestructionBeginsDoesNotCount) {
+  for (int hops = 0; hops < sweepHops; ++hops) {
+    SCOPED_TRACE(testing::Message() << "destroyed " << hops << " hops after the reply");
+    net::IoContext io;
+    std::optional<Client> client{std::in_place, io.get_executor()};
+    bool destroying = false;
+    std::optional<net::ErrorCode> result;
+    bool lateSuccess = false;
+
+    ScriptedAgent agent(io, [&, hops](const V2cMessage& msg) {
+      net::asio::post(io, [&, hops] {
+        afterHops(io, hops, [&] {
+          destroying = true;
+          client.reset();
+        });
+      });
+      return answerOnlySysDescr(msg);
+    });
+
+    client->asyncGet(slowTarget(agent), publicCommunity, {sysDescr},
+                     [&](net::ErrorCode ec, const Response&) {
+                       result = ec;
+                       lateSuccess = destroying && !ec;
+                       agent.close();
+                     });
+    io.run();
+
+    ASSERT_TRUE(result.has_value());
+    EXPECT_FALSE(lateSuccess) << "a request still outstanding as destruction began succeeded";
   }
 }
 
 // Research §3.1 rule 7: Stopping while a request's send is still in flight has already cancelled a
 // timer the request has yet to arm, so a request that armed it afterwards would sit out a whole
-// deadline before reporting ClientStopped. The same sweep as above, over the request's first steps.
+// deadline before reporting ClientStopped. The same sweep, over the request's first steps.
 TEST(ClientLifetime, StoppingAsTheSendCompletesStillCompletesAtOnce) {
-  for (int hops = 0; hops < 8; ++hops) {
+  for (int hops = 0; hops < sweepHops; ++hops) {
+    SCOPED_TRACE(testing::Message() << "stopped " << hops << " hops after initiating");
     net::IoContext io;
     ScriptedAgent agent(io, [](const V2cMessage&) { return std::optional<Pdu>{}; });
     std::optional<Client> client{std::in_place, io.get_executor()};
@@ -211,27 +259,21 @@ TEST(ClientLifetime, StoppingAsTheSendCompletesStillCompletesAtOnce) {
     std::chrono::steady_clock::time_point stoppedAt;
     std::chrono::steady_clock::time_point completedAt;
 
-    std::function<void(int)> stopAfter = [&](int remaining) {
-      if (remaining > 0) {
-        net::asio::post(io, [&stopAfter, remaining] { stopAfter(remaining - 1); });
-        return;
-      }
-      stoppedAt = std::chrono::steady_clock::now();
-      client->stop();
-    };
     client->asyncGet(slowTarget(agent), publicCommunity, {sysDescr},
                      [&](net::ErrorCode ec, const Response&) {
                        completedAt = std::chrono::steady_clock::now();
                        result = ec;
                        agent.close();
                      });
-    stopAfter(hops);
+    afterHops(io, hops, [&] {
+      stoppedAt = std::chrono::steady_clock::now();
+      client->stop();
+    });
     io.run();
 
-    ASSERT_TRUE(result.has_value()) << "stopped " << hops << " hops after initiating";
-    EXPECT_EQ(*result, Errc::ClientStopped) << "stopped " << hops << " hops after initiating";
-    EXPECT_LT(completedAt - stoppedAt, longDeadline / 2)
-        << "stopped " << hops << " hops after initiating, and waited for the deadline";
+    ASSERT_TRUE(result.has_value());
+    EXPECT_EQ(*result, Errc::ClientStopped);
+    EXPECT_LT(completedAt - stoppedAt, longDeadline / 2) << "waited for the deadline";
   }
 }
 

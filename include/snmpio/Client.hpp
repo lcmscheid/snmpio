@@ -64,7 +64,11 @@ class Client {
  public:
   // Receives each batch of a streaming Walk. Returning false stops the Walk, which then completes
   // with Errc::WalkIncomplete -- a partially consumed Walk must never look like a whole one
-  // (ADR-0004). Called on the Client's strand, and never once Stopping has begun.
+  // (ADR-0004). Called on the Client's strand, and never once Stopping has begun there: a stop()
+  // or a destruction on the strand -- from inside a handler bound to it, say -- or one that
+  // happens-before the strand reaches the batch. One on another thread can race a batch the
+  // strand is already delivering, and ~Client does not wait for it (ADR-0009), so a handler must
+  // not capture state that thread frees straight after destroying the Client.
   using BatchHandler = std::function<bool(std::span<const Varbind>)>;
 
   explicit Client(const net::Executor& ex);

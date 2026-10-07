@@ -332,7 +332,7 @@ TEST(ClientLifetime, ARequestInitiatedAfterStoppingCompletesWithClientStopped) {
   EXPECT_TRUE(walk.completedExactlyOnce({make_error_code(Errc::ClientStopped)}));
 }
 
-TEST(ClientLifetime, DestroyedBeforeTheIoContextEverRan) {
+TEST(ClientLifetime, DestroyedBeforeTheIoContextRunsStillCompletesWithClientStopped) {
   net::IoContext io;
   CompletionOracle oracle(io);
   {
@@ -345,13 +345,13 @@ TEST(ClientLifetime, DestroyedBeforeTheIoContextEverRan) {
   EXPECT_TRUE(oracle.completedExactlyOnce({make_error_code(Errc::ClientStopped)}));
 }
 
-// Research rule 4: "completes exactly once" holds only while the executor runs. An io_context
+// Research §3.1 rule 4: "completes exactly once" holds only while the executor runs. An io_context
 // destroyed without running destroys the handler instead of invoking it -- and with it the last
 // hold on the Client's state, which LSan, under the ASan preset, checks is not leaked.
 //
 // Counted by hand rather than by the oracle: the oracle's caller strand would outlive the
 // io_context it belongs to here.
-TEST(ClientLifetime, DestroyedAndThenTheIoContextDestroyedUnrun) {
+TEST(ClientLifetime, AnIoContextDestroyedUnrunDestroysTheHandlerUninvoked) {
   struct Tally {
     int invocations = 0;
     int destructions = 0;

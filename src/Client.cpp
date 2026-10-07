@@ -134,14 +134,25 @@ class Client::Impl {
 
   explicit Impl(net::Strand strand) : m_strand(std::move(strand)), m_nextId(randomRequestId()) {}
 
-  // Stopping, from any thread. The flag is set at once, so nothing begins after this returns -- no
-  // exchange, no batch delivered -- and the cleanup that needs the strand follows on it.
+  // Stopping, from any thread. The flag is set at once, and the strand checks it before each
+  // exchange and each batch, so nothing begins once the strand has seen it; the cleanup that needs
+  // the strand follows on it. From another thread, that is not the same as "after this returns":
+  // the strand may already be past a check, mid-send or mid-batch (see BatchHandler).
   static void stop(const Ref& self) {
     if (self->m_stopping.exchange(true)) return;
     // Dispatched rather than posted: stop() is usually the last thing before the io_context
     // drains, and a posted cleanup would never run. Owning `self`, because the Client that asked
     // may be gone by the time it runs.
-    net::asio::dispatch(self->m_strand, [self] { self->finishStopping(); });
+    try {
+      net::asio::dispatch(self->m_strand, [self] { self->finishStopping(); });
+    } catch (...) {
+      // Scheduling the cleanup allocates. If that fails, the flag must not stay set: it would
+      // make every later stop(), and the destructor, a no-op against a Client whose sockets are
+      // still open -- half-stopped, with a run() that never returns. The caller gets the
+      // exception instead, and stopping again is a real retry.
+      self->m_stopping = false;
+      throw;
+    }
   }
 
   net::Awaitable<RequestResult> doRequest(Ref self, Target target, Auth auth, Pdu pdu);
@@ -202,6 +213,9 @@ class Client::Impl {
     net::SteadyTimer done;
     net::ErrorCode ec;
     bool finished = false;
+    // What the discovery threw, if it did: each waiter rethrows it, so that every request it was
+    // serving leaves run() the way the discovery itself does, rather than waiting forever.
+    std::exception_ptr failure;
   };
 
   // Stopping's second half, on the strand: closes the sockets, which ends the receive loops, and
@@ -757,6 +771,8 @@ net::Awaitable<net::ErrorCode> Client::Impl::ensureEngine(Ref self, Target targe
   co_await net::asio::this_coro::throw_if_cancelled(false);
   [[maybe_unused]] net::ErrorCode waitEc;
   co_await discovery->done.async_wait(redirect_error(use_awaitable, waitEc));
+  // Ahead of Stopping: an exception is a bug or bad_alloc, and the louder of the two answers.
+  if (discovery->failure) std::rethrow_exception(discovery->failure);
   if (m_stopping) co_return make_error_code(Errc::ClientStopped);
   // The same rule as transact's, in the other wait a request can be in: either cancellation type
   // ends this request. Asked, rather than inferred from an unfinished discovery, because a signal
@@ -772,10 +788,17 @@ net::Awaitable<net::ErrorCode> Client::Impl::ensureEngine(Ref self, Target targe
 net::Awaitable<void> Client::Impl::runDiscovery(Ref self, Target target, Credentials creds,
                                                 std::shared_ptr<Discovery> discovery) {
   const auto endpoint = target.endpoint;
-  discovery->ec = co_await discoverEngine(self, std::move(target), std::move(creds));
-  discovery->finished = true;
+  try {
+    discovery->ec = co_await discoverEngine(self, std::move(target), std::move(creds));
+    discovery->finished = true;
+  } catch (...) {
+    discovery->failure = std::current_exception();
+  }
+  // On both paths: a discovery that threw must not stay registered, or every later request to
+  // this Target would queue behind one that will never finish.
   m_discovering.erase(endpoint);
   discovery->done.cancel();
+  if (discovery->failure) std::rethrow_exception(discovery->failure);
 }
 
 // RFC 3414 section 4. Phase one asks with no engineID at all and reads the Engine's own from what

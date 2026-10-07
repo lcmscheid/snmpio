@@ -84,11 +84,11 @@ Three things the compiler will not tell you:
   `authNoPriv` request.
 - **`io.run()` returns only after the Client stops.** The Client's receive loop is outstanding
   work. `stop()` ends it, and so does destroying the Client, which stops it (ADR-0009): every
-  Outstanding Request completes with `Errc::ClientStopped`, exactly once, on its own executor. Like a socket,
-  a Client can be destroyed with requests outstanding, from any thread, even from inside one of its
-  own completion handlers. The only lifetime rule left is Asio's own: the `io_context` must outlive
-  the work scheduled on it. Completions can run after the Client is gone, so a handler must not
-  reach back into it.
+  Outstanding Request completes with `Errc::ClientStopped`, exactly once while the `io_context`
+  runs, on its own executor. Like a socket, a Client can be destroyed with requests outstanding,
+  from any thread, even from inside one of its own completion handlers. The only lifetime rule left
+  is Asio's own: the `io_context` must outlive the work scheduled on it. Completions can run after
+  the Client is gone, so a handler must not reach back into it.
 - **A Target is an address, not a hostname.** Choosing a resolver stays the caller's business
   (`CONTEXT.md`), so nothing here will quietly resolve one for you.
 

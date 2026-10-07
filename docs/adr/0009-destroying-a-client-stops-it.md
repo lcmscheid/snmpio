@@ -30,12 +30,18 @@ explicit `stop()` gives, and not `operation_aborted`. Destruction is an implicit
 already owns `operation_aborted`, and ADR-0008's reasoning is that a code meaning two different
 things is one no caller can branch on.
 
-A streaming Walk's batch handler is never called after destruction begins. Completion handlers still
-run, on the caller's executor, after the Client is gone, so they must not reach back into it.
+A streaming Walk's batch handler is never called after destruction begins, as the strand sees it:
+destruction on the strand, or one that happens-before the strand reaches the batch. Destruction on
+another thread can race a batch already being delivered, and closing that window would mean
+`~Client` waiting for the handler -- the one thing it must never do, since it may be running on the
+strand or with the `io_context` stopped. Completion handlers still run, on the caller's executor,
+after the Client is gone, so they must not reach back into it.
+
+ADR-0003 stands: one Client still owns the transport and the caches. They are now reached through
+a shared implementation rather than held directly. It gains one exception to "internal state is
+only ever touched on that strand": the Stopping flag, an atomic written by `stop()` and `~Client` on
+the calling thread, so that Stopping takes effect before the strand gets round to the cleanup.
 
 The Client stays non-copyable and non-movable. The shared implementation would make moving cheap,
 but a moved-from state is one more state every member must handle, and it buys no safety. A caller
 who needs to move one holds a `std::unique_ptr<Client>`.
-
-ADR-0003 is unchanged: one Client still owns the transport and the caches. They are now reached
-through a shared implementation rather than held directly.

@@ -147,12 +147,12 @@ using Cell = std::tuple<Wait, Disruption>;
 // in every wait, and destruction is Stopping (ADR-0009); a cancellation is operation_aborted
 // wherever no reply counted; and a Walk reads `total` as finish the batch in flight, then report
 // that the Walk is incomplete.
-bool stops(Disruption disruption) {
+bool endsInStopping(Disruption disruption) {
   return disruption == Disruption::Stop || disruption == Disruption::Destroy;
 }
 
 net::ErrorCode expectedCode(Wait wait, Disruption disruption) {
-  if (stops(disruption)) return make_error_code(Errc::ClientStopped);
+  if (endsInStopping(disruption)) return make_error_code(Errc::ClientStopped);
   if (disruption == Disruption::Total && wait == Wait::MidWalk) {
     return make_error_code(Errc::WalkIncomplete);
   }
@@ -319,7 +319,7 @@ void midWalk(Rig& rig) {
   }
   // Stopping began as the second round reached the Agent, which still answered it: that batch must
   // never reach the batch handler, whatever became of the reply (threat model, L6).
-  if (stops(rig.disruption)) {
+  if (endsInStopping(rig.disruption)) {
     EXPECT_EQ(collected.size(), 2U) << "a batch was delivered after Stopping began";
   }
 }

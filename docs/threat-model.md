@@ -244,13 +244,15 @@ the Client's matching, so that it can never raise a false alarm:
   let complete the request.
 - An answer to Engine Discovery may fail any request, with the error that answer can end a
   discovery with, because the fuzzer does not track which requests a discovery's failure reaches.
-  An unsigned `notInTimeWindows` answering the time-sync phase can end it with nothing, so it
-  excuses no early failure.
 - A Report may fail its request with the error it names even where R6 says it must instead force
   one Engine Discovery: the fuzzer does not track whether one was already forced.
 - It accepts an `authNoPriv` reply to an `authPriv` request, which is R4's to refuse (#34).
 - Where OpenSSL's legacy provider will not load, a DES request fails with
   `LegacyProviderUnavailable` before it is sent, and is not judged; DES is then not covered.
+
+What an answer to the time-sync phase may end it with is not coarsened: the boots ceiling on a
+signed pair, or an unsigned Report's error, except an unsigned `notInTimeWindows`, which ends it
+with nothing (ADR-0008's amendment). A signed Report ends it in success, so it excuses no failure.
 
 Its timers and sockets are real, so an iteration is not exactly reproducible. A failing input
 usually fails again, because the script chose the datagrams and the timing decides only which of

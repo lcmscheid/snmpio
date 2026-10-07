@@ -71,7 +71,7 @@ inline Oid requestOid(std::size_t index) {
   return Oid{1, 3, 6, 1, 2, 1, 1, static_cast<Oid::ValueType>(index + 1), 0};
 }
 
-inline std::optional<std::size_t> requestIndex(const Pdu& pdu) {
+inline std::optional<std::size_t> requestIndexOf(const Pdu& pdu) {
   if (pdu.varbinds.empty()) return std::nullopt;
   const Oid& name = pdu.varbinds.front().name;
   const Oid base{1, 3, 6, 1, 2, 1, 1};
@@ -216,7 +216,7 @@ class HostileAgent {
     Seen s;
     if (pdu.varbinds.empty()) {
       s.owner = Owner::Discovery;
-    } else if (const auto index = requestIndex(pdu)) {
+    } else if (const auto index = requestIndexOf(pdu)) {
       s.owner = Owner::Request;
       s.requestIndex = *index;
     }

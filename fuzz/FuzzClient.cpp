@@ -196,16 +196,17 @@ class Ledger {
     if (authRequired && !exempt && !verified) return;
 
     if (seen->owner == HostileAgent::Owner::Discovery) {
-      // The identity phase reads only the engineID, and fails without one. The time-sync phase
-      // fails with a Report's error, except an unsigned notInTimeWindows, which it drops (R6 (1),
-      // ADR-0008's amendment), or on a signed pair at the boots ceiling.
+      // The identity phase reads only the engineID, and fails without one.
       if (seen->engineId.empty()) {
         if (msg->security.engineId.empty()) grantDiscovery(Errc::UnknownEngineId);
         return;
       }
-      if (isReport) {
+      // The time-sync phase fails on a signed pair at the boots ceiling, or with an unsigned
+      // Report's error, except an unsigned notInTimeWindows, which it drops (R6 (1), ADR-0008's
+      // amendment). A signed Report carries the Engine's clock, so it ends the phase in success.
+      if (isReport && !verified) {
         const auto error = reportError(msg->scoped.pdu);
-        if (verified || error != Errc::NotInTimeWindow) m_discoveryErrors.push_back(error);
+        if (error != Errc::NotInTimeWindow) m_discoveryErrors.push_back(error);
       }
       if (verified && msg->security.boots == std::numeric_limits<std::int32_t>::max()) {
         grantDiscovery(Errc::NotInTimeWindow);
@@ -324,7 +325,9 @@ void judge(std::size_t request, const Outcome& outcome, const Ledger& ledger,
     if (std::ranges::find(entitled.errors, code) != entitled.errors.end()) return;
     if (std::ranges::find(ledger.discoveryErrors(), code) != ledger.discoveryErrors().end()) return;
     if (isDropReason(code)) {
-      if (!atDeadline) violated("R5", where + ", before its deadline, and no Report names it");
+      if (!atDeadline) {
+        violated("R5", where + ", before its deadline, and no Report the rules accept names it");
+      }
       return;
     }
   }

@@ -274,7 +274,9 @@ because it was noisy once is a check that will not catch the real defect later.
 
 ```sh
 cmake --preset default                          # always writes compile_commands.json
-clang-tidy -p build/default src/*.cpp tests/*.cpp fuzz/*.cpp
+clang-tidy -p build/default src/*.cpp tests/*.cpp
+cmake --preset fuzz                             # fuzz/ has its own flags (-UNDEBUG)
+clang-tidy -p build/fuzz fuzz/*.cpp
 ```
 
 Both clang tools are whatever Arch's `clang` package ships; CI runs them in an `archlinux:latest`
@@ -282,7 +284,9 @@ container, so they follow Arch rather than a pin. Their output changes between m
 major LLVM bump gets its own commit. On another distro, expect disagreements with CI whenever your
 LLVM major differs from Arch's.
 
-Or fold it into the build with `-DSNMPIO_CLANG_TIDY=ON`. `tests/` and `fuzz/` carry an overlay
+Or fold it into the build with `-DSNMPIO_CLANG_TIDY=ON`, which is what the `tidy` preset does. That
+preset builds no fuzzers, so `fuzz/` needs the flag on its own configure:
+`cmake --preset fuzz -DSNMPIO_CLANG_TIDY=ON`. `tests/` and `fuzz/` carry an overlay
 relaxing what only applies to library code (GoogleTest's do-while macros, fixture tables,
 `*Oid::parse("1.3.6.1")` on a literal).
 

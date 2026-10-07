@@ -27,7 +27,7 @@ is measured against the [threat model](docs/threat-model.md).
 | 3 | Async Engine Discovery, time sync, Report handling | **done** |
 | 4 | Privacy: AES-128, then AES-192/256 under both key extensions, DES behind the legacy provider | **done** |
 | 5 | Interop matrix vs the Simulator, `snmpd`, and real vendor gear | automated half **done**; the [hardware checklist](#pre-release-hardware-checklist) remains |
-| 6 | Safe to depend on: the [threat model](docs/threat-model.md), sanitizer and stress harness, destroying a Client stops it, hardening against a hostile network | sanitizer builds and Client fuzzer **done**; the rest in progress |
+| 6 | Safe to depend on: the [threat model](docs/threat-model.md), sanitizer and stress harness, destroying a Client stops it, hardening against a hostile network | sanitizer builds, Client fuzzer and safe destruction **done**; the rest in progress |
 | 7 | Docs, packaging and release | |
 
 ## Using it
@@ -82,10 +82,13 @@ Three things the compiler will not tell you:
   because the Credentials happened to carry no privacy password would be a security hole, so an
   `authPriv` level with `PrivProtocol::None` is `Errc::UnsupportedPrivProtocol` rather than an
   `authNoPriv` request.
-- **`io.run()` returns only after `client.stop()`.** The Client's receive loop is outstanding work.
-  `stop()` also fails everything in flight with `Errc::ClientStopped`; it is deliberately not called
-  from the destructor, because the cleanup runs on the strand and would be scheduled against an
-  object that no longer exists.
+- **`io.run()` returns only after the Client stops.** The Client's receive loop is outstanding
+  work. `stop()` ends it, and so does destroying the Client, which stops it (ADR-0009): everything
+  in flight completes with `Errc::ClientStopped`, exactly once, on its own executor. Like a socket,
+  a Client can be destroyed with requests outstanding, from any thread, even from inside one of its
+  own completion handlers. The only lifetime rule left is Asio's own: the `io_context` must outlive
+  the work scheduled on it. Completions can run after the Client is gone, so a handler must not
+  reach back into it.
 - **A Target is an address, not a hostname.** Choosing a resolver stays the caller's business
   (`CONTEXT.md`), so nothing here will quietly resolve one for you.
 
@@ -724,9 +727,9 @@ against that ADR rather than a decision against it -- and IDEA, which ADR-0005 e
   `ErrorCode` naming which. No Report ever reaches a completion handler.
 - **The Time Window**, 150 seconds, checked against the cached pair projected forward by the local
   clock rather than against a raw cached number.
-- Discovery **outlives the request that started it** (ADR-0003 again): it runs detached on the
-  Client's strand, so cancelling whichever request happened to arrive first does not cancel what
-  every other request is queued behind.
+- Discovery **outlives the request that started it** (ADR-0003 again): it runs as a coroutine of
+  its own on the Client's strand, so cancelling whichever request happened to arrive first does not
+  cancel what every other request is queued behind.
 
 A **Response** that fails to decode, to authenticate, or to be timely is dropped, not failed — the
 request stays outstanding and its retransmission timer keeps running. UDP is spoofable and the

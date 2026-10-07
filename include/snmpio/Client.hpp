@@ -1,17 +1,13 @@
 #ifndef SNMPIO_CLIENT_HPP
 #define SNMPIO_CLIENT_HPP
 
-#include <chrono>
 #include <cstdint>
 #include <exception>
 #include <functional>
-#include <map>
 #include <memory>
-#include <optional>
 #include <span>
 #include <string>
 #include <tuple>
-#include <unordered_map>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -54,19 +50,30 @@ struct Response {
 // Cancelling one request queued behind a discovery leaves the discovery and its other waiters
 // running (ADR-0003). A Walk reads `total` differently, and ADR-0004 says why -- see asyncWalk.
 //
-// The Client must outlive its outstanding operations. Call stop() and let the io_context drain
-// before destroying it.
+// Lifetime follows Asio's own I/O objects (ADR-0009): a Client may be destroyed with operations
+// outstanding, from any thread, including from inside one of its own completion handlers.
+// Destroying it stops it, so each outstanding operation still completes, exactly once, with
+// Errc::ClientStopped. The only rule left to the caller is Asio's: the io_context must outlive the
+// work scheduled on it, which includes this Client's.
+//
+// Two consequences follow, the same ones a socket has. Completion handlers run *after* the
+// destructor has returned, so a handler must not reach back into the Client or into an owner that
+// went with it. And "exactly once" holds while the io_context runs: one destroyed without being
+// run destroys the handlers it holds instead of invoking them.
 class Client {
  public:
   // Receives each batch of a streaming Walk. Returning false stops the Walk, which then completes
   // with Errc::WalkIncomplete -- a partially consumed Walk must never look like a whole one
-  // (ADR-0004). Called on the Client's strand.
+  // (ADR-0004). Called on the Client's strand, and never once Stopping has begun.
   using BatchHandler = std::function<bool(std::span<const Varbind>)>;
 
   explicit Client(const net::Executor& ex);
-  // Defaulted, and stop() is deliberately not called here -- see the note on stop().
-  ~Client() = default;
+  // Stops the Client (see stop()) and returns without waiting for anything: the outstanding
+  // operations complete later, on their own executors.
+  ~Client();
 
+  // Neither copyable nor movable (ADR-0009). A caller who needs to move one holds a
+  // std::unique_ptr<Client>.
   Client(const Client&) = delete;
   Client& operator=(const Client&) = delete;
   Client(Client&&) = delete;
@@ -74,9 +81,9 @@ class Client {
 
   [[nodiscard]] net::Executor getExecutor() const { return m_strand; }
 
-  // Closes the sockets and fails every outstanding request with Errc::ClientStopped. This is not
-  // done from the destructor on purpose: the cleanup runs on the strand, so a destructor that
-  // scheduled it would be scheduling work against an object that no longer exists.
+  // Stopping: refuses new work, closes the sockets and fails every outstanding operation with
+  // Errc::ClientStopped. Idempotent, safe from any thread, and harmless before the destructor,
+  // which does the same. An operation initiated afterwards completes with Errc::ClientStopped too.
   void stop();
 
   // GET: fetch each named instance. Completion: void(ErrorCode, Response).
@@ -220,33 +227,30 @@ class Client {
   static Pdu makeBulkPdu(std::vector<Varbind> varbinds, std::int32_t nonRepeaters,
                          std::int32_t maxRepetitions);
 
+  // Not coroutines themselves: each hands back one of Impl's, which owns a share of the state, so
+  // nothing that runs later holds a pointer to this Client.
   net::Awaitable<RequestResult> doRequest(Target target, Auth auth, Pdu pdu);
   net::Awaitable<WalkResult> doWalk(Target target, Auth auth, Oid base, WalkOptions options,
                                     BatchHandler onBatch);
   net::Awaitable<CollectResult> doWalkCollect(Target target, Auth auth, Oid base,
                                               WalkOptions options);
 
-  net::Awaitable<void> receiveLoop(net::UdpSocket* sock);
-  void deliverV2c(std::span<const std::byte> datagram, const net::UdpEndpoint& from);
-  void deliverV3(std::span<const std::byte> datagram, const net::UdpEndpoint& from);
-  [[nodiscard]] bool timely(const net::UdpEndpoint& from, const UsmParameters& security) const;
-  void observeEngineTime(const net::UdpEndpoint& from, const UsmParameters& security);
-  static RequestResult toResult(const Pdu& response);
-  net::UdpSocket* socketFor(const net::UdpEndpoint& to, net::ErrorCode& ec);
-
   // Runs coro on the strand and delivers its result tuple through the completion token, on the
   // token's own executor rather than ours -- which is the whole reason this is not a bare
   // co_spawn at each call site.
   // Token by value, not by forwarding reference: async_initiate binds it as an lvalue.
+  //
+  // The initiation holds the strand by value and never `this`: a deferred token may initiate after
+  // the Client is gone, and the coroutine owns everything else it needs.
   template <typename Signature, typename Result, typename Token>
   auto spawn(net::Awaitable<Result> coro, Token token) {
     return net::asio::async_initiate<Token, Signature>(
-        [this](auto handler, net::Awaitable<Result> c) {
-          const auto ex = net::asio::get_associated_executor(handler, m_strand);
+        [strand = m_strand](auto handler, net::Awaitable<Result> c) {
+          const auto ex = net::asio::get_associated_executor(handler, strand);
           // Read before the handler is moved from. Without this the caller's cancellation slot
           // stops at the token and never reaches the coroutine, which then cannot be cancelled.
           const auto slot = net::asio::get_associated_cancellation_slot(handler);
-          net::asio::co_spawn(m_strand, std::move(c),
+          net::asio::co_spawn(strand, std::move(c),
                               net::asio::bind_cancellation_slot(
                                   slot, net::asio::bind_executor(
                                             ex, [h = std::move(handler)](
@@ -262,112 +266,12 @@ class Client {
         token, std::move(coro));
   }
 
-  // One outstanding request. The timer is doing double duty: it is the retransmission deadline,
-  // and cancelling it early is how the receive loop wakes the waiting coroutine.
-  struct Pending {
-    explicit Pending(const net::Executor& ex) : timer(ex) {}
-    net::SteadyTimer timer;
-    net::UdpEndpoint from;  // only a Response from the Target we asked counts
-    std::string community;  // v2c: quoted back, and checked
-    bool v3 = false;
-    bool authRequired = false;
-    AuthProtocol authProtocol = AuthProtocol::None;
-    PrivProtocol privProtocol = PrivProtocol::None;
-    Octets authKey;   // the Localized Key this exchange is authenticated with
-    Octets privKey;   // and the one it is encrypted with, at authPriv
-    Octets engineId;  // the Authoritative Engine addressed; empty while discovering
-    std::int32_t requestId = 0;
-    Pdu response;
-    UsmParameters security;  // what the reply's security parameters said
-    bool answered = false;
-    // Whether the accepted reply's digest was checked and matched -- that datagram's, never an
-    // earlier one dropped on the way. False for an unauthenticated Report, which the protocol
-    // obliges us to accept and which therefore must not be trusted with anything beyond failing
-    // this exchange or asking us to discover the Engine again.
-    bool replyAuthenticated = false;
-    // Engine Discovery's time-sync phase, the one exchange an unsigned notInTimeWindows Report is
-    // dropped from rather than admitted: a genuine one there is always signed (see deliverV3).
-    bool timeSyncPhase = false;
-    // Why the last unusable reply was discarded, or empty. Read only at expiry (ADR-0008).
-    net::ErrorCode dropReason;
-  };
-
-  // What we know about one Authoritative Engine, and when we learnt it. The Engine's current time
-  // is `time` advanced by the local clock since `at` -- the Time Window is checked against that
-  // projection, never against a raw cached number.
-  struct EngineState {
-    Octets engineId;
-    std::int32_t boots = 0;
-    std::int32_t time = 0;
-    std::chrono::steady_clock::time_point at;
-    // Whether the pair above came from an authenticated exchange. A noAuthNoPriv discovery learns
-    // the engineID and nothing trustworthy about its clock, so the first authenticated request
-    // against the same Engine still has to synchronise.
-    bool timeSynced = false;
-  };
-
-  // A discovery in flight. The timer is an event, not a deadline: waiters park on it and the
-  // discovering coroutine cancels it to wake them all. Same trick as Pending's.
-  struct Discovery {
-    explicit Discovery(const net::Executor& ex) : done(ex) {}
-    net::SteadyTimer done;
-    net::ErrorCode ec;
-    bool finished = false;
-  };
-
-  std::int32_t nextId() noexcept;
-
-  // The shared half of every exchange: send, wait, retransmit, and observe cancellation. Returns
-  // an empty ErrorCode when `pending` was answered.
-  net::Awaitable<net::ErrorCode> transact(Target target, std::vector<std::byte> datagram,
-                                          std::int32_t key, std::shared_ptr<Pending> pending);
-
-  // RFC 3414 section 4, in two phases: the engineID, and then -- only when authenticating -- the
-  // boots/time pair. At most one runs per Target; anything else arriving waits on it.
-  net::Awaitable<net::ErrorCode> ensureEngine(Target target, Credentials creds);
-  net::Awaitable<void> runDiscovery(Target target, Credentials creds,
-                                    std::shared_ptr<Discovery> discovery);
-  net::Awaitable<net::ErrorCode> discoverEngine(Target target, Credentials creds);
-  // The Engine currently believed to answer at this endpoint, or nullptr if none is known.
-  EngineState* engineAt(const net::UdpEndpoint& endpoint);
-
-  // Cached because the derivation is a megabyte hash and deliberately expensive (CONTEXT.md) --
-  // twice over for Reeder, whose key extension is a second one.
-  const Octets* localizedKey(const Credentials& creds, const Octets& engineId, net::ErrorCode& ec);
-  const Octets* localizedPrivacyKey(const Credentials& creds, const Octets& engineId,
-                                    net::ErrorCode& ec);
-
-  // What a Report means for the request that provoked it: an ErrorCode to fail with, or nothing
-  // when it named something we can act on and ask again about.
-  std::optional<net::ErrorCode> handleReport(const net::UdpEndpoint& from, const Pending& pending,
-                                             bool mayRetry);
-
-  // Observe both cancellation types rather than throwing on either, once per operation.
-  static net::Awaitable<void> observeBothCancellationTypes();
-
-  net::Awaitable<RequestResult> doRequestV2c(Target target, Community community, Pdu pdu);
-  net::Awaitable<RequestResult> doRequestV3(Target target, Credentials creds, Pdu pdu);
+  // Everything the Client knows, and the coroutines that act on it, co-owned by each of those
+  // coroutines (ADR-0009). Defined in Client.cpp.
+  class Impl;
 
   net::Strand m_strand;
-  std::optional<net::UdpSocket> m_v4;
-  std::optional<net::UdpSocket> m_v6;
-  std::unordered_map<std::int32_t, std::shared_ptr<Pending>> m_pending;
-  // Keyed on engineID with a separate endpoint->engineID index, as ADR-0003 requires: one Engine
-  // reachable at two Targets is one cache entry, discovered once. The in-flight map below is keyed
-  // on the endpoint of necessity -- learning which Engine is there is what discovery is for.
-  std::map<Octets, EngineState> m_engines;
-  std::map<net::UdpEndpoint, Octets> m_engineAt;
-  std::map<net::UdpEndpoint, std::shared_ptr<Discovery>> m_discovering;
-  // (engineID, hash, secret, privacy protocol) -- ADR-0003's (master key, engineID), spelled as
-  // the things the master key is derived from so that nothing has to derive it to look one up.
-  // The privacy protocol is part of the key rather than of the value because it decides how far
-  // the derivation is extended: PrivProtocol::None is the authentication key's row.
-  std::map<std::tuple<Octets, AuthProtocol, std::string, PrivProtocol>, Octets> m_keys;
-  // One counter for both the v3 msgID and the PDU request-id, so that the two protocols cannot
-  // collide in m_pending -- which is keyed on the msgID for v3, as CONTEXT.md requires, because a
-  // message we cannot open must still be attributable.
-  std::int32_t m_nextId;
-  bool m_stopped = false;
+  std::shared_ptr<Impl> m_impl;
 };
 
 }  // namespace snmpio

@@ -83,7 +83,8 @@ Three things the compiler will not tell you:
   `authPriv` level with `PrivProtocol::None` is `Errc::UnsupportedPrivProtocol` rather than an
   `authNoPriv` request.
 - **`io.run()` returns only after the Client stops.** The Client's receive loop is outstanding
-  work. `stop()` ends it, and so does destroying the Client, which stops it (ADR-0009): every
+  work. Three things end it: `stop()`, destroying the Client (ADR-0009), and an exception escaping
+  the receive loop, which then leaves `run()`. Each stops the Client: every
   Outstanding Request completes with `Errc::ClientStopped`, exactly once while the `io_context`
   runs, on its own executor. Like a socket, a Client can be destroyed with requests outstanding,
   from any thread, even from inside one of its own completion handlers. The only lifetime rule left

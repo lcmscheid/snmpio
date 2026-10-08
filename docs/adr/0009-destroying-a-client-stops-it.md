@@ -53,3 +53,18 @@ The Stopping flag is also the one piece of state not confined to the strand, aga
 "internal state is only ever touched on that strand". It is an atomic, written by `stop()` and
 `~Client` on the calling thread, so that Stopping takes effect before the strand gets round to the
 cleanup. ADR-0003 carries the matching amendment.
+
+## Amendment, 2026-10-08: a receive loop that throws stops the Client too
+
+Stopping now has a third start, besides `stop()` and `~Client`: an exception escaping a receive
+loop. That loop serves every Target on its socket, so the fault belongs to the Client and not to
+any one Target. Before this, the exception left `run()` (threat-model L7), but the socket stayed
+open with nothing reading it, and a caller who ran the `io_context` again saw every later request
+on it time out with nothing to say why (#63). The loop's completion now stops the Client before
+rethrowing, on the strand, so the cleanup runs inline and the requests complete with
+`ClientStopped`. The flag is set on the strand there, which keeps within ADR-0003's amendment.
+
+Reopening the socket was the alternative. A `transact` holds the raw socket across its send, so
+the slot could only be replaced once nothing held it, and the Client would then carry on as if a
+`bad_alloc` or a broken invariant had not happened. An Engine Discovery that throws still stops
+nothing: it belongs to one Target, and only its waiters rethrow.

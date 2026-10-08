@@ -89,6 +89,8 @@ class Client {
   // Stopping: refuses new work, closes the sockets and fails every outstanding operation with
   // Errc::ClientStopped. Idempotent, safe from any thread, and harmless before the destructor,
   // which does the same. An operation initiated afterwards completes with Errc::ClientStopped too.
+  // The Client also stops itself when its receive loop throws, before the exception leaves
+  // io_context::run(): that loop serves every Target on its socket (ADR-0009's amendment).
   void stop();
 
   // GET: fetch each named instance. Completion: void(ErrorCode, Response).

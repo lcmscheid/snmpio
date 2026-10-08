@@ -91,9 +91,11 @@ Three things the compiler will not tell you:
   It leaves `run()` once for the discovery and once for each request waiting on it, and those
   requests never complete. A later request to that Target starts a fresh discovery. Like a socket, a
   Client can be destroyed with requests outstanding, from any thread, even from inside one of its
-  own completion handlers. The only lifetime rule left is Asio's own: the `io_context` must outlive
-  the work scheduled on it. Completions can run after the Client is gone, so a handler must not
-  reach back into it.
+  own completion handlers. Asio's lifetime rule is left: the `io_context` must outlive the work
+  scheduled on it. Completions can run after the Client is gone, so a handler must not reach back
+  into it. Unlike a socket, `stop()` and destruction wait for a Walk's Batch handler already
+  running on another thread, so that none runs after they return; a Batch handler must therefore
+  not block on anything the thread stopping the Client may hold.
 - **A Target is an address, not a hostname.** Choosing a resolver stays the caller's business
   (`CONTEXT.md`), so nothing here will quietly resolve one for you.
 

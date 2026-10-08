@@ -48,6 +48,11 @@ _Avoid_: snmpwalk, bulkwalk, tree walk
 The set of OIDs lexicographically at or beneath a given base OID. Defines a Walk's extent and its
 termination condition.
 
+**Batch**:
+The Varbinds one reply contributes to a Walk, handed to the caller as they arrive. A Walk is
+delivered as a sequence of Batches and completes once, after the last.
+_Avoid_: chunk, page, row set
+
 **Varbind**:
 A pairing of an OID with a value or with one of the three exception markers (`noSuchObject`,
 `noSuchInstance`, `endOfMibView`). The unit that requests and responses carry lists of.

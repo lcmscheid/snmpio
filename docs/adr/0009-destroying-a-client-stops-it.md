@@ -68,3 +68,44 @@ Reopening the socket was the alternative. A `transact` holds the raw socket acro
 the slot could only be replaced once nothing held it, and the Client would then carry on as if a
 `bad_alloc` or a broken invariant had not happened. An Engine Discovery that throws still stops
 nothing: it belongs to one Target, and only its waiters rethrow.
+
+## Amendment, 2026-10-08: Stopping waits for a Batch already being delivered
+
+This replaces the amendment "the batch guarantee is the strand's", above. Its paragraph on the
+Stopping flag stands, except that the flag is no longer the only state outside the strand.
+
+The Consequences above say a Batch handler is never called after destruction begins, and until now
+that held only as the strand saw it. A Stopping on another thread could race a Batch the strand was
+already delivering, and the handler could then run after `~Client` had returned, against state the
+caller freed straight after it (#62). Nothing in the handler could tell; the caller was left with no
+safe way to capture anything the destroying thread owned.
+
+So `stop()` and `~Client` now wait for a Batch already being delivered on another thread, and for
+nothing else. "Never waits" narrows to "never waits for anything that has not already started".
+They do not wait on the thread delivering the Batch, which covers stopping from inside the handler;
+for a Batch that has not started, which finds the flag set and is never delivered; or for anything
+that needs the `io_context` to run, since a running handler needs nothing from it to return. A
+receive loop that throws stops the Client on the strand, where no other thread can be delivering,
+so it never waits. The Walk's completion handler is unchanged: it runs on the caller's executor and
+may still run after `~Client`, as any Asio handler may.
+
+The precedent is `std::stop_callback`, whose destructor blocks while its callback runs on another
+thread and not when it runs on the destroying thread, and the mechanism is libstdc++'s for it: an
+atomic records the id of the thread delivering a Batch, with no mutex. The strand records the id and
+then reads the flag; Stopping sets the flag and then reads the id, waiting with `atomic::wait` while
+it names another thread; the strand clears it and notifies once the handler returns. With both
+sides sequentially consistent, at least one sees the other's write: either the strand finds the flag
+set and calls no handler, or Stopping finds the delivery and waits for it.
+
+The cost is the deadlock `std::stop_callback` documents too. A Batch handler must not block on
+anything the thread stopping the Client may hold -- a mutex it destroys the Client under, say, or
+the return of another Client's handler that is itself stopping this one -- or neither returns. A cross-thread lock cycle cannot be detected cheaply, so it is documented on
+`BatchHandler` rather than detected.
+
+Leaving the window documented was the alternative, and it is what the earlier amendment did. Its
+rule, not to capture state the destroying thread frees, is one a caller cannot keep without
+synchronising with the strand itself, which is the wait moved into every caller. A mutex around
+the handler call would also close it, but would hold a lock across the caller's code.
+
+The id is a second atomic outside the strand, beside the flag; ADR-0003 carries the matching
+amendment.

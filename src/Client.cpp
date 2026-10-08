@@ -12,6 +12,7 @@
 #include <optional>
 #include <random>
 #include <string>
+#include <thread>
 #include <tuple>
 #include <unordered_map>
 #include <utility>
@@ -135,15 +136,20 @@ class Client::Impl {
   explicit Impl(net::Strand strand) : m_strand(std::move(strand)), m_nextId(randomRequestId()) {}
 
   // Stopping, from any thread. The flag is set at once, and the strand checks it before each
-  // exchange and each batch, so nothing begins once the strand has seen it; the cleanup that needs
-  // the strand follows on it. From another thread, that is not the same as "after this returns":
-  // the strand may already be past a check, mid-send or mid-batch (see BatchHandler).
+  // exchange and each Batch, so nothing begins once the strand has seen it; the cleanup that needs
+  // the strand follows on it. From another thread the strand may already be past a check, mid-send
+  // or mid-Batch. A send is left to finish on its own; a Batch is waited for (ADR-0009's
+  // amendment), so that no handler is still running once this returns.
   static void stop(const Ref& self) {
-    if (self->m_stopping.exchange(true)) return;
-    // Dispatched rather than posted: stop() is usually the last thing before the io_context
-    // drains, and a posted cleanup would never run. Owning `self`, because the Client that asked
-    // may be gone by the time it runs.
-    net::asio::dispatch(self->m_strand, [self] { self->finishStopping(); });
+    if (!self->m_stopping.exchange(true)) {
+      // Dispatched rather than posted: stop() is usually the last thing before the io_context
+      // drains, and a posted cleanup would never run. Owning `self`, because the Client that asked
+      // may be gone by the time it runs.
+      net::asio::dispatch(self->m_strand, [self] { self->finishStopping(); });
+    }
+    // Every call waits, not just the first: a second thread stopping while the first is still
+    // waiting is owed the same guarantee.
+    self->awaitBatchDelivery();
   }
 
   net::Awaitable<RequestResult> doRequest(Ref self, Target target, Auth auth, Pdu pdu);
@@ -213,6 +219,55 @@ class Client::Impl {
   // wakes everything waiting, which then finds the flag set and completes with ClientStopped.
   void finishStopping();
 
+  // Marks the calling thread as the one delivering a Batch, for as long as this lives -- which is
+  // never across a suspension (see deliverBatch).
+  class BatchDelivery {
+   public:
+    explicit BatchDelivery(std::atomic<std::thread::id>& deliverer) : m_deliverer(deliverer) {
+      m_deliverer.store(std::this_thread::get_id());
+    }
+    ~BatchDelivery() {
+      m_deliverer.store(std::thread::id{});
+      m_deliverer.notify_all();
+    }
+    BatchDelivery(const BatchDelivery&) = delete;
+    BatchDelivery& operator=(const BatchDelivery&) = delete;
+    BatchDelivery(BatchDelivery&&) = delete;
+    BatchDelivery& operator=(BatchDelivery&&) = delete;
+
+   private:
+    std::atomic<std::thread::id>& m_deliverer;
+  };
+
+  // Hands one Batch to the handler, unless it is empty or Stopping has begun: the error the Walk
+  // then ends with, or nothing to carry on. Not a coroutine, so the deliverer can never be recorded
+  // across a suspension.
+  std::optional<net::ErrorCode> deliverBatch(const BatchHandler& onBatch,
+                                             std::span<const Varbind> batch) {
+    // doWalk's own check settles a stop() the strand has already seen; this one settles a stop()
+    // on another thread racing the delivery. The deliverer is recorded first and the flag read
+    // second, the mirror image of stop(), so either this sees the flag or stop() sees the delivery
+    // and waits for the handler to return.
+    if (batch.empty()) return std::nullopt;
+    const BatchDelivery delivery(m_deliverer);
+    if (m_stopping) return make_error_code(Errc::ClientStopped);
+    if (!onBatch(batch)) return make_error_code(Errc::WalkIncomplete);
+    return std::nullopt;
+  }
+
+  // Stopping's wait, after the flag is set: returns once no Batch is being delivered on another
+  // thread. The delivering thread's own stop never waits -- it is inside the handler it would be
+  // waiting for -- and neither does one on the strand, where no other thread can be delivering.
+  // The same arrangement as libstdc++'s std::stop_callback, whose destructor waits for its
+  // callback only when another thread is running it.
+  void awaitBatchDelivery() const {
+    const auto caller = std::this_thread::get_id();
+    for (auto id = m_deliverer.load(); id != std::thread::id{} && id != caller;
+         id = m_deliverer.load()) {
+      m_deliverer.wait(id);
+    }
+  }
+
   std::int32_t nextId() noexcept;
 
   net::UdpSocket* socketFor(const Ref& self, const net::UdpEndpoint& to, net::ErrorCode& ec);
@@ -255,10 +310,15 @@ class Client::Impl {
   net::Awaitable<RequestResult> doRequestV3(Ref self, Target target, Credentials creds, Pdu pdu);
 
   net::Strand m_strand;
-  // The one member that is not the strand's alone: written once, by stop() on whichever thread
-  // called it -- the strand itself when a receive loop throws -- and read on the strand. That is
-  // what lets Stopping take effect before the strand gets round to the cleanup.
+  // One of the two members that are not the strand's alone: written once, by stop() on whichever
+  // thread called it -- the strand itself when a receive loop throws -- and read on the strand.
+  // That is what lets Stopping take effect before the strand gets round to the cleanup.
   std::atomic<bool> m_stopping = false;
+  // The other: the thread delivering a Batch, or no thread. Written on the strand around each
+  // handler call and read by stop(). Each side writes its own atomic and then reads the other's,
+  // all sequentially consistent, so at least one sees the other: either the strand finds the flag
+  // set and calls no handler, or stop() finds the delivery and waits for it (ADR-0009's amendment).
+  std::atomic<std::thread::id> m_deliverer;
   std::optional<net::UdpSocket> m_v4;
   std::optional<net::UdpSocket> m_v6;
   std::unordered_map<std::int32_t, std::shared_ptr<Pending>> m_pending;
@@ -282,8 +342,10 @@ class Client::Impl {
 Client::Client(const net::Executor& ex)
     : m_strand(net::asio::make_strand(ex)), m_impl(std::make_shared<Impl>(m_strand)) {}
 
-// ADR-0009. Never waits: this may be running on the strand, inside one of the Client's own
-// completions, or with the io_context not running at all, and waiting would deadlock in each.
+// ADR-0009. Waits for nothing that has not already started: this may be running on the strand,
+// inside one of the Client's own completions, or with the io_context not running at all, and
+// waiting for the strand would deadlock in each. The one wait is for a Batch handler already
+// running on another thread, which needs nothing from the io_context to return (see stop()).
 //
 // The cleanup dispatched to the strand may allocate, and a bad_alloc there terminates, as it would
 // from any destructor. Catching it would be worse: a Client stopped only half-way keeps its receive
@@ -1101,8 +1163,7 @@ net::Awaitable<Client::WalkResult> Client::Impl::doWalk(Ref self, Target target,
       batch.push_back(std::move(vb));
     }
 
-    if (!batch.empty() && !onBatch(batch))
-      co_return WalkResult{make_error_code(Errc::WalkIncomplete)};
+    if (const auto stop = deliverBatch(onBatch, batch)) co_return WalkResult{*stop};
     if (done) co_return WalkResult{net::ErrorCode{}};
   }
 }

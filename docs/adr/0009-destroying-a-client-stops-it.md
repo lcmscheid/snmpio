@@ -62,7 +62,7 @@ any one Target. Before this, the exception left `run()` (threat-model L7), but t
 open with nothing reading it, and a caller who ran the `io_context` again saw every later request
 on it time out with nothing to say why (#63). The loop's completion now stops the Client before
 rethrowing, on the strand, so the cleanup runs inline and the requests complete with
-`ClientStopped`. The flag is set on the strand there, which keeps within ADR-0003's amendment.
+`ClientStopped`. The flag is set on the strand there; ADR-0003 carries the matching amendment.
 
 Reopening the socket was the alternative. A `transact` holds the raw socket across its send, so
 the slot could only be replaced once nothing held it, and the Client would then carry on as if a

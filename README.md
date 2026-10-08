@@ -84,9 +84,11 @@ Three things the compiler will not tell you:
   `authNoPriv` request.
 - **`io.run()` returns only after the Client stops.** The Client's receive loop is outstanding
   work. Three things end it: `stop()`, destroying the Client (ADR-0009), and an exception escaping
-  the receive loop, which then leaves `run()`. Each stops the Client: every
-  Outstanding Request completes with `Errc::ClientStopped`, exactly once while the `io_context`
-  runs, on its own executor. Like a socket, a Client can be destroyed with requests outstanding,
+  the receive loop, which then leaves `run()`. Each stops the Client: every Outstanding Request
+  completes with `Errc::ClientStopped`, exactly once while the `io_context` runs, on its own
+  executor. A stopped Client stays stopped, so after catching that exception, make a new one. An
+  exception from an Engine Discovery leaves `run()` too, but stops nothing: it belongs to one
+  Target, and the Client carries on. Like a socket, a Client can be destroyed with requests outstanding,
   from any thread, even from inside one of its own completion handlers. The only lifetime rule left
   is Asio's own: the `io_context` must outlive the work scheduled on it. Completions can run after
   the Client is gone, so a handler must not reach back into it.

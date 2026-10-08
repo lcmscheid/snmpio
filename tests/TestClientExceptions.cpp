@@ -53,7 +53,8 @@ Pdu echoAnswer(const Pdu& request) {
   return p;
 }
 
-Target longDeadlineTarget(const ScriptedV3Agent& agent) {
+template <typename Agent>
+Target longDeadlineTarget(const Agent& agent) {
   auto t = test::targetFor(agent, 0);
   t.timeout = longDeadline;
   return t;
@@ -141,8 +142,7 @@ TEST(ClientExceptions, AReceiveLoopThatThrowsStopsTheClient) {
 
   net::IoContext io;
   Client client(io.get_executor());
-  auto target = test::targetFor(agent, 0);
-  target.timeout = longDeadline;
+  const auto target = longDeadlineTarget(agent);
   std::vector<net::ErrorCode> completions;
   const auto record = [&completions](net::ErrorCode ec, const Response&) {
     completions.push_back(ec);

@@ -26,3 +26,9 @@ for free instead of being special cases.
 All of the state is still confined to the strand but one flag: the one Stopping sets, an atomic
 written on whichever thread calls `stop()` or destroys the Client, so that Stopping takes effect at
 once. ADR-0009's amendment of the same date says why.
+
+## Amendment, 2026-10-08: the strand writes the flag too
+
+A receive loop that throws stops the Client from its completion, which runs on the strand, so the
+flag now has a writer there as well as the threads above. It is still the one atomic and nothing
+else leaves the strand. ADR-0009's amendment on the receive loop says why.

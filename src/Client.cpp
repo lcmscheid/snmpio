@@ -367,12 +367,9 @@ net::UdpSocket* Client::Impl::socketFor(const Ref& self, const net::UdpEndpoint&
   // One receive loop per socket, running until the socket closes. It outlives every individual
   // request, which is the point: Responses are matched by request-id, not by who is waiting.
   //
-  // A loop that throws stops the Client before rethrowing. It serves every Target on its socket,
-  // so the fault is the Client's own rather than any one Target's (CONTEXT.md, Stopping), and
-  // anything less leaves the socket open with nothing reading it: every request sent on it after a
-  // caller ran the io_context again would time out, with no word as to why. Reopening the socket
-  // instead would have to wait until no transact still held the old one across its send, and
-  // would carry on as if a bad_alloc or a broken invariant had not happened.
+  // A loop that throws stops the Client before rethrowing: it serves every Target on its socket, so
+  // the fault is the Client's own, and anything less leaves the socket open with nothing reading
+  // it (ADR-0009's amendment).
   net::asio::co_spawn(m_strand, receiveLoop(self, &*slot), [self](const std::exception_ptr& e) {
     if (!e) return;
     stop(self);

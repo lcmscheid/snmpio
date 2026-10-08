@@ -256,8 +256,8 @@ class Client::Impl {
 
   net::Strand m_strand;
   // The one member that is not the strand's alone: written once, by stop() on whichever thread
-  // called it, and read on the strand. That is what lets Stopping take effect before the strand
-  // gets round to the cleanup.
+  // called it -- the strand itself when a receive loop throws -- and read on the strand. That is
+  // what lets Stopping take effect before the strand gets round to the cleanup.
   std::atomic<bool> m_stopping = false;
   std::optional<net::UdpSocket> m_v4;
   std::optional<net::UdpSocket> m_v6;

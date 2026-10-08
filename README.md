@@ -87,11 +87,13 @@ Three things the compiler will not tell you:
   the receive loop, which then leaves `run()`. Each stops the Client: every Outstanding Request
   completes with `Errc::ClientStopped`, exactly once while the `io_context` runs, on its own
   executor. A stopped Client stays stopped, so after catching that exception, make a new one. An
-  exception from an Engine Discovery leaves `run()` too, but stops nothing: it belongs to one
-  Target, and the Client carries on. Like a socket, a Client can be destroyed with requests outstanding,
-  from any thread, even from inside one of its own completion handlers. The only lifetime rule left
-  is Asio's own: the `io_context` must outlive the work scheduled on it. Completions can run after
-  the Client is gone, so a handler must not reach back into it.
+  exception from an Engine Discovery is different: it belongs to one Target, so it stops nothing.
+  It leaves `run()` once for the discovery and once for each request waiting on it, and those
+  requests never complete. A later request to that Target starts a fresh discovery. Like a socket, a
+  Client can be destroyed with requests outstanding, from any thread, even from inside one of its
+  own completion handlers. The only lifetime rule left is Asio's own: the `io_context` must outlive
+  the work scheduled on it. Completions can run after the Client is gone, so a handler must not
+  reach back into it.
 - **A Target is an address, not a hostname.** Choosing a resolver stays the caller's business
   (`CONTEXT.md`), so nothing here will quietly resolve one for you.
 

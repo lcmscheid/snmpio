@@ -126,9 +126,10 @@ _Avoid_: pending request, in-flight request (in flight is one of its waits, not 
 
 **Stopping**:
 The Command Generator refusing new work and completing every Outstanding Request with
-`ClientStopped`. Destroying the Command Generator stops it, so a forgotten stop is never a dangling
-request. Distinct from cancellation, which ends one request at its caller's asking and completes
-with `operation_aborted`.
+`ClientStopped`. It begins at the caller's stop, at destruction, or at a fault in the Command
+Generator itself that no single Target owns. Destroying the Command Generator stops it, so a
+forgotten stop is never a dangling request. Distinct from cancellation, which ends one request at
+its caller's asking and completes with `operation_aborted`.
 _Avoid_: shutdown, close, abort
 
 ### Errors

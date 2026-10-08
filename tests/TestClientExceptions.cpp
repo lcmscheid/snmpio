@@ -5,11 +5,13 @@
 #include <new>
 #include <optional>
 #include <thread>
+#include <vector>
 
 #include <snmpio/Client.hpp>
 #include <snmpio/Usm.hpp>
 
 #include "FailingAllocation.hpp"
+#include "ScriptedAgent.hpp"
 #include "ScriptedV3Agent.hpp"
 
 // Threat model L7: an exception escaping the Client's own coroutines leaves io_context::run(),
@@ -20,6 +22,7 @@ namespace snmpio {
 namespace {
 
 using test::FailingAllocation;
+using test::ScriptedAgent;
 using test::ScriptedV3Agent;
 
 const Oid sysDescr{1, 3, 6, 1, 2, 1, 1, 1, 0};
@@ -50,7 +53,8 @@ Pdu echoAnswer(const Pdu& request) {
   return p;
 }
 
-Target longDeadlineTarget(const ScriptedV3Agent& agent) {
+template <typename Agent>
+Target longDeadlineTarget(const Agent& agent) {
   auto t = test::targetFor(agent, 0);
   t.timeout = longDeadline;
   return t;
@@ -112,6 +116,62 @@ TEST(ClientExceptions, ADiscoveryThatThrowsSurfacesForEachWaiterAndLeavesNoneQue
   ASSERT_TRUE(later.has_value()) << "a later request queued behind the discovery that threw";
   EXPECT_FALSE(*later) << later->message();
   EXPECT_EQ(discoveries, 2) << "the later request did not start a discovery of its own";
+}
+
+// The size of the one OCTET STRING the Agent below answers with, which the decoder copies into a
+// vector of exactly that many bytes. Odd, so nothing holding a pointer is this size, and nothing
+// else on the Client's thread is: the request it encodes is a few dozen bytes, and the receive
+// buffer is a whole datagram.
+constexpr std::size_t oversizedValueSize = 333;
+
+const Oid oversizedInstance{1, 3, 6, 1, 4, 1, 99999, 1};
+
+// A receive loop belongs to a socket, not to any one Target, so the fault is the Client's own and
+// it stops (CONTEXT.md, Stopping; #63).
+TEST(ClientExceptions, AReceiveLoopThatThrowsStopsTheClient) {
+  if (!FailingAllocation::available()) GTEST_SKIP() << "this build cannot replace operator new";
+  net::IoContext agentIo;
+  // Answers only the request for oversizedInstance, with a value whose decoding fails, and leaves
+  // the other outstanding. On a thread of its own, because it encodes the same value to answer.
+  ScriptedAgent agent(agentIo, [](const V2cMessage& msg) -> std::optional<Pdu> {
+    if (msg.pdu.varbinds.at(0).name != oversizedInstance) return std::nullopt;
+    return test::respondWith(
+        {Varbind{oversizedInstance, Octets(oversizedValueSize, std::byte{'x'})}});
+  });
+  std::thread agentThread([&agentIo] { agentIo.run(); });
+
+  net::IoContext io;
+  Client client(io.get_executor());
+  const auto target = longDeadlineTarget(agent);
+  std::vector<net::ErrorCode> completions;
+  const auto record = [&completions](net::ErrorCode ec, const Response&) {
+    completions.push_back(ec);
+  };
+  // The one whose reply throws, and one on the same socket left waiting behind it.
+  client.asyncGet(target, Community("public"), {oversizedInstance}, record);
+  client.asyncGet(target, Community("public"), {sysDescr}, record);
+
+  int thrown = 0;
+  {
+    const FailingAllocation failing(oversizedValueSize);
+    const auto deadline = std::chrono::steady_clock::now() + longDeadline;
+    while (completions.size() < 3 && std::chrono::steady_clock::now() < deadline) {
+      try {
+        io.run_until(deadline);
+      } catch (const std::bad_alloc&) {
+        // Issued once the loop has thrown: it must be refused, not sent on a socket nobody reads.
+        if (++thrown == 1) client.asyncGet(target, Community("public"), {sysDescr}, record);
+      }
+    }
+    EXPECT_TRUE(failing.fired()) << "no allocation of the value's size was made";
+  }
+  net::asio::post(agentIo, [&agent] { agent.close(); });
+  agentThread.join();
+
+  EXPECT_EQ(thrown, 1);
+  ASSERT_EQ(completions.size(), 3U) << "a request was left waiting out its deadline";
+  for (const auto& ec : completions) EXPECT_EQ(ec, Errc::ClientStopped) << ec.message();
+  EXPECT_EQ(agent.requestsSeen(), 2) << "the request after the throw was sent";
 }
 
 }  // namespace

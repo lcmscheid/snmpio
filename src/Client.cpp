@@ -109,10 +109,10 @@ std::int32_t randomRequestId() {
   return dist(rd);
 }
 
-// The completion of the two coroutines no operation awaits: the receive loop and an Engine
-// Discovery. Neither throws by design, so an exception here is bad_alloc or a programming error,
-// and it leaves run() the way spawn lets one out of an operation. `detached` would swallow it,
-// and leave every request that loop or that discovery was serving waiting forever, in silence.
+// The completion of an Engine Discovery, which no operation awaits. It does not throw by design, so
+// an exception here is bad_alloc or a programming error, and it leaves run() the way spawn lets one
+// out of an operation. `detached` would swallow it, and leave every request that discovery was
+// serving waiting forever, in silence. The receive loop has a completion of its own (socketFor).
 constexpr auto rethrow = [](const std::exception_ptr& e) {
   if (e) std::rethrow_exception(e);
 };
@@ -256,8 +256,8 @@ class Client::Impl {
 
   net::Strand m_strand;
   // The one member that is not the strand's alone: written once, by stop() on whichever thread
-  // called it, and read on the strand. That is what lets Stopping take effect before the strand
-  // gets round to the cleanup.
+  // called it -- the strand itself when a receive loop throws -- and read on the strand. That is
+  // what lets Stopping take effect before the strand gets round to the cleanup.
   std::atomic<bool> m_stopping = false;
   std::optional<net::UdpSocket> m_v4;
   std::optional<net::UdpSocket> m_v6;
@@ -366,7 +366,15 @@ net::UdpSocket* Client::Impl::socketFor(const Ref& self, const net::UdpEndpoint&
   }
   // One receive loop per socket, running until the socket closes. It outlives every individual
   // request, which is the point: Responses are matched by request-id, not by who is waiting.
-  net::asio::co_spawn(m_strand, receiveLoop(self, &*slot), rethrow);
+  //
+  // A loop that throws stops the Client before rethrowing: it serves every Target on its socket, so
+  // the fault is the Client's own, and anything less leaves the socket open with nothing reading
+  // it (ADR-0009's amendment).
+  net::asio::co_spawn(m_strand, receiveLoop(self, &*slot), [self](const std::exception_ptr& e) {
+    if (!e) return;
+    stop(self);
+    std::rethrow_exception(e);
+  });
   return &*slot;
 }
 

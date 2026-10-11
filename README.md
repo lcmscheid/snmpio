@@ -91,9 +91,11 @@ Three things the compiler will not tell you:
   It leaves `run()` once for the discovery and once for each request waiting on it, and those
   requests never complete. A later request to that Target starts a fresh discovery. Like a socket, a
   Client can be destroyed with requests outstanding, from any thread, even from inside one of its
-  own completion handlers. The only lifetime rule left is Asio's own: the `io_context` must outlive
-  the work scheduled on it. Completions can run after the Client is gone, so a handler must not
-  reach back into it.
+  own completion handlers. Asio's lifetime rule is left: the `io_context` must outlive the work
+  scheduled on it. Completions can run after the Client is gone, so a handler must not reach back
+  into it. Unlike a socket, `stop()` and destruction wait for a Walk's Batch handler already
+  running on another thread, so that none runs after they return; a Batch handler must therefore
+  not block on anything the thread stopping the Client may hold.
 - **A Target is an address, not a hostname.** Choosing a resolver stays the caller's business
   (`CONTEXT.md`), so nothing here will quietly resolve one for you.
 
@@ -517,10 +519,10 @@ protocol. Those two assert successor semantics without pinning any MIB contents:
 its column from `sysDescr.0` one row late, strictly increasing until it reaches `endOfMibView`; and
 GETNEXT of `sysDescr.0` is where that second column starts. And a Walk of `interfaces` in GETNEXT
 mode and in GETBULK mode, each streaming and collecting, over v2c, at each Security Level and under
-every privacy protocol. The Subtree is several batches long on the three Agents CI starts, and on
+every privacy protocol. The Subtree is several Batches long on the three Agents CI starts, and on
 most Targets beside them; on one with too few interfaces the Walks fail rather than pass on a
-single batch. The Walks assert structure alone — every OID inside the Subtree, strictly increasing,
-a clean end, more than one batch — and are held to one OID list, so the Agent supplies the expected
+single Batch. The Walks assert structure alone — every OID inside the Subtree, strictly increasing,
+a clean end, more than one Batch — and are held to one OID list, so the Agent supplies the expected
 answer; values are not compared, since counters move between Walks.
 And SET, over v2c and at each Security Level: a [write that lands](#writer-credentials), read
 back with a GET and restored, and a write the Agent refuses, asserting the exact error-status its
@@ -793,7 +795,7 @@ error-status the Agent returned.
 
 Walks stream by default and collect on request (ADR-0004). Both reject a non-increasing OID, both
 stop at the Subtree boundary, and both degrade `max-repetitions` when an Agent answers `tooBig`.
-Cancellation is split as the ADR requires: `total` stops at a batch boundary and reports
+Cancellation is split as the ADR requires: `total` stops at a Batch boundary and reports
 `Errc::WalkIncomplete` alongside what was already delivered, `terminal` drops everything with
 `operation_aborted`.
 

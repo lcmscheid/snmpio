@@ -23,12 +23,23 @@ for free instead of being special cases.
 
 ## Amendment, 2026-10-08: one atomic outside the strand
 
+_Narrowed by the amendment "a second atomic, for Batch delivery", below: there are now two._
+
 All of the state is still confined to the strand but one flag: the one Stopping sets, an atomic
 written on whichever thread calls `stop()` or destroys the Client, so that Stopping takes effect at
 once. ADR-0009's amendment of the same date says why.
 
 ## Amendment, 2026-10-08: the strand writes the flag too
 
+_Narrowed by the amendment "a second atomic, for Batch delivery", below: there are now two._
+
 A receive loop that throws stops the Client from its completion, which runs on the strand, so the
 flag now has a writer there as well as the threads above. It is still the one atomic and nothing
 else leaves the strand. ADR-0009's amendment on the receive loop says why.
+
+## Amendment, 2026-10-08: a second atomic, for Batch delivery
+
+This narrows the two amendments above, which say the flag is the one atomic. A second atomic now
+sits beside the flag: the id of the thread delivering a Batch, written on the strand around each
+handler call and read by `stop()` and `~Client`, which wait for the handler when another thread is
+running it. Nothing else leaves the strand. ADR-0009's amendment on Batch delivery says why.

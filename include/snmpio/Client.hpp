@@ -33,9 +33,9 @@ struct Response {
 // The SNMPv2c Command Generator.
 //
 // One Client owns the transport and the caches; there is no session type, and ADR-0003 explains
-// at length why not. Everything internal lives on the Client's own strand -- all but the flag
-// Stopping sets, an atomic (ADR-0009) -- so initiating an operation from any thread is safe and
-// none of the state needs locking.
+// at length why not. Everything internal lives on the Client's own strand -- all but two atomics
+// Stopping uses, its flag and the thread delivering a Batch (ADR-0009) -- so initiating an
+// operation from any thread is safe and none of the state needs locking.
 //
 // Completion follows the Asio convention throughout: every operation takes a completion token and
 // reports failure as an ErrorCode. Three categories can show up there -- the system's, for socket
@@ -54,8 +54,9 @@ struct Response {
 // Lifetime follows Asio's own I/O objects (ADR-0009): a Client may be destroyed with operations
 // outstanding, from any thread, including from inside one of its own completion handlers.
 // Destroying it stops it, so each outstanding operation still completes, exactly once, with
-// Errc::ClientStopped. The only rule left to the caller is Asio's: the io_context must outlive the
-// work scheduled on it, which includes this Client's.
+// Errc::ClientStopped. Asio's rule is left to the caller -- the io_context must outlive the work
+// scheduled on it, which includes this Client's -- and one more of std::stop_callback's, since
+// destruction waits for a Batch handler running on another thread: see BatchHandler.
 //
 // Two consequences follow, the same ones a socket has. Completion handlers run *after* the
 // destructor has returned, so a handler must not reach back into the Client or into an owner that
@@ -63,18 +64,23 @@ struct Response {
 // run destroys the handlers it holds instead of invoking them.
 class Client {
  public:
-  // Receives each batch of a streaming Walk. Returning false stops the Walk, which then completes
+  // Receives each Batch of a streaming Walk. Returning false stops the Walk, which then completes
   // with Errc::WalkIncomplete -- a partially consumed Walk must never look like a whole one
-  // (ADR-0004). Called on the Client's strand, and never once Stopping has begun there: a stop()
-  // or a destruction on the strand -- from inside a handler bound to it, say -- or one that
-  // happens-before the strand reaches the batch. One on another thread can race a batch the
-  // strand is already delivering, and ~Client does not wait for it (ADR-0009), so a handler must
-  // not capture state that thread frees straight after destroying the Client.
+  // (ADR-0004). Called on the Client's strand, and never once Stopping has begun, from whichever
+  // thread it began on: stop() and ~Client wait for a Batch already being delivered on another
+  // thread, so once either returns the handler has too, and no Batch follows (ADR-0009's
+  // amendment). They do not wait when called from inside the handler itself.
+  //
+  // The rule std::stop_callback's destructor has, and its warning: the handler must not block on
+  // anything the thread stopping the Client may hold -- a mutex that thread destroys the Client
+  // under, say, or the return of another Client's handler that is itself stopping this one -- or
+  // the two wait for each other forever. Nothing detects that.
   using BatchHandler = std::function<bool(std::span<const Varbind>)>;
 
   explicit Client(const net::Executor& ex);
-  // Stops the Client (see stop()) and returns without waiting for anything: the outstanding
-  // operations complete later, on their own executors.
+  // Stops the Client (see stop()). Waits only for a Batch handler already running on another
+  // thread (see BatchHandler), never for the outstanding operations: they complete later, on their
+  // own executors.
   ~Client();
 
   // Neither copyable nor movable (ADR-0009). A caller who needs to move one holds a
@@ -88,7 +94,8 @@ class Client {
 
   // Stopping: refuses new work, closes the sockets and fails every outstanding operation with
   // Errc::ClientStopped. Idempotent, safe from any thread, and harmless before the destructor,
-  // which does the same. An operation initiated afterwards completes with Errc::ClientStopped too.
+  // which does the same, waiting the same way for a Batch handler running on another thread (see
+  // BatchHandler). An operation initiated afterwards completes with Errc::ClientStopped too.
   // The Client also stops itself when a receive loop throws, before the exception leaves
   // io_context::run(): that loop serves every Target on its socket (ADR-0009's amendment).
   void stop();
@@ -132,10 +139,10 @@ class Client {
         std::forward<Token>(token));
   }
 
-  // Walk a Subtree, delivering each batch to onBatch as it arrives (ADR-0004: streaming is the
+  // Walk a Subtree, delivering each Batch to onBatch as it arrives (ADR-0004: streaming is the
   // core, collecting is the wrapper -- a Walk has no bounded size). Completion: void(ErrorCode).
   //
-  // Cancellation is split: a `total` signal finishes the in-flight batch and completes with
+  // Cancellation is split: a `total` signal finishes the in-flight Batch and completes with
   // Errc::WalkIncomplete; a `terminal` one drops everything immediately.
   template <typename Token>
   auto asyncWalk(Target target, Community community, Oid base, WalkOptions options,

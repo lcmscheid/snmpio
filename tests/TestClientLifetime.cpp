@@ -1,13 +1,16 @@
 #include <gtest/gtest.h>
 
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <functional>
 #include <future>
+#include <latch>
 #include <memory>
 #include <optional>
 #include <span>
 #include <thread>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -208,6 +211,123 @@ TEST(ClientLifetime, ABatchHandlerIsNeverCalledOnceDestructionHasBegun) {
     ASSERT_TRUE(result.has_value());
     EXPECT_EQ(*result, Errc::ClientStopped);
   }
+}
+
+// Five Batches' worth at WalkOptions{2}, so a Walk is still going after its first.
+std::vector<Varbind> tenRows() {
+  std::vector<Varbind> rows;
+  for (std::uint32_t i = 1; i <= 10; ++i)
+    rows.emplace_back(systemGroup.child(i).child(0), Gauge32{i});
+  return rows;
+}
+
+// What happened to a Walk whose first Batch handler was blocked while another thread stopped the
+// Client, as seen by each of the three threads involved.
+struct BlockedBatchOutcome {
+  bool stopperReturnedBeforeHandler = false;
+  int batches = 0;
+  std::optional<net::ErrorCode> result;
+};
+
+// ADR-0009's amendment: Stopping on one thread waits for a Batch already being delivered on
+// another, so that once it returns the handler has finished and none follows. The handler signals
+// that it has started and then blocks until released; `stopClient` stops the Client meanwhile, on a
+// thread of its own. The release is held back long enough for a Stopping that does not wait to
+// have returned, so that one fails here unless its thread stalls for longer. A Stopping that does
+// wait passes however long the release takes, because it cannot return before the handler does.
+BlockedBatchOutcome stopWhileABatchIsBlocked(
+    const std::function<void(std::optional<Client>&)>& stopClient) {
+  net::IoContext io;
+  ScriptedAgent agent(io, tableAgent(tenRows()));
+  std::optional<Client> client{std::in_place, io.get_executor()};
+  std::latch started{1};
+  std::latch release{1};
+  std::atomic<int> batches = 0;
+  std::atomic<bool> handlerReturned = false;
+  std::promise<net::ErrorCode> result;
+
+  client->asyncWalk(
+      targetFor(agent), publicCommunity, systemGroup, WalkOptions{2},
+      [&](std::span<const Varbind>) {
+        if (++batches == 1) {
+          started.count_down();
+          release.wait();
+          handlerReturned = true;
+        }
+        return true;
+      },
+      [&](net::ErrorCode ec) {
+        result.set_value(ec);
+        agent.close();
+      });
+  std::thread runner([&io] { io.run(); });
+
+  BlockedBatchOutcome outcome;
+  started.wait();
+  std::promise<void> ended;
+  std::thread stopper([&] {
+    stopClient(client);
+    outcome.stopperReturnedBeforeHandler = !handlerReturned;
+    ended.set_value();
+  });
+  std::ignore = ended.get_future().wait_for(std::chrono::milliseconds(200));
+  release.count_down();
+  stopper.join();
+
+  auto completion = result.get_future();
+  if (completion.wait_for(longDeadline) == std::future_status::ready)
+    outcome.result = completion.get();
+  net::asio::post(io, [&agent] { agent.close(); });
+  runner.join();
+  outcome.batches = batches;
+  return outcome;
+}
+
+TEST(ClientLifetime, DestructionWaitsForABatchBeingDeliveredOnAnotherThread) {
+  const auto outcome = stopWhileABatchIsBlocked([](std::optional<Client>& c) { c.reset(); });
+
+  EXPECT_FALSE(outcome.stopperReturnedBeforeHandler)
+      << "~Client returned while the Batch handler was running";
+  EXPECT_EQ(outcome.batches, 1) << "a Batch was delivered after destruction began";
+  ASSERT_TRUE(outcome.result.has_value()) << "the Walk never completed";
+  EXPECT_EQ(*outcome.result, Errc::ClientStopped);
+}
+
+TEST(ClientLifetime, StopWaitsForABatchBeingDeliveredOnAnotherThread) {
+  const auto outcome = stopWhileABatchIsBlocked([](std::optional<Client>& c) { c->stop(); });
+
+  EXPECT_FALSE(outcome.stopperReturnedBeforeHandler)
+      << "stop() returned while the Batch handler was running";
+  EXPECT_EQ(outcome.batches, 1) << "a Batch was delivered after stop()";
+  ASSERT_TRUE(outcome.result.has_value()) << "the Walk never completed";
+  EXPECT_EQ(*outcome.result, Errc::ClientStopped);
+}
+
+// The other half of the rule: the delivering thread never waits for itself, or destroying a Client
+// from its own Batch handler would deadlock.
+TEST(ClientLifetime, DestroyedFromItsOwnBatchHandlerDoesNotWaitForIt) {
+  net::IoContext io;
+  ScriptedAgent agent(io, tableAgent(tenRows()));
+  std::optional<Client> client{std::in_place, io.get_executor()};
+  int batches = 0;
+  std::optional<net::ErrorCode> result;
+
+  client->asyncWalk(
+      targetFor(agent), publicCommunity, systemGroup, WalkOptions{2},
+      [&](std::span<const Varbind>) {
+        ++batches;
+        client.reset();
+        return true;
+      },
+      [&](net::ErrorCode ec) {
+        result = ec;
+        agent.close();
+      });
+  io.run();
+
+  EXPECT_EQ(batches, 1);
+  ASSERT_TRUE(result.has_value());
+  EXPECT_EQ(*result, Errc::ClientStopped);
 }
 
 // The same sweep for a single request. A reply accepted as destruction begins leaves the request

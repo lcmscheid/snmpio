@@ -669,8 +669,10 @@ net::Awaitable<net::ErrorCode> Client::Impl::transact(Ref self, Target target,
                                  redirect_error(use_awaitable, ec));
     // Stopping may have begun while the send was in flight, and its cleanup has then already
     // cancelled a timer this has not armed yet -- arming it now would wait out a whole deadline
-    // before reporting ClientStopped.
-    if (ec || m_stopping) break;
+    // before reporting ClientStopped. A reply can overtake the send the same way: with several
+    // threads running the io_context, the send's completion and the reply's reach the strand from
+    // different threads, in either order, and the reply's cancel finds no wait to wake.
+    if (ec || m_stopping || pending->answered) break;
 
     pending->timer.expires_after(target.timeout);
     // The wait's own ErrorCode says nothing useful: the receive loop cancels this timer to wake

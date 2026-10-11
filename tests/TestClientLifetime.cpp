@@ -212,12 +212,12 @@ void destroyWhileOthersRunAndInitiate(int round) {
   std::vector<Varbind> rows;
   for (std::uint32_t i = 1; i <= 6; ++i)
     rows.emplace_back(systemGroup.child(i).child(0), Gauge32{i});
-  // Answers the first round and falls silent on the second, so the Walk stays mid-way.
+  // Answers the first exchange and falls silent on the second, so the Walk stays mid-way.
   ScriptedAgent walked(io,
                        [&inWait, table = tableAgent(rows),
-                        rounds = 0](const V2cMessage& msg) mutable -> std::optional<Pdu> {
-                         if (++rounds == 1) return table(msg);
-                         if (rounds == 2) inWait[3].countDown();
+                        exchanges = 0](const V2cMessage& msg) mutable -> std::optional<Pdu> {
+                         if (++exchanges == 1) return table(msg);
+                         if (exchanges == 2) inWait[3].countDown();
                          return std::nullopt;
                        });
   ScriptedAgent answering(io, answerOnlySysDescr);
@@ -256,6 +256,17 @@ void destroyWhileOthersRunAndInitiate(int round) {
   std::vector<CompletionOracle> survivorOracles;
   std::optional<CompletionOracle> afterDestruction;
   bool afterDestructionCompleted = false;
+  // The survivor's Agent answers at once, so a request of its that took half a deadline sat one
+  // out: the ErrorCode alone would pass a reply that overtook its send and was reported only at the
+  // deadline.
+  std::atomic<bool> survivorLate = false;
+  const auto onTime = [&survivorLate](auto then) {
+    return [&survivorLate, then = std::move(then), initiated = std::chrono::steady_clock::now()](
+               net::ErrorCode, const Response&) {
+      if (std::chrono::steady_clock::now() - initiated > longDeadline / 2) survivorLate = true;
+      then();
+    };
+  };
 
   // Thread B. It touches the doomed Client only before it hands off, and A destroys it only after,
   // so the handoff is the one thing keeping B off freed memory and it hides no race in the Client.
@@ -276,11 +287,10 @@ void destroyWhileOthersRunAndInitiate(int round) {
       survivorOracles.emplace_back(io);
       survivor.asyncGet(
           slowTarget(answering), publicCommunity, {sysDescr},
-          survivorOracles.back().handler(
-              [&outstanding](net::ErrorCode, const Response&) { outstanding.release(); }));
+          survivorOracles.back().handler(onTime([&outstanding] { outstanding.release(); })));
     };
     // One of the survivor's requests is outstanding before the handoff, so destruction always has
-    // one to disturb however B is scheduled after it. Nothing is in flight yet, so this never
+    // one to disturb however B is scheduled after it. Nothing is outstanding yet, so this never
     // waits.
     outstanding.acquire();
     initiateOnSurvivor();
@@ -290,8 +300,7 @@ void destroyWhileOthersRunAndInitiate(int round) {
 
     afterDestruction.emplace(io);
     survivor.asyncGet(slowTarget(answering), publicCommunity, {sysDescr},
-                      afterDestruction->handler(
-                          [&answered](net::ErrorCode, const Response&) { answered.countDown(); }));
+                      afterDestruction->handler(onTime([&answered] { answered.countDown(); })));
     afterDestructionCompleted = answered.waitFor(longDeadline);
     // The loop's last requests may still be outstanding; the survivor is stopped only once they
     // are not, or one would complete with ClientStopped for a reason that is not this test's. The
@@ -330,6 +339,7 @@ void destroyWhileOthersRunAndInitiate(int round) {
     EXPECT_TRUE(survivorOracles[i].completedExactlyOnce({net::ErrorCode{}}))
         << "the survivor's request " << i;
   }
+  EXPECT_FALSE(survivorLate) << "a survivor's request completed only near its deadline";
   EXPECT_TRUE(afterDestructionCompleted) << "the survivor's request after destruction never ended";
   ASSERT_TRUE(afterDestruction.has_value());
   EXPECT_TRUE(afterDestruction->completedExactlyOnce({net::ErrorCode{}}))

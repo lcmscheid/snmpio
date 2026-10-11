@@ -54,7 +54,8 @@ class ScriptedV3Agent {
   using Responder = std::function<std::optional<Reply>(const Request&)>;
 
   ScriptedV3Agent(net::IoContext& io, Credentials creds, Answer answer)
-      : m_socket(io, net::UdpEndpoint(net::asio::ip::make_address("127.0.0.1"), 0)),
+      : m_socket(net::asio::make_strand(io),
+                 net::UdpEndpoint(net::asio::ip::make_address("127.0.0.1"), 0)),
         m_creds(std::move(creds)),
         m_answer(std::move(answer)) {
     setEngineId({std::byte{0x80}, std::byte{0x00}, std::byte{0x1f}, std::byte{0x88},
@@ -63,6 +64,9 @@ class ScriptedV3Agent {
   }
 
   [[nodiscard]] net::UdpEndpoint endpoint() const { return m_socket.local_endpoint(); }
+  // The strand the socket runs on, so that a test running the io_context on several threads can
+  // close() it there rather than race the receive.
+  [[nodiscard]] net::Executor executor() { return m_socket.get_executor(); }
   [[nodiscard]] int requestsSeen() const noexcept { return m_requestsSeen; }
   [[nodiscard]] const Octets& engineId() const noexcept { return m_engineId; }
 

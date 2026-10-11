@@ -177,9 +177,9 @@ constexpr int runnerThreads = 4;
 // Requests thread B initiates on the doomed Client as it hands off, one per runner, so that some
 // may still be queued on the strand, not yet started, when destruction begins.
 constexpr std::size_t lastMinuteRequests = runnerThreads;
-// The survivor's requests in flight at once: enough that B is always initiating, few enough that
+// The survivor's Outstanding Requests at once: enough that B is always initiating, few enough that
 // the loop cannot run away while a sanitizer slows the destruction down.
-constexpr std::ptrdiff_t survivorInFlight = 4;
+constexpr std::ptrdiff_t survivorOutstanding = 4;
 // Rounds, tuned to about a second under the default preset.
 constexpr int destructionRounds = 40;
 
@@ -251,7 +251,7 @@ void destroyWhileOthersRunAndInitiate(int round) {
   // returning cannot cut short a signal still being raised on a runner.
   Countdown handedOff(1);
   std::atomic<bool> destroyed = false;
-  std::counting_semaphore<survivorInFlight> inFlight(survivorInFlight);
+  std::counting_semaphore<survivorOutstanding> outstanding(survivorOutstanding);
   Countdown answered(1);
   std::vector<CompletionOracle> survivorOracles;
   std::optional<CompletionOracle> afterDestruction;
@@ -274,18 +274,19 @@ void destroyWhileOthersRunAndInitiate(int round) {
     }
     const auto initiateOnSurvivor = [&] {
       survivorOracles.emplace_back(io);
-      survivor.asyncGet(slowTarget(answering), publicCommunity, {sysDescr},
-                        survivorOracles.back().handler(
-                            [&inFlight](net::ErrorCode, const Response&) { inFlight.release(); }));
+      survivor.asyncGet(
+          slowTarget(answering), publicCommunity, {sysDescr},
+          survivorOracles.back().handler(
+              [&outstanding](net::ErrorCode, const Response&) { outstanding.release(); }));
     };
     // One of the survivor's requests is outstanding before the handoff, so destruction always has
     // one to disturb however B is scheduled after it. Nothing is in flight yet, so this never
     // waits.
-    inFlight.acquire();
+    outstanding.acquire();
     initiateOnSurvivor();
     handedOff.countDown();
 
-    while (!destroyed && inFlight.try_acquire_for(longDeadline)) initiateOnSurvivor();
+    while (!destroyed && outstanding.try_acquire_for(longDeadline)) initiateOnSurvivor();
 
     afterDestruction.emplace(io);
     survivor.asyncGet(slowTarget(answering), publicCommunity, {sysDescr},
@@ -295,8 +296,8 @@ void destroyWhileOthersRunAndInitiate(int round) {
     // The loop's last requests may still be outstanding; the survivor is stopped only once they
     // are not, or one would complete with ClientStopped for a reason that is not this test's. The
     // limit outlasts their deadlines, so one that never had a reply shows up as Timeout.
-    for (std::ptrdiff_t i = 0; i < survivorInFlight; ++i)
-      std::ignore = inFlight.try_acquire_for(2 * longDeadline);
+    for (std::ptrdiff_t i = 0; i < survivorOutstanding; ++i)
+      std::ignore = outstanding.try_acquire_for(2 * longDeadline);
   });
 
   // Thread A, this one.

@@ -42,6 +42,9 @@ through a shared implementation rather than held directly.
 
 ## Amendment, 2026-10-08: the batch guarantee is the strand's
 
+_Superseded by the amendment "Stopping waits for a Batch already being delivered", below, except
+for its paragraph on the Stopping flag._
+
 The Consequences above say a batch handler is never called after destruction begins. That holds as
 the strand sees it: for a destruction on the strand, or one that happens-before the strand reaches
 the batch. A destruction on another thread can race a batch the strand is already delivering, and
@@ -99,8 +102,9 @@ set and calls no handler, or Stopping finds the delivery and waits for it.
 
 The cost is the deadlock `std::stop_callback` documents too. A Batch handler must not block on
 anything the thread stopping the Client may hold -- a mutex it destroys the Client under, say, or
-the return of another Client's handler that is itself stopping this one -- or neither returns. A cross-thread lock cycle cannot be detected cheaply, so it is documented on
-`BatchHandler` rather than detected.
+the return of another Client's handler that is itself stopping this one -- or neither returns. A
+cross-thread lock cycle cannot be detected cheaply, so it is documented on `BatchHandler` rather
+than detected.
 
 Leaving the window documented was the alternative, and it is what the earlier amendment did. Its
 rule, not to capture state the destroying thread frees, is one a caller cannot keep without

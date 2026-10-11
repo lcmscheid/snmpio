@@ -684,7 +684,7 @@ net::Awaitable<net::ErrorCode> Client::Impl::transact(Ref self, Target target,
       // in flight is allowed to finish, so wait out the rest of the deadline on a slot nothing
       // can cancel -- a reply that arrives inside it still counts. No further retransmission,
       // and no new exchange after this one, which is also what the Walk above wants when it
-      // stops at a batch boundary (ADR-0004).
+      // stops at a Batch boundary (ADR-0004).
       co_await pending->timer.async_wait(net::asio::bind_cancellation_slot(
           net::asio::cancellation_slot(), redirect_error(use_awaitable, waitEc)));
       break;
@@ -1102,7 +1102,7 @@ net::Awaitable<Client::RequestResult> Client::Impl::doRequestV3(Ref self, Target
 net::Awaitable<Client::WalkResult> Client::Impl::doWalk(Ref self, Target target, Auth auth,
                                                         Oid base, WalkOptions options,
                                                         BatchHandler onBatch) {
-  // A total cancellation is a request to stop cleanly at a batch boundary rather than to drop
+  // A total cancellation is a request to stop cleanly at a Batch boundary rather than to drop
   // everything, so it has to be observable here -- and observed, not thrown.
   co_await observeBothCancellationTypes();
   // The two halves of ADR-0004's split, in one place so they cannot drift apart: terminal drops
@@ -1142,7 +1142,7 @@ net::Awaitable<Client::WalkResult> Client::Impl::doWalk(Ref self, Target target,
         co_return WalkResult{*stop};
       co_return WalkResult{ec};
     }
-    // A reply in hand as Stopping began is a batch the caller never sees: the batch handler is not
+    // A reply in hand as Stopping began is a Batch the caller never sees: the Batch handler is not
     // called once Stopping has begun, from whichever thread it began on (ADR-0009).
     if (m_stopping) co_return WalkResult{make_error_code(Errc::ClientStopped)};
     if (resp.varbinds.empty()) co_return WalkResult{make_error_code(Errc::MissingVarbind)};
@@ -1163,7 +1163,7 @@ net::Awaitable<Client::WalkResult> Client::Impl::doWalk(Ref self, Target target,
       batch.push_back(std::move(vb));
     }
 
-    if (const auto stop = deliverBatch(onBatch, batch)) co_return WalkResult{*stop};
+    if (const auto ended = deliverBatch(onBatch, batch)) co_return WalkResult{*ended};
     if (done) co_return WalkResult{net::ErrorCode{}};
   }
 }

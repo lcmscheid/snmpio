@@ -139,10 +139,10 @@ class Client {
         std::forward<Token>(token));
   }
 
-  // Walk a Subtree, delivering each batch to onBatch as it arrives (ADR-0004: streaming is the
+  // Walk a Subtree, delivering each Batch to onBatch as it arrives (ADR-0004: streaming is the
   // core, collecting is the wrapper -- a Walk has no bounded size). Completion: void(ErrorCode).
   //
-  // Cancellation is split: a `total` signal finishes the in-flight batch and completes with
+  // Cancellation is split: a `total` signal finishes the in-flight Batch and completes with
   // Errc::WalkIncomplete; a `terminal` one drops everything immediately.
   template <typename Token>
   auto asyncWalk(Target target, Community community, Oid base, WalkOptions options,

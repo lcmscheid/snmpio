@@ -1,18 +1,23 @@
 #include <gtest/gtest.h>
 
+#include <chrono>
 #include <optional>
+#include <utility>
 #include <vector>
 
 #include <snmpio/Client.hpp>
 
+#include "AfterHops.hpp"
 #include "ScriptedAgent.hpp"
 
 namespace snmpio {
 namespace {
 
+using test::afterHops;
 using test::respondWith;
 using test::respondWithError;
 using test::ScriptedAgent;
+using test::sweepHops;
 using test::tableAgent;
 using test::targetFor;
 
@@ -317,7 +322,8 @@ TEST(ClientWalk, ACancelledWalkAgainstASilentTargetIsIncompleteNotTimedOut) {
 }
 
 // The rest of Client.hpp's cancellation rule -- every wait, under both types -- and Stopping are
-// TestDisruptionMatrix.cpp's. This is the one case it does not cover: a reply that counts.
+// TestDisruptionMatrix.cpp's. These are the two cases it does not cover: a reply that counts, and
+// a terminal signal landing between two steps of an exchange rather than inside a wait.
 TEST(ClientCancel, ATotalSignalStillTakesTheReplyAlreadyOnItsWay) {
   Fixture f;
   // The half that separates total from terminal: the exchange in flight is allowed to finish.
@@ -334,6 +340,40 @@ TEST(ClientCancel, ATotalSignalStillTakesTheReplyAlreadyOnItsWay) {
 
   EXPECT_FALSE(f.ec) << f.ec.message();
   ASSERT_EQ(f.response.varbinds.size(), 1U);
+}
+
+// A terminal signal that reaches the Client's strand after the send has completed, but before the
+// request has gone on to wait for the reply, finds no operation of its own to cancel. The request
+// has to notice it was dropped anyway, rather than arm its timer and sit out the deadline.
+TEST(ClientCancel, ATerminalSignalAsTheSendCompletesStillDropsAtOnce) {
+  constexpr auto deadline = std::chrono::seconds(5);
+  for (int hops = 0; hops < sweepHops; ++hops) {
+    SCOPED_TRACE(testing::Message() << "emitted " << hops << " hops after initiating");
+    Fixture f;
+    ScriptedAgent agent(f.io, [](const V2cMessage&) { return std::optional<Pdu>{}; });
+    f.agent = &agent;
+    auto target = targetFor(agent, 0);
+    target.timeout = deadline;
+    net::asio::cancellation_signal signal;
+    std::chrono::steady_clock::time_point emittedAt;
+    std::chrono::steady_clock::time_point completedAt;
+
+    f.client.asyncGet(target, publicCommunity, {sysDescr},
+                      net::asio::bind_cancellation_slot(
+                          signal.slot(), [&completedAt, then = f.requestToken()](
+                                             net::ErrorCode ec, Response r) mutable {
+                            completedAt = std::chrono::steady_clock::now();
+                            then(ec, std::move(r));
+                          }));
+    afterHops(f.io, hops, [&] {
+      emittedAt = std::chrono::steady_clock::now();
+      signal.emit(net::asio::cancellation_type::terminal);
+    });
+    f.run();
+
+    EXPECT_EQ(f.ec, net::asio::error::operation_aborted) << f.ec.message();
+    EXPECT_LT(completedAt - emittedAt, deadline / 2) << "waited for the deadline";
+  }
 }
 
 }  // namespace

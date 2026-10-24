@@ -30,6 +30,7 @@ add_executable(snmpio_tests
   TestInteropWalk.cpp
   TestOid.cpp
   TestPdu.cpp
+  TestSoakPlan.cpp
   TestUsm.cpp
   TestV3Message.cpp
   TestValue.cpp)
@@ -50,3 +51,12 @@ endif()
 
 include(GoogleTest)
 gtest_discover_tests(snmpio_tests DISCOVERY_TIMEOUT 30)
+
+# The soak (#32) is a binary of its own so that it can carry the `stress` label: `ctest -L stress`
+# runs it alone, `ctest -LE stress` everything else. It runs for two seconds unless
+# SNMPIO_SOAK_SECONDS says otherwise, so it stays in the default run.
+add_executable(snmpio_stress TestSoak.cpp)
+target_link_libraries(snmpio_stress PRIVATE snmpio snmpio_warnings GTest::gtest GTest::gtest_main)
+target_include_directories(snmpio_stress PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_compile_definitions(snmpio_stress PRIVATE ${SNMPIO_STDLIB_HARDENING})
+gtest_discover_tests(snmpio_stress DISCOVERY_TIMEOUT 30 PROPERTIES LABELS stress)

@@ -18,6 +18,8 @@
 #include <snmpio/Value.hpp>
 #include <snmpio/detail/Net.hpp>
 
+#include "ReplyDelivery.hpp"
+
 namespace snmpio::test {
 
 // The v3 sibling of ScriptedAgent, and the same thing it is: an in-process command responder on
@@ -86,6 +88,11 @@ class ScriptedV3Agent {
   void setOnDatagram(std::function<void(std::span<const std::byte>)> onDatagram) {
     m_onDatagram = std::move(onDatagram);
   }
+  // How each reply goes out: late, twice, or behind a truncated copy of itself, chosen from the
+  // request's own PDU. One copy, at once, without it. A Report for a payload that would not open
+  // always goes out at once: there is no request PDU to choose from.
+  void setDelivery(DeliveryPlan plan) { m_delivery = std::move(plan); }
+  [[nodiscard]] const DeliveryCounts& deliveries() const noexcept { return m_sender.counts(); }
 
   // The compliant behaviour, for a Responder that wants to misbehave in one place only.
   std::optional<Reply> behaveLikeACompliantAgent(const Request& req) { return behave(req); }
@@ -110,6 +117,7 @@ class ScriptedV3Agent {
   }
 
   void close() {
+    m_sender.cancel();
     net::ErrorCode ignored;
     m_socket.close(ignored);
   }
@@ -166,7 +174,7 @@ class ScriptedV3Agent {
     // its ciphertext.
     if (isEncrypted(decoded->header.level) &&
         !decryptScopedPdu(*decoded, m_creds.privProtocol, m_privKey, ec)) {
-      send(report(decryptionErrors, SecurityLevel::AuthNoPriv), decoded->header.msgId, 0);
+      send(report(decryptionErrors, SecurityLevel::AuthNoPriv), decoded->header.msgId, 0, {});
       return;
     }
     req.message = std::move(*decoded);
@@ -174,10 +182,12 @@ class ScriptedV3Agent {
     auto reply = m_responder ? m_responder(req) : behave(req);
     if (!reply) return;  // silence, which is what a dead Agent looks like
 
-    send(std::move(*reply), req.message.header.msgId, req.message.scoped.pdu.requestId);
+    const auto delivery = m_delivery ? m_delivery(req.message.scoped.pdu) : ReplyDelivery{};
+    send(std::move(*reply), req.message.header.msgId, req.message.scoped.pdu.requestId, delivery);
   }
 
-  void send(Reply reply, std::int32_t msgId, std::int32_t requestId) {
+  void send(Reply reply, std::int32_t msgId, std::int32_t requestId,
+            const ReplyDelivery& delivery) {
     V3Header header;
     header.msgId = msgId;
     header.level = reply.level;
@@ -202,7 +212,7 @@ class ScriptedV3Agent {
     m_out = encodeV3Message(header, usm, scoped, m_creds.authProtocol, key, ec,
                             m_creds.privProtocol, privKey);
     if (ec) return;
-    m_socket.send_to(net::asio::buffer(m_out), m_from, 0, ec);
+    m_sender.send(m_out, m_from, delivery);
   }
 
   static constexpr std::int32_t timeWindow = 150;
@@ -212,6 +222,8 @@ class ScriptedV3Agent {
   Answer m_answer;
   Responder m_responder;
   std::function<void(std::span<const std::byte>)> m_onDatagram;
+  DeliveryPlan m_delivery;
+  ReplySender m_sender{m_socket};
   Octets m_engineId;
   Octets m_key;
   Octets m_privKey;

@@ -16,6 +16,8 @@
 #include <snmpio/Value.hpp>
 #include <snmpio/detail/Net.hpp>
 
+#include "ReplyDelivery.hpp"
+
 namespace snmpio::test {
 
 // An in-process command responder on loopback, whose every answer is supplied by the test.
@@ -45,8 +47,13 @@ class ScriptedAgent {
 
   // What the Agent quotes back as the community. Empty means "echo whatever arrived".
   void setCommunityOverride(std::string community) { m_communityOverride = std::move(community); }
+  // How each reply goes out: late, twice, or behind a truncated copy of itself. One copy, at once,
+  // without it.
+  void setDelivery(DeliveryPlan plan) { m_delivery = std::move(plan); }
+  [[nodiscard]] const DeliveryCounts& deliveries() const noexcept { return m_sender.counts(); }
 
   void close() {
+    m_sender.cancel();
     net::ErrorCode ignored;
     m_socket.close(ignored);
   }
@@ -66,7 +73,7 @@ class ScriptedAgent {
               net::ErrorCode encodeEc;
               m_out = encodeV2cMessage(community, *reply, encodeEc);
               if (!encodeEc) {
-                m_socket.send_to(net::asio::buffer(m_out), m_from, 0, encodeEc);
+                m_sender.send(m_out, m_from, m_delivery ? m_delivery(msg->pdu) : ReplyDelivery{});
               }
             }
           }
@@ -76,6 +83,8 @@ class ScriptedAgent {
 
   net::UdpSocket m_socket;
   Responder m_responder;
+  DeliveryPlan m_delivery;
+  ReplySender m_sender{m_socket};
   net::UdpEndpoint m_from;
   std::vector<std::byte> m_buf = std::vector<std::byte>(65535);
   std::vector<std::byte> m_out;

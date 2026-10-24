@@ -16,8 +16,9 @@ Blumenthal and the Reeder key extension. Stage 5's automated half is done too: e
 reaches `snmpd` and both Simulator images in CI, and what stage 5 still needs is a run of the
 hardware checklist.
 
-Stage 6 has begun. Its sanitizer builds and the stateful Client fuzzer are done, and the rest of it
-is measured against the [threat model](docs/threat-model.md).
+Stage 6 has begun. Its sanitizer builds, the stateful Client fuzzer and the
+[soak](#the-deployment-it-is-tested-in) are done, and the rest of it is measured against the
+[threat model](docs/threat-model.md).
 
 | Stage | Deliverable | State |
 |---|---|---|
@@ -27,7 +28,7 @@ is measured against the [threat model](docs/threat-model.md).
 | 3 | Async Engine Discovery, time sync, Report handling | **done** |
 | 4 | Privacy: AES-128, then AES-192/256 under both key extensions, DES behind the legacy provider | **done** |
 | 5 | Interop matrix vs the Simulator, `snmpd`, and real vendor gear | automated half **done**; the [hardware checklist](#pre-release-hardware-checklist) remains |
-| 6 | Safe to depend on: the [threat model](docs/threat-model.md), sanitizer and stress harness, destroying a Client stops it, hardening against a hostile network | sanitizer builds, Client fuzzer and safe destruction **done**; the rest in progress |
+| 6 | Safe to depend on: the [threat model](docs/threat-model.md), sanitizer and stress harness, destroying a Client stops it, hardening against a hostile network | sanitizer builds, Client fuzzer, safe destruction and the soak **done**; the rest in progress |
 | 7 | Docs, packaging and release | |
 
 ## Using it
@@ -135,6 +136,74 @@ may only read — prints the Agent's refusal, `noAccess (error-status 6), error-
 other protocols, such as `privsha1aes`, gets no refusal at all: its digest does not match, which is
 a different failure. And `walk` with a trailing row limit, `... 1.3.6.1.2.1.1 5`, stops after five
 rows with `WalkIncomplete`.
+
+### The deployment it is tested in
+
+snmpio is built for a control and management system that polls many Agents and must never block its
+own threads. The recommended shape is **one Client per Agent**, all on **one shared `io_context`
+run by a small thread pool**, with a Client destroyed when its Agent leaves the inventory. That is
+the shape the soak exercises (below), and the one this library's concurrency claims are checked
+against.
+
+```cpp
+namespace net = snmpio::net;
+net::IoContext io;                                   // the I/O threads' io_context
+auto work = net::asio::make_work_guard(io);
+std::vector<std::thread> pool;
+for (int i = 0; i < 4; ++i) pool.emplace_back([&io] { io.run(); });
+
+// One Client per Agent, added and removed as the inventory changes. The map is the caller's to
+// guard; the Clients need no guarding.
+std::map<std::string, std::unique_ptr<snmpio::Client>> clients;
+clients.emplace("core-sw-1", std::make_unique<snmpio::Client>(io.get_executor()));
+
+// Initiate from any thread, and complete on an executor of your own -- which may belong to an
+// application io_context the I/O threads never run.
+clients.at("core-sw-1")->asyncGet(
+    target, community, oids,
+    net::asio::bind_executor(appStrand, [](const net::ErrorCode& ec, const snmpio::Response& r) {
+      // Runs on appStrand. Must not reach into a Client that may since have been destroyed.
+    }));
+
+// The Agent is removed: destroying its Client stops it, and its Outstanding Requests complete
+// with Errc::ClientStopped, on their own executors.
+clients.erase("core-sw-1");
+```
+
+Why this shape and not the other two:
+
+- **One `io_context` per Agent is not recommended.** Each needs a thread to run it, so a thousand
+  Agents cost a thousand threads, nearly all of them asleep waiting on a Target that answers a few
+  times a minute.
+- **One Client for everything is allowed, but it serialises.** A Client owns one socket per address
+  family and does all its work on one strand (ADR-0003), so every Agent's replies are decoded,
+  authenticated and decrypted one after another, however many threads run the `io_context`. A
+  Client per Agent spreads that work across the pool, and confines a misbehaving Agent's traffic to
+  its own strand.
+- **Completion handlers run on the caller's executor** — the one bound to the token, or the
+  Client's strand when none is. They can run after the Client is gone, so a handler must not reach
+  back into a destroyed Client, or into an owner that went with it.
+- **Cancellation can come from any thread**, as long as the operation's initiation has returned and
+  one thread at a time emits on each `cancellation_signal`: Asio's signals are not thread-safe,
+  and the Client's own side dispatches each emission to its strand.
+
+The soak, `Soak.ShapedLikeTheDeployment` in [`tests/TestSoak.cpp`](tests/TestSoak.cpp), runs this
+shape with eight Clients on an `io_context` run by four threads, half of them v2c and half v3, and
+callers on a second `io_context`. Four more threads initiate, cancel, stop and destroy Clients at
+moments its seed decides, against Agents that answer at once, late, never, twice, or after a
+garbled copy of the answer. Every completion is checked to happen exactly once, on the caller's
+executor, with a code that what was done to the request allows. It runs for two seconds in every
+test run, under ASan and TSan in CI, and carries the `stress` label:
+
+```sh
+ctest --preset default -L stress                         # the soak alone
+SNMPIO_SOAK_SECONDS=600 ctest --preset tsan -L stress    # for ten minutes, under TSan
+SNMPIO_SOAK_SEED=1234 ctest --preset default -L stress   # replay the seed a failure printed
+```
+
+A replayed seed repeats the same requests, cancellations, stops and destructions, at the same
+moments and from the same threads. The interleavings around them are the scheduler's, so a seed
+that failed once usually fails again rather than always.
 
 ## Errors
 

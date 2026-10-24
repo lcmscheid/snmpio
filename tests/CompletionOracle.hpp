@@ -5,6 +5,7 @@
 
 #include <initializer_list>
 #include <memory>
+#include <span>
 #include <utility>
 #include <vector>
 
@@ -53,6 +54,12 @@ class CompletionOracle {
 
   [[nodiscard]] testing::AssertionResult completedExactlyOnce(
       std::initializer_list<net::ErrorCode> allowed) const {
+    return completedExactlyOnce(std::span<const net::ErrorCode>(allowed.begin(), allowed.size()));
+  }
+
+  // The same, for a test that works out what is allowed as it goes, as the soak does.
+  [[nodiscard]] testing::AssertionResult completedExactlyOnce(
+      std::span<const net::ErrorCode> allowed) const {
     const auto& calls = m_record->invocations;
     if (calls.size() != 1) {
       return testing::AssertionFailure()

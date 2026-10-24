@@ -686,12 +686,16 @@ net::Awaitable<net::ErrorCode> Client::Impl::transact(Ref self, Target target,
 
     if (softCancelled()) {
       // A total signal stops this request cleanly rather than dropping it: the exchange already
-      // in flight is allowed to finish, so wait out the rest of the deadline on a slot nothing
-      // can cancel -- a reply that arrives inside it still counts. No further retransmission,
-      // and no new exchange after this one, which is also what the Walk above wants when it
-      // stops at a Batch boundary (ADR-0004).
+      // in flight is allowed to finish, so wait out the rest of the deadline on a slot that only
+      // a terminal signal reaches -- a reply that arrives inside it still counts, but terminal
+      // still drops the request at once (#74). No further retransmission, and no new exchange
+      // after this one, which is also what the Walk above wants when it stops at a Batch
+      // boundary (ADR-0004). The filtered state is Asio's own idiom for chaining a narrower slot
+      // onto a parent one, as its composed operations do.
+      const net::asio::cancellation_state terminalOnly(cancelState.slot(),
+                                                       net::asio::enable_terminal_cancellation());
       co_await pending->timer.async_wait(net::asio::bind_cancellation_slot(
-          net::asio::cancellation_slot(), redirect_error(use_awaitable, waitEc)));
+          terminalOnly.slot(), redirect_error(use_awaitable, waitEc)));
       break;
     }
   }

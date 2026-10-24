@@ -322,8 +322,9 @@ TEST(ClientWalk, ACancelledWalkAgainstASilentTargetIsIncompleteNotTimedOut) {
 }
 
 // The rest of Client.hpp's cancellation rule -- every wait, under both types -- and Stopping are
-// TestDisruptionMatrix.cpp's. These are the two cases it does not cover: a reply that counts, and
-// a terminal signal landing between two steps of an exchange rather than inside a wait.
+// TestDisruptionMatrix.cpp's. These are the cases it does not cover: a reply that counts, a
+// terminal signal landing between two steps of an exchange rather than inside a wait, and one
+// landing after a total signal.
 TEST(ClientCancel, ATotalSignalStillTakesTheReplyAlreadyOnItsWay) {
   Fixture f;
   // The half that separates total from terminal: the exchange in flight is allowed to finish.
@@ -374,6 +375,43 @@ TEST(ClientCancel, ATerminalSignalAsTheSendCompletesStillDropsAtOnce) {
     EXPECT_EQ(f.ec, net::asio::error::operation_aborted) << f.ec.message();
     EXPECT_LT(completedAt - emittedAt, deadline / 2) << "waited for the deadline";
   }
+}
+
+// A total signal leaves the request waiting out the rest of its deadline, so a reply on its way
+// still counts. That wait must not be deaf to a terminal signal that follows: terminal drops the
+// request at once, wherever the request is.
+TEST(ClientCancel, ATerminalSignalAfterATotalOneStillDropsAtOnce) {
+  constexpr auto deadline = std::chrono::seconds(5);
+  Fixture f;
+  net::asio::cancellation_signal signal;
+  net::SteadyTimer terminalTimer(f.io);
+  std::chrono::steady_clock::time_point emittedAt;
+  std::chrono::steady_clock::time_point completedAt;
+  ScriptedAgent agent(f.io, [&](const V2cMessage&) {
+    signal.emit(net::asio::cancellation_type::total);
+    // Far enough in that the request is sitting in the wait the total signal left it in.
+    terminalTimer.expires_after(std::chrono::milliseconds(100));
+    terminalTimer.async_wait([&](net::ErrorCode) {
+      emittedAt = std::chrono::steady_clock::now();
+      signal.emit(net::asio::cancellation_type::terminal);
+    });
+    return std::optional<Pdu>{};
+  });
+  f.agent = &agent;
+  auto target = targetFor(agent, 0);
+  target.timeout = deadline;
+
+  f.client.asyncGet(
+      target, publicCommunity, {sysDescr},
+      net::asio::bind_cancellation_slot(signal.slot(), [&completedAt, then = f.requestToken()](
+                                                           net::ErrorCode ec, Response r) mutable {
+        completedAt = std::chrono::steady_clock::now();
+        then(ec, std::move(r));
+      }));
+  f.run();
+
+  EXPECT_EQ(f.ec, net::asio::error::operation_aborted) << f.ec.message();
+  EXPECT_LT(completedAt - emittedAt, deadline / 2) << "waited for the deadline";
 }
 
 }  // namespace

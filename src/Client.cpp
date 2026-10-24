@@ -978,18 +978,21 @@ std::optional<net::ErrorCode> Client::Impl::handleReport(const net::UdpEndpoint&
       *counter == usmStatsNotInTimeWindows || *counter == usmStatsUnknownEngineIds;
   if (!retryable) return reportError(counter);
 
-  // What every path below returns in place of "ask again". A total signal let this Report count,
-  // but the Report says nothing about the request, so no reply counted; and total forbids a further
-  // exchange. The waits a second attempt would enter cannot hear the signal either, because it was
-  // emitted before they were armed (#73). Terminal never gets this far: transact has already
-  // dropped the exchange.
+  // What every path below returns: nothing, to ask again, or operation_aborted for a cancelled
+  // request. A total signal let this Report count as the reply on its way, but a retryable Report
+  // is not an answer, only a call for another exchange, and total forbids one. The waits a second
+  // attempt would enter cannot hear the signal either, because it was emitted before they were
+  // armed (#73). The Reports above are answers -- they name a failure -- so they keep their own
+  // error, cancelled or not. Terminal never gets this far: transact has already dropped the
+  // exchange.
   //
   // The cache is still acted on first. What the Report says about the Engine is as true for the
   // next request as it would have been for the retry, and ADR-0010's forgetting must not hinge on
   // whether the request that heard it is still wanted.
-  const auto askAgain = cancelled == net::asio::cancellation_type::none
-                            ? std::optional<net::ErrorCode>{}
-                            : std::optional(net::ErrorCode(net::asio::error::operation_aborted));
+  const auto retryOrAbort =
+      cancelled == net::asio::cancellation_type::none
+          ? std::optional<net::ErrorCode>{}
+          : std::optional(net::ErrorCode(net::asio::error::operation_aborted));
 
   // An unauthenticated Report is a claim, not a fact. It is enough to make us go and ask the
   // Engine again -- a round trip an attacker could cost us anyway by dropping a datagram -- and
@@ -997,7 +1000,7 @@ std::optional<net::ErrorCode> Client::Impl::handleReport(const net::UdpEndpoint&
   // and this is not.
   if (!pending.replyAuthenticated || *counter == usmStatsUnknownEngineIds) {
     m_engineAt.erase(from);
-    return askAgain;
+    return retryOrAbort;
   }
   // A signed Report naming a boots *lower* than the one we hold is the one pair observeEngineTime
   // refuses, and refusing it here would be refusing it for good: the retry would carry the same
@@ -1021,10 +1024,10 @@ std::optional<net::ErrorCode> Client::Impl::handleReport(const net::UdpEndpoint&
   EngineState* engine = engineAt(from);
   if (engine != nullptr && engine->timeSynced && pending.security.boots < engine->boots) {
     engine->timeSynced = false;
-    return askAgain;
+    return retryOrAbort;
   }
   observeEngineTime(from, pending.security);
-  return askAgain;
+  return retryOrAbort;
 }
 
 net::Awaitable<Client::RequestResult> Client::Impl::doRequestV3(Ref self, Target target,

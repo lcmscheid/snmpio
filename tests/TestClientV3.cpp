@@ -1,9 +1,12 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <chrono>
+#include <cstdint>
 #include <functional>
 #include <optional>
 #include <span>
+#include <string>
 #include <vector>
 
 #include <snmpio/Client.hpp>
@@ -945,6 +948,67 @@ TEST_P(QueuedBehindDiscovery, IsAbortedAndLeavesTheDiscoveryRunning) {
 INSTANTIATE_TEST_SUITE_P(ClientV3, QueuedBehindDiscovery,
                          testing::Values(net::asio::cancellation_type::terminal,
                                          net::asio::cancellation_type::total));
+
+// A total signal lets the reply already on its way count, and here that reply is a Report asking
+// for a second attempt. The Report says nothing about the request, so no reply counted: the request
+// ends with operation_aborted and makes no second attempt (#73). That covers both the fresh
+// exchange a signed notInTimeWindows retry sends and the rediscovery an unknownEngineIds one queues
+// behind. The Agent goes silent after the Report, so either would sit out a whole deadline.
+struct RetryableReport {
+  std::uint32_t counter;
+  SecurityLevel level;  // signed, so the Client adopts its clock; or not, so it forgets the Engine
+  const char* name;
+};
+
+class TotalCancelThenRetryableReport : public testing::TestWithParam<RetryableReport> {};
+
+TEST_P(TotalCancelThenRetryableReport, EndsWithoutASecondAttempt) {
+  constexpr auto deadline = std::chrono::seconds(4);
+  Fixture f;
+  ScriptedV3Agent agent(f.io, credentials(), echoAnswer);
+  f.agent = &agent;
+  auto target = targetFor(agent, 0);
+  target.timeout = deadline;
+
+  net::asio::cancellation_signal signal;
+  std::chrono::steady_clock::time_point emittedAt;
+  std::chrono::steady_clock::time_point completedAt;
+  bool reported = false;
+  agent.setResponder(
+      [&](const ScriptedV3Agent::Request& req) -> std::optional<ScriptedV3Agent::Reply> {
+        if (reported) return std::nullopt;
+        if (req.message.scoped.pdu.varbinds.empty()) return agent.behaveLikeACompliantAgent(req);
+        reported = true;
+        emittedAt = std::chrono::steady_clock::now();
+        signal.emit(net::asio::cancellation_type::total);
+        return ScriptedV3Agent::report(GetParam().counter, GetParam().level);
+      });
+
+  f.client.asyncGet(
+      target, credentials(), {sysDescr},
+      net::asio::bind_cancellation_slot(signal.slot(), [&completedAt, then = f.requestToken()](
+                                                           net::ErrorCode ec, Response r) mutable {
+        completedAt = std::chrono::steady_clock::now();
+        then(ec, std::move(r));
+      }));
+  f.run();
+
+  EXPECT_EQ(f.ec, net::asio::error::operation_aborted) << f.ec.message();
+  // The discovery's two datagrams and the request's one. A fourth is the second attempt: a fresh
+  // exchange, or the first datagram of a rediscovery.
+  EXPECT_EQ(agent.requestsSeen(), 3);
+  EXPECT_LT(completedAt - emittedAt, deadline / 2) << "waited out the second attempt";
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    ClientV3, TotalCancelThenRetryableReport,
+    testing::Values(RetryableReport{ScriptedV3Agent::notInTimeWindows, SecurityLevel::AuthNoPriv,
+                                    "NotInTimeWindows"},
+                    RetryableReport{ScriptedV3Agent::unknownEngineIds, SecurityLevel::NoAuthNoPriv,
+                                    "UnknownEngineIds"}),
+    [](const testing::TestParamInfo<RetryableReport>& param) {
+      return std::string(param.param.name);
+    });
 
 TEST(ClientV3Walk, CollectsTheWholeSubtreeAcrossSeveralRounds) {
   Fixture f;

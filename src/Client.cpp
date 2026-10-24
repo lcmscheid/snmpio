@@ -299,9 +299,10 @@ class Client::Impl {
                                     net::ErrorCode& ec);
 
   // What a Report means for the request that provoked it: an ErrorCode to fail with, or nothing
-  // when it named something we can act on and ask again about.
+  // when it named something we can act on and ask again about. `cancelled` is the request's
+  // cancellation state as the Report arrived, since a cancelled request never asks again.
   std::optional<net::ErrorCode> handleReport(const net::UdpEndpoint& from, const Pending& pending,
-                                             bool mayRetry);
+                                             bool mayRetry, net::asio::cancellation_type cancelled);
 
   // Observe both cancellation types rather than throwing on either, once per operation.
   static net::Awaitable<void> observeBothCancellationTypes();
@@ -968,7 +969,8 @@ net::Awaitable<net::ErrorCode> Client::Impl::discoverEngine(Ref self, Target tar
 }
 
 std::optional<net::ErrorCode> Client::Impl::handleReport(const net::UdpEndpoint& from,
-                                                         const Pending& pending, bool mayRetry) {
+                                                         const Pending& pending, bool mayRetry,
+                                                         net::asio::cancellation_type cancelled) {
   const auto counter = usmStatsCounter(pending.response);
   if (!mayRetry || !counter) return reportError(counter);
 
@@ -976,13 +978,26 @@ std::optional<net::ErrorCode> Client::Impl::handleReport(const net::UdpEndpoint&
       *counter == usmStatsNotInTimeWindows || *counter == usmStatsUnknownEngineIds;
   if (!retryable) return reportError(counter);
 
+  // What every path below returns in place of "ask again". A total signal let this Report count,
+  // but the Report says nothing about the request, so no reply counted; and total forbids a further
+  // exchange. The waits a second attempt would enter cannot hear the signal either, because it was
+  // emitted before they were armed (#73). Terminal never gets this far: transact has already
+  // dropped the exchange.
+  //
+  // The cache is still acted on first. What the Report says about the Engine is as true for the
+  // next request as it would have been for the retry, and ADR-0010's forgetting must not hinge on
+  // whether the request that heard it is still wanted.
+  const auto askAgain = cancelled == net::asio::cancellation_type::none
+                            ? std::optional<net::ErrorCode>{}
+                            : std::optional(net::ErrorCode(net::asio::error::operation_aborted));
+
   // An unauthenticated Report is a claim, not a fact. It is enough to make us go and ask the
   // Engine again -- a round trip an attacker could cost us anyway by dropping a datagram -- and
   // never enough to write into the cache, because the answer to the re-discovery is authenticated
   // and this is not.
   if (!pending.replyAuthenticated || *counter == usmStatsUnknownEngineIds) {
     m_engineAt.erase(from);
-    return std::nullopt;
+    return askAgain;
   }
   // A signed Report naming a boots *lower* than the one we hold is the one pair observeEngineTime
   // refuses, and refusing it here would be refusing it for good: the retry would carry the same
@@ -1006,10 +1021,10 @@ std::optional<net::ErrorCode> Client::Impl::handleReport(const net::UdpEndpoint&
   EngineState* engine = engineAt(from);
   if (engine != nullptr && engine->timeSynced && pending.security.boots < engine->boots) {
     engine->timeSynced = false;
-    return std::nullopt;
+    return askAgain;
   }
   observeEngineTime(from, pending.security);
-  return std::nullopt;
+  return askAgain;
 }
 
 net::Awaitable<Client::RequestResult> Client::Impl::doRequestV3(Ref self, Target target,
@@ -1090,7 +1105,9 @@ net::Awaitable<Client::RequestResult> Client::Impl::doRequestV3(Ref self, Target
     if (ec) co_return RequestResult{ec, Response{}};
 
     if (pending->response.type == PduType::Report) {
-      const auto failure = handleReport(target.endpoint, *pending, attempt == 0);
+      const auto cancelState = co_await net::asio::this_coro::cancellation_state;
+      const auto failure =
+          handleReport(target.endpoint, *pending, attempt == 0, cancelState.cancelled());
       if (!failure) continue;
       co_return RequestResult{*failure, Response{}};
     }

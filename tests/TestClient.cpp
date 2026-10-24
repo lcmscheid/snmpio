@@ -8,12 +8,16 @@
 #include <snmpio/Client.hpp>
 
 #include "AfterHops.hpp"
+#include "Deadlines.hpp"
 #include "ScriptedAgent.hpp"
 
 namespace snmpio {
 namespace {
 
 using test::afterHops;
+using test::atOnceLimit;
+using test::longDeadline;
+using test::longDeadlineTarget;
 using test::respondWith;
 using test::respondWithError;
 using test::ScriptedAgent;
@@ -38,6 +42,7 @@ struct Fixture {
   Response response;
   std::vector<Varbind> collected;
   bool completed = false;
+  std::chrono::steady_clock::time_point completedAt;
 
   auto requestToken() {
     return [this](net::ErrorCode e, Response r) {
@@ -64,6 +69,7 @@ struct Fixture {
 
   void finish() {
     completed = true;
+    completedAt = std::chrono::steady_clock::now();
     client.stop();
     if (agent != nullptr) agent->close();
   }
@@ -321,10 +327,29 @@ TEST(ClientWalk, ACancelledWalkAgainstASilentTargetIsIncompleteNotTimedOut) {
   EXPECT_EQ(f.collected.size(), 2U) << "the batch that did arrive is kept";
 }
 
+// A cancellation signal that remembers when it emitted terminal, so that a test can time a
+// request's end against the signal that should have dropped it at once, whatever else it emits.
+struct TimedSignal {
+  net::asio::cancellation_signal signal;
+  std::chrono::steady_clock::time_point terminalAt;
+
+  void emit(net::asio::cancellation_type type) {
+    if (type == net::asio::cancellation_type::terminal) {
+      terminalAt = std::chrono::steady_clock::now();
+    }
+    signal.emit(type);
+  }
+
+  template <typename Token>
+  auto bind(Token token) {
+    return net::asio::bind_cancellation_slot(signal.slot(), std::move(token));
+  }
+};
+
 // The rest of Client.hpp's cancellation rule -- every wait, under both types -- and Stopping are
 // TestDisruptionMatrix.cpp's. These are the cases it does not cover: a reply that counts, a
-// terminal signal landing between two steps of an exchange rather than inside a wait, and one
-// landing after a total signal.
+// terminal signal landing between two steps of an exchange rather than inside a wait, and the two
+// types arriving one after the other.
 TEST(ClientCancel, ATotalSignalStillTakesTheReplyAlreadyOnItsWay) {
   Fixture f;
   // The half that separates total from terminal: the exchange in flight is allowed to finish.
@@ -347,71 +372,135 @@ TEST(ClientCancel, ATotalSignalStillTakesTheReplyAlreadyOnItsWay) {
 // request has gone on to wait for the reply, finds no operation of its own to cancel. The request
 // has to notice it was dropped anyway, rather than arm its timer and sit out the deadline.
 TEST(ClientCancel, ATerminalSignalAsTheSendCompletesStillDropsAtOnce) {
-  constexpr auto deadline = std::chrono::seconds(5);
   for (int hops = 0; hops < sweepHops; ++hops) {
     SCOPED_TRACE(testing::Message() << "emitted " << hops << " hops after initiating");
     Fixture f;
     ScriptedAgent agent(f.io, [](const V2cMessage&) { return std::optional<Pdu>{}; });
     f.agent = &agent;
-    auto target = targetFor(agent, 0);
-    target.timeout = deadline;
-    net::asio::cancellation_signal signal;
-    std::chrono::steady_clock::time_point emittedAt;
-    std::chrono::steady_clock::time_point completedAt;
+    TimedSignal signal;
 
-    f.client.asyncGet(target, publicCommunity, {sysDescr},
-                      net::asio::bind_cancellation_slot(
-                          signal.slot(), [&completedAt, then = f.requestToken()](
-                                             net::ErrorCode ec, Response r) mutable {
-                            completedAt = std::chrono::steady_clock::now();
-                            then(ec, std::move(r));
-                          }));
-    afterHops(f.io, hops, [&] {
-      emittedAt = std::chrono::steady_clock::now();
-      signal.emit(net::asio::cancellation_type::terminal);
-    });
+    f.client.asyncGet(longDeadlineTarget(agent), publicCommunity, {sysDescr},
+                      signal.bind(f.requestToken()));
+    afterHops(f.io, hops, [&] { signal.emit(net::asio::cancellation_type::terminal); });
     f.run();
 
     EXPECT_EQ(f.ec, net::asio::error::operation_aborted) << f.ec.message();
-    EXPECT_LT(completedAt - emittedAt, deadline / 2) << "waited for the deadline";
+    EXPECT_LT(f.completedAt - signal.terminalAt, atOnceLimit(longDeadline))
+        << "waited for the deadline";
   }
 }
 
 // A total signal leaves the request waiting out the rest of its deadline, so a reply on its way
 // still counts. That wait must not be deaf to a terminal signal that follows: terminal drops the
-// request at once, wherever the request is.
+// request at once, wherever the request is. The sweep starts as the Agent hears the request, while
+// the request is waiting for the reply, and carries the terminal signal past the moment the total
+// one wakes it and into the wait it then goes back to.
 TEST(ClientCancel, ATerminalSignalAfterATotalOneStillDropsAtOnce) {
-  constexpr auto deadline = std::chrono::seconds(5);
-  Fixture f;
-  net::asio::cancellation_signal signal;
-  net::SteadyTimer terminalTimer(f.io);
-  std::chrono::steady_clock::time_point emittedAt;
-  std::chrono::steady_clock::time_point completedAt;
-  ScriptedAgent agent(f.io, [&](const V2cMessage&) {
-    signal.emit(net::asio::cancellation_type::total);
-    // Far enough in that the request is sitting in the wait the total signal left it in.
-    terminalTimer.expires_after(std::chrono::milliseconds(100));
-    terminalTimer.async_wait([&](net::ErrorCode) {
-      emittedAt = std::chrono::steady_clock::now();
-      signal.emit(net::asio::cancellation_type::terminal);
+  for (int hops = 0; hops < sweepHops; ++hops) {
+    SCOPED_TRACE(testing::Message() << "terminal " << hops << " hops after total");
+    Fixture f;
+    TimedSignal signal;
+    ScriptedAgent agent(f.io, [&](const V2cMessage&) {
+      signal.emit(net::asio::cancellation_type::total);
+      afterHops(f.io, hops, [&] { signal.emit(net::asio::cancellation_type::terminal); });
+      return std::optional<Pdu>{};
     });
+    f.agent = &agent;
+
+    f.client.asyncGet(longDeadlineTarget(agent), publicCommunity, {sysDescr},
+                      signal.bind(f.requestToken()));
+    f.run();
+
+    EXPECT_EQ(f.ec, net::asio::error::operation_aborted) << f.ec.message();
+    EXPECT_LT(f.completedAt - signal.terminalAt, atOnceLimit(longDeadline))
+        << "waited for the deadline";
+  }
+}
+
+// The same wait, with the reply on its way as well. Whichever reaches the request first decides
+// it: a request still outstanding when terminal is emitted completes with operation_aborted, even
+// with the reply already in hand, and only one that completed before it delivers the reply.
+TEST(ClientCancel, ATerminalSignalAfterATotalOneDropsTheReplyInHand) {
+  int dropped = 0;
+  int delivered = 0;
+  for (int hops = 0; hops < sweepHops; ++hops) {
+    SCOPED_TRACE(testing::Message() << "terminal " << hops << " hops after total");
+    Fixture f;
+    TimedSignal signal;
+    bool completedBeforeTerminal = false;
+    ScriptedAgent agent(f.io, [&](const V2cMessage&) {
+      signal.emit(net::asio::cancellation_type::total);
+      afterHops(f.io, hops, [&] {
+        completedBeforeTerminal = f.completed;
+        signal.emit(net::asio::cancellation_type::terminal);
+      });
+      return respondWith({Varbind{sysDescr, TimeTicks{7}}});
+    });
+    f.agent = &agent;
+
+    f.client.asyncGet(longDeadlineTarget(agent), publicCommunity, {sysDescr},
+                      signal.bind(f.requestToken()));
+    f.run();
+
+    if (completedBeforeTerminal) {
+      ++delivered;
+      EXPECT_FALSE(f.ec) << f.ec.message();
+      EXPECT_EQ(f.response.varbinds.size(), 1U);
+    } else {
+      ++dropped;
+      EXPECT_EQ(f.ec, net::asio::error::operation_aborted) << f.ec.message();
+      EXPECT_TRUE(f.response.varbinds.empty()) << "the reply in hand counted";
+    }
+  }
+  // Both sides of the race, or the sweep is not crossing it.
+  EXPECT_GT(dropped, 0);
+  EXPECT_GT(delivered, 0);
+}
+
+// The other order. A terminal signal has already dropped the request; a total one that follows,
+// before the request has acted on the first, must not soften it back into waiting out the deadline.
+TEST(ClientCancel, ATotalSignalAfterATerminalOneStillDropsAtOnce) {
+  Fixture f;
+  TimedSignal signal;
+  ScriptedAgent agent(f.io, [&](const V2cMessage&) {
+    signal.emit(net::asio::cancellation_type::terminal);
+    signal.emit(net::asio::cancellation_type::total);
     return std::optional<Pdu>{};
   });
   f.agent = &agent;
-  auto target = targetFor(agent, 0);
-  target.timeout = deadline;
 
-  f.client.asyncGet(
-      target, publicCommunity, {sysDescr},
-      net::asio::bind_cancellation_slot(signal.slot(), [&completedAt, then = f.requestToken()](
-                                                           net::ErrorCode ec, Response r) mutable {
-        completedAt = std::chrono::steady_clock::now();
-        then(ec, std::move(r));
-      }));
+  f.client.asyncGet(longDeadlineTarget(agent), publicCommunity, {sysDescr},
+                    signal.bind(f.requestToken()));
   f.run();
 
   EXPECT_EQ(f.ec, net::asio::error::operation_aborted) << f.ec.message();
-  EXPECT_LT(completedAt - emittedAt, deadline / 2) << "waited for the deadline";
+  EXPECT_LT(f.completedAt - signal.terminalAt, atOnceLimit(longDeadline))
+      << "waited for the deadline";
+}
+
+// A Walk reads the same state to choose its code, so the same order must not turn a dropped Walk
+// into an incomplete one.
+TEST(ClientCancel, ATotalSignalAfterATerminalOneStillAbortsAWalk) {
+  Fixture f;
+  TimedSignal signal;
+  auto table = tableAgent(smallTable());
+  int seen = 0;
+  ScriptedAgent agent(f.io, [&](const V2cMessage& msg) -> std::optional<Pdu> {
+    if (++seen > 1) {
+      signal.emit(net::asio::cancellation_type::terminal);
+      signal.emit(net::asio::cancellation_type::total);
+      return std::nullopt;
+    }
+    return table(msg);
+  });
+  f.agent = &agent;
+
+  f.client.asyncWalkCollect(longDeadlineTarget(agent), publicCommunity, systemGroup, WalkOptions{2},
+                            signal.bind(f.collectToken()));
+  f.run();
+
+  EXPECT_EQ(f.ec, net::asio::error::operation_aborted) << f.ec.message();
+  EXPECT_TRUE(f.collected.empty()) << "a dropped Walk keeps nothing";
 }
 
 }  // namespace

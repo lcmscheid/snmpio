@@ -21,6 +21,7 @@
 
 #include "AfterHops.hpp"
 #include "CompletionOracle.hpp"
+#include "Deadlines.hpp"
 #include "ScriptedAgent.hpp"
 #include "ScriptedV3Agent.hpp"
 
@@ -34,7 +35,10 @@ namespace snmpio {
 namespace {
 
 using test::afterHops;
+using test::atOnceLimit;
 using test::CompletionOracle;
+using test::longDeadline;
+using test::longDeadlineTarget;
 using test::respondWith;
 using test::ScriptedAgent;
 using test::ScriptedV3Agent;
@@ -47,20 +51,10 @@ const Oid sysDescr{1, 3, 6, 1, 2, 1, 1, 1, 0};
 const Oid sysUpTime{1, 3, 6, 1, 2, 1, 1, 3, 0};
 const Oid systemGroup{1, 3, 6, 1, 2, 1, 1};
 
-// Long enough that a request ended by its deadline rather than by the Client going away shows up
-// as Timeout instead of passing, short enough not to hang the suite if it does.
-constexpr auto longDeadline = std::chrono::seconds(5);
-
 // Answers sysDescr and nothing else, so one request completes and any other stays outstanding.
 std::optional<Pdu> answerOnlySysDescr(const V2cMessage& msg) {
   if (msg.pdu.varbinds.empty() || msg.pdu.varbinds.front().name != sysDescr) return std::nullopt;
   return respondWith({Varbind{sysDescr, Octets{std::byte{'o'}, std::byte{'k'}}}});
-}
-
-Target slowTarget(const ScriptedAgent& agent) {
-  auto t = targetFor(agent, 0);
-  t.timeout = longDeadline;
-  return t;
 }
 
 // Nothing listens here and nothing is sent: every request in these tests is over before it would
@@ -85,10 +79,10 @@ TEST(ClientLifetime, DestroyedFromItsOwnCompletionHandlerStopsTheRest) {
   auto client = std::make_unique<Client>(io.get_executor());
 
   client->asyncGet(
-      slowTarget(agent), publicCommunity, {sysUpTime},
+      longDeadlineTarget(agent), publicCommunity, {sysUpTime},
       outstanding.handler([&agent](net::ErrorCode, const Response&) { agent.close(); }));
   client->asyncGet(
-      slowTarget(agent), publicCommunity, {sysDescr},
+      longDeadlineTarget(agent), publicCommunity, {sysDescr},
       answered.handler([&client](net::ErrorCode, const Response&) { client.reset(); }));
   io.run();
 
@@ -105,12 +99,12 @@ TEST(ClientLifetime, DestroyedFromACompletionOnItsOwnStrandStopsTheRest) {
   std::vector<net::ErrorCode> outstanding;
   int answered = 0;
 
-  client->asyncGet(slowTarget(agent), publicCommunity, {sysUpTime},
+  client->asyncGet(longDeadlineTarget(agent), publicCommunity, {sysUpTime},
                    [&](net::ErrorCode ec, const Response&) {
                      outstanding.push_back(ec);
                      agent.close();
                    });
-  client->asyncGet(slowTarget(agent), publicCommunity, {sysDescr},
+  client->asyncGet(longDeadlineTarget(agent), publicCommunity, {sysDescr},
                    [&](net::ErrorCode ec, const Response&) {
                      ++answered;
                      EXPECT_FALSE(ec) << ec.message();
@@ -136,7 +130,7 @@ TEST(ClientLifetime, DestroyedFromAnotherThreadStopsItsOutstandingRequests) {
   auto client = std::make_unique<Client>(io.get_executor());
 
   client->asyncGet(
-      slowTarget(agent), publicCommunity, {sysDescr},
+      longDeadlineTarget(agent), publicCommunity, {sysDescr},
       oracle.handler([&completed](net::ErrorCode, const Response&) { completed.set_value(); }));
   std::thread runner([&io] { io.run(); });
 
@@ -266,7 +260,8 @@ void destroyWhileOthersRunAndInitiate(int round) {
   const auto onTime = [&survivorLate](auto then) {
     return [&survivorLate, then = std::move(then), initiated = std::chrono::steady_clock::now()](
                net::ErrorCode, const Response&) {
-      if (std::chrono::steady_clock::now() - initiated > longDeadline / 2) survivorLate = true;
+      if (std::chrono::steady_clock::now() - initiated > atOnceLimit(longDeadline))
+        survivorLate = true;
       then();
     };
   };
@@ -274,22 +269,22 @@ void destroyWhileOthersRunAndInitiate(int round) {
   // Thread B. It touches the doomed Client only before it hands off, and A destroys it only after,
   // so the handoff is the one thing keeping B off freed memory and it hides no race in the Client.
   std::thread initiator([&] {
-    doomed->asyncGet(slowTarget(silent), publicCommunity, {sysDescr},
+    doomed->asyncGet(longDeadlineTarget(silent), publicCommunity, {sysDescr},
                      doomedOracles[0].handler(completes));
     doomed->asyncGet(retransmitting, publicCommunity, {sysDescr},
                      doomedOracles[1].handler(completes));
     doomed->asyncGet(discovering, credentials(), {sysDescr}, doomedOracles[2].handler(completes));
-    doomed->asyncWalkCollect(slowTarget(walked), publicCommunity, systemGroup, WalkOptions{2},
-                             doomedOracles[3].handler(completes));
+    doomed->asyncWalkCollect(longDeadlineTarget(walked), publicCommunity, systemGroup,
+                             WalkOptions{2}, doomedOracles[3].handler(completes));
     for (const auto& wait : inWait) std::ignore = wait.waitFor(longDeadline);
     for (std::size_t i = 0; i < lastMinuteRequests; ++i) {
-      doomed->asyncGet(slowTarget(silent), publicCommunity, {sysDescr},
+      doomed->asyncGet(longDeadlineTarget(silent), publicCommunity, {sysDescr},
                        doomedOracles[waitNames.size() + i].handler(completes));
     }
     const auto initiateOnSurvivor = [&] {
       survivorOracles.emplace_back(io);
       survivor.asyncGet(
-          slowTarget(answering), publicCommunity, {sysDescr},
+          longDeadlineTarget(answering), publicCommunity, {sysDescr},
           survivorOracles.back().handler(onTime([&outstanding] { outstanding.release(); })));
     };
     // One of the survivor's requests is outstanding before the handoff, so destruction always has
@@ -302,7 +297,7 @@ void destroyWhileOthersRunAndInitiate(int round) {
     while (!destroyed && outstanding.try_acquire_for(longDeadline)) initiateOnSurvivor();
 
     afterDestruction.emplace(io);
-    survivor.asyncGet(slowTarget(answering), publicCommunity, {sysDescr},
+    survivor.asyncGet(longDeadlineTarget(answering), publicCommunity, {sysDescr},
                       afterDestruction->handler(onTime([&answered] { answered.countDown(); })));
     afterDestructionCompleted = answered.waitFor(longDeadline);
     // The loop's last requests may still be outstanding; the survivor is stopped only once they
@@ -320,7 +315,7 @@ void destroyWhileOthersRunAndInitiate(int round) {
   doomed.reset();
   destroyed = true;
   // Well before any of the deadlines, or it was a deadline that ended a request.
-  const bool doomedFinished = doomedCompleted.waitFor(longDeadline / 2);
+  const bool doomedFinished = doomedCompleted.waitFor(atOnceLimit(longDeadline));
 
   initiator.join();
   survivor.stop();
@@ -551,7 +546,7 @@ TEST(ClientLifetime, AReplyAcceptedAsDestructionBeginsDoesNotCount) {
       return answerOnlySysDescr(msg);
     });
 
-    client->asyncGet(slowTarget(agent), publicCommunity, {sysDescr},
+    client->asyncGet(longDeadlineTarget(agent), publicCommunity, {sysDescr},
                      [&](net::ErrorCode ec, const Response&) {
                        result = ec;
                        lateSuccess = destroying && !ec;
@@ -577,7 +572,7 @@ TEST(ClientLifetime, StoppingAsTheSendCompletesStillCompletesAtOnce) {
     std::chrono::steady_clock::time_point stoppedAt;
     std::chrono::steady_clock::time_point completedAt;
 
-    client->asyncGet(slowTarget(agent), publicCommunity, {sysDescr},
+    client->asyncGet(longDeadlineTarget(agent), publicCommunity, {sysDescr},
                      [&](net::ErrorCode ec, const Response&) {
                        completedAt = std::chrono::steady_clock::now();
                        result = ec;
@@ -591,7 +586,7 @@ TEST(ClientLifetime, StoppingAsTheSendCompletesStillCompletesAtOnce) {
 
     ASSERT_TRUE(result.has_value());
     EXPECT_EQ(*result, Errc::ClientStopped);
-    EXPECT_LT(completedAt - stoppedAt, longDeadline / 2) << "waited for the deadline";
+    EXPECT_LT(completedAt - stoppedAt, atOnceLimit(longDeadline)) << "waited for the deadline";
   }
 }
 
@@ -601,7 +596,7 @@ TEST(ClientLifetime, ACompletedRequestNeverLaterReportsClientStopped) {
   CompletionOracle oracle(io);
   std::optional<Client> client{std::in_place, io.get_executor()};
 
-  client->asyncGet(slowTarget(agent), publicCommunity, {sysDescr},
+  client->asyncGet(longDeadlineTarget(agent), publicCommunity, {sysDescr},
                    oracle.handler([&](net::ErrorCode, const Response&) {
                      client->stop();
                      client.reset();
@@ -618,7 +613,7 @@ TEST(ClientLifetime, StoppingTwiceAndThenDestroyingCompletesOnce) {
   CompletionOracle oracle(io);
   std::optional<Client> client{std::in_place, io.get_executor()};
 
-  client->asyncGet(slowTarget(agent), publicCommunity, {sysDescr},
+  client->asyncGet(longDeadlineTarget(agent), publicCommunity, {sysDescr},
                    oracle.handler([&agent](net::ErrorCode, const Response&) { agent.close(); }));
   client->stop();
   client->stop();

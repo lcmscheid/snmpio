@@ -10,6 +10,7 @@
 #include <snmpio/Client.hpp>
 #include <snmpio/Usm.hpp>
 
+#include "Deadlines.hpp"
 #include "FailingAllocation.hpp"
 #include "ScriptedAgent.hpp"
 #include "ScriptedV3Agent.hpp"
@@ -22,6 +23,8 @@ namespace snmpio {
 namespace {
 
 using test::FailingAllocation;
+using test::longDeadline;
+using test::longDeadlineTarget;
 using test::ScriptedAgent;
 using test::ScriptedV3Agent;
 
@@ -35,10 +38,6 @@ const Oid sysDescr{1, 3, 6, 1, 2, 1, 1, 1, 0};
 // safe here; one of 6 decoded first would take the failure, and the test would fail, not pass.
 const std::size_t masterKeySize = keySize(AuthProtocol::Sha224);
 
-// Long enough that a request ended by its deadline rather than by the exception shows up as a
-// completion, short enough not to hang the suite if one queues forever.
-constexpr auto longDeadline = std::chrono::seconds(5);
-
 Credentials credentials() {
   return Credentials{"bert",       SecurityLevel::AuthNoPriv, AuthProtocol::Sha224,
                      "maplesyrup", PrivProtocol::None,        ""};
@@ -51,13 +50,6 @@ Pdu echoAnswer(const Pdu& request) {
     p.varbinds.push_back(Varbind{vb.name, Octets{std::byte{'o'}, std::byte{'k'}}});
   }
   return p;
-}
-
-template <typename Agent>
-Target longDeadlineTarget(const Agent& agent) {
-  auto t = test::targetFor(agent, 0);
-  t.timeout = longDeadline;
-  return t;
 }
 
 TEST(ClientExceptions, ADiscoveryThatThrowsSurfacesForEachWaiterAndLeavesNoneQueued) {

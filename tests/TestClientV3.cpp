@@ -11,11 +11,13 @@
 
 #include <snmpio/Client.hpp>
 
+#include "Deadlines.hpp"
 #include "ScriptedV3Agent.hpp"
 
 namespace snmpio {
 namespace {
 
+using test::atOnceLimit;
 using test::ScriptedV3Agent;
 using test::targetFor;
 
@@ -1027,7 +1029,7 @@ TEST_P(TotalCancelThenRetryableReport, EndsWithoutASecondAttempt) {
   EXPECT_EQ(m_cancelled.ec, net::asio::error::operation_aborted) << m_cancelled.ec.message();
   // The discovery's two datagrams and the request's one. A fourth is the second attempt.
   EXPECT_EQ(m_cancelled.datagrams, 3);
-  EXPECT_LT(m_cancelled.took, deadline / 2) << "waited out the second attempt";
+  EXPECT_LT(m_cancelled.took, atOnceLimit(deadline)) << "waited out the second attempt";
 }
 
 // What the Report said about the Engine still reaches the cache: it is as true for the next request

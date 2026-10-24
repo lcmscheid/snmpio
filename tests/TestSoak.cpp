@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <iostream>
+#include <limits>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -18,6 +19,7 @@
 #include <string>
 #include <thread>
 #include <utility>
+#include <variant>
 #include <vector>
 
 #include <snmpio/Client.hpp>
@@ -30,25 +32,29 @@
 
 // The soak: the deployment snmpio exists for, randomised (#32, threat model C1-C3).
 //
-// Eight Clients share one io_context that four threads run, each Client with a Scripted Agent of
-// its own; even slots speak v2c and odd ones v3. Every completion is bound to a strand on a second
-// io_context, as an application whose own threads are not the I/O threads would bind it. Four more
-// threads carry out SoakPlan.hpp's plan: they initiate from wherever the plan puts them, cancel
-// from a thread that need not be the initiator, and stop or destroy a Client, which an Agent being
-// removed and added back then replaces. Agents answer at once, late, never, twice, or after a
-// garbled copy of the answer.
+// Eight Clients share one io_context that four threads run, each Client polling a Target of its
+// own, behind which a Scripted Agent answers; even slots speak v2c and odd ones v3. Every
+// completion is bound to a strand on a second io_context, as an application whose own threads are
+// not the I/O threads would bind it. Four more threads carry out SoakPlan.hpp's plan: they initiate
+// from wherever the plan puts them, cancel from a thread that need not be the initiator, and stop
+// or destroy a Client, which the slot's next generation then replaces, as a Target leaving the
+// inventory and coming back would. Agents answer at once, late, never, twice, or after malformed
+// datagrams: one whose length claims four gigabytes, and a truncated copy of the answer.
 //
 // Every request goes through the counting oracle. What it may complete with is worked out from
 // what the plan did to it -- a reply, or Timeout where the Agent never answers; operation_aborted
 // once cancelled, WalkIncomplete for a Walk a total signal reached; ClientStopped where its own
 // Client was stopped or destroyed, and only there -- so that one Client's Stopping turning up in
-// another's requests fails it (C3).
+// another's requests fails it (C3). A terminal signal narrows that further, by when it went out:
+// a request may not succeed on an answer its Agent sent only after the signal, nor time out if
+// the signal went out before its whole deadline could have passed (L2).
 //
 // The seed is printed, and SNMPIO_SOAK_SEED replays it: the same requests, cancellations, stops
-// and destructions, in the same order, due at the same moments, and from the same threads.
-// SNMPIO_SOAK_SECONDS sets the duration, two seconds by default. The threads' interleavings around
-// the plan are not the seed's to repeat, so a seed that failed once fails again more often than
-// not, rather than every time.
+// and destructions, in the same order, reaching the same generation of the same slot's Client,
+// due at the same moments, and from the same threads. SNMPIO_SOAK_SECONDS sets the duration, two
+// seconds by default. When each lands relative to the others is the scheduler's -- a thread that
+// waits on an initiation, or on a Batch handler running elsewhere, falls behind the plan -- so a
+// seed that failed once fails again more often than not, rather than every time.
 
 namespace snmpio::test::soak {
 namespace {
@@ -60,7 +66,8 @@ using std::chrono::steady_clock;
 // request names its Behaviour as the component after soakRoot, and the Agent reads it from there.
 const Oid soakRoot{1, 3, 6, 1, 4, 1, 32, 1};
 constexpr std::uint32_t rowsPerBehaviour = 6;
-constexpr std::uint32_t behaviourCount = 5;
+// The highest Behaviour, as the sub-identifier its rows sit under.
+constexpr auto lastBehaviourArc = static_cast<std::uint32_t>(behaviourCount);
 
 constexpr auto attemptTimeout = milliseconds(200);
 constexpr int retries = 1;
@@ -100,13 +107,13 @@ Credentials credentialsFor(int slot) {
 // ---------------------------------------------------------------------------
 
 Behaviour behaviourOf(const Pdu& pdu) {
-  // Engine Discovery's probes name nothing; they, and anything else outside the MIB, are answered
-  // at once.
+  // Engine Discovery's requests name nothing; they, and anything else outside the MIB, are
+  // answered at once.
   if (pdu.varbinds.empty()) return Behaviour::Prompt;
   const Oid& name = pdu.varbinds.front().name;
   if (name.size() <= soakRoot.size() || !soakRoot.isPrefixOf(name)) return Behaviour::Prompt;
   const auto b = name[soakRoot.size()];
-  if (b < 1 || b > behaviourCount) return Behaviour::Prompt;
+  if (b < 1 || b > lastBehaviourArc) return Behaviour::Prompt;
   return static_cast<Behaviour>(b);
 }
 
@@ -124,8 +131,8 @@ ReplyDelivery deliveryFor(const Pdu& request) {
     case Behaviour::Twice:
       d.copies = 2;
       break;
-    case Behaviour::Garbled:
-      d.truncatedCopyFirst = true;
+    case Behaviour::Malformed:
+      d.malformedFirst = true;
       break;
     case Behaviour::Prompt:
     case Behaviour::Never:
@@ -137,7 +144,7 @@ ReplyDelivery deliveryFor(const Pdu& request) {
 const std::vector<Varbind>& mib() {
   static const std::vector<Varbind> rows = [] {
     std::vector<Varbind> out;
-    for (std::uint32_t b = 1; b <= behaviourCount; ++b) {
+    for (std::uint32_t b = 1; b <= lastBehaviourArc; ++b) {
       for (std::uint32_t k = 1; k <= rowsPerBehaviour; ++k)
         out.emplace_back(soakRoot.child(b).child(k), Gauge32{k});
     }
@@ -171,30 +178,46 @@ Pdu answer(const Pdu& request) {
   return p;
 }
 
+// Which planned request a PDU belongs to: the last sub-identifier of a name nameFor() made. A
+// Walk's names are a Subtree's, one shorter, and belong to no single request.
+std::optional<std::size_t> requestIndexOf(const Pdu& pdu) {
+  if (pdu.varbinds.empty()) return std::nullopt;
+  const Oid& name = pdu.varbinds.front().name;
+  if (name.size() != soakRoot.size() + 3 || !soakRoot.isPrefixOf(name)) return std::nullopt;
+  return static_cast<std::size_t>(name[name.size() - 1]);
+}
+
+bool staysSilent(const Pdu& pdu) {
+  return behaviourOf(pdu) == Behaviour::Never;
+}
+
 // One slot's Agent, of whichever version the slot speaks.
 class SoakAgent {
  public:
-  SoakAgent(net::IoContext& io, int slot) {
+  SoakAgent(net::IoContext& io, int slot, const DeliveryPlan& delivery) {
     if (!isV3(slot)) {
-      m_v2c = std::make_unique<ScriptedAgent>(io, [](const V2cMessage& msg) -> std::optional<Pdu> {
-        if (behaviourOf(msg.pdu) == Behaviour::Never) return std::nullopt;
-        return answer(msg.pdu);
-      });
-      m_v2c->setDelivery(deliveryFor);
+      auto agent =
+          std::make_unique<ScriptedAgent>(io, [](const V2cMessage& msg) -> std::optional<Pdu> {
+            if (staysSilent(msg.pdu)) return std::nullopt;
+            return answer(msg.pdu);
+          });
+      agent->setDelivery(delivery);
+      m_agent = std::move(agent);
       return;
     }
-    m_v3 = std::make_unique<ScriptedV3Agent>(io, credentialsFor(slot), answer);
-    m_v3->setResponder([agent = m_v3.get()](const ScriptedV3Agent::Request& req)
-                           -> std::optional<ScriptedV3Agent::Reply> {
-      if (behaviourOf(req.message.scoped.pdu) == Behaviour::Never) return std::nullopt;
-      return agent->behaveLikeACompliantAgent(req);
+    auto agent = std::make_unique<ScriptedV3Agent>(io, credentialsFor(slot), answer);
+    agent->setResponder([raw = agent.get()](const ScriptedV3Agent::Request& req)
+                            -> std::optional<ScriptedV3Agent::Reply> {
+      if (staysSilent(req.message.scoped.pdu)) return std::nullopt;
+      return raw->behaveLikeACompliantAgent(req);
     });
-    m_v3->setDelivery(deliveryFor);
+    agent->setDelivery(delivery);
+    m_agent = std::move(agent);
   }
 
   [[nodiscard]] Target target() const {
     Target t;
-    t.endpoint = m_v2c ? m_v2c->endpoint() : m_v3->endpoint();
+    t.endpoint = std::visit([](const auto& agent) { return agent->endpoint(); }, m_agent);
     t.timeout = attemptTimeout;
     t.retries = retries;
     return t;
@@ -202,21 +225,21 @@ class SoakAgent {
 
   // Closed on its own strand, which the io_context's threads may be running.
   void close() {
-    if (m_v2c) {
-      net::asio::dispatch(m_v2c->executor(), [agent = m_v2c.get()] { agent->close(); });
-    } else {
-      net::asio::dispatch(m_v3->executor(), [agent = m_v3.get()] { agent->close(); });
-    }
+    std::visit(
+        [](const auto& agent) {
+          net::asio::dispatch(agent->executor(), [raw = agent.get()] { raw->close(); });
+        },
+        m_agent);
   }
 
   // Read once every thread has joined.
   [[nodiscard]] const DeliveryCounts& deliveries() const {
-    return m_v2c ? m_v2c->deliveries() : m_v3->deliveries();
+    return std::visit(
+        [](const auto& agent) -> const DeliveryCounts& { return agent->deliveries(); }, m_agent);
   }
 
  private:
-  std::unique_ptr<ScriptedAgent> m_v2c;
-  std::unique_ptr<ScriptedV3Agent> m_v3;
+  std::variant<std::unique_ptr<ScriptedAgent>, std::unique_ptr<ScriptedV3Agent>> m_agent;
 };
 
 // ---------------------------------------------------------------------------
@@ -231,16 +254,16 @@ struct ClientState {
   std::atomic<bool> stopped = false;
 };
 
-// One Client instance. Destroying it is destroying the Client, on whichever thread lets go of it
-// last -- the one that removed it from its slot, or one that was still initiating on it.
-class Instance {
+// One generation of a slot's Client. Destroying this is destroying the Client, on whichever thread
+// lets go of it last -- the one that ended its generation, or one that was still initiating on it.
+class ClientInstance {
  public:
-  explicit Instance(const net::Executor& ex) : m_client(std::in_place, ex) {}
-  Instance(const Instance&) = delete;
-  Instance& operator=(const Instance&) = delete;
-  Instance(Instance&&) = delete;
-  Instance& operator=(Instance&&) = delete;
-  ~Instance() {
+  explicit ClientInstance(const net::Executor& ex) : m_client(std::in_place, ex) {}
+  ClientInstance(const ClientInstance&) = delete;
+  ClientInstance& operator=(const ClientInstance&) = delete;
+  ClientInstance(ClientInstance&&) = delete;
+  ClientInstance& operator=(ClientInstance&&) = delete;
+  ~ClientInstance() {
     m_state->stopping = true;
     m_client.reset();
     m_state->stopped = true;
@@ -260,47 +283,84 @@ class Instance {
   std::optional<Client> m_client;
 };
 
-// A Client slot: the Client currently serving one Agent. A Stop or a Destroy replaces it.
+// A Client slot: the Clients that poll one Target in turn, one per generation. The plan names the
+// generation each request and disruption reaches, so a thread running behind the plan still
+// reaches the Client the seed chose. A generation's Client is made when first needed, and let go
+// once the plan has stopped or destroyed it and every request planned on it has been initiated.
+//
+// Every Client let go here is held in a local declared ahead of the lock, so it is destroyed once
+// the lock is let go: ~Client, like stop(), can wait on a Batch handler running on another thread.
 class Slot {
  public:
-  explicit Slot(net::Executor ex) : m_ex(std::move(ex)), m_current(fresh()) {}
-
-  [[nodiscard]] std::shared_ptr<Instance> current() {
-    const std::scoped_lock lock(m_mutex);
-    return m_current;
+  Slot(net::Executor ex, const std::vector<int>& requestsPerGeneration) : m_ex(std::move(ex)) {
+    m_generations.resize(requestsPerGeneration.size());
+    for (std::size_t g = 0; g < requestsPerGeneration.size(); ++g)
+      m_generations[g].initiationsLeft = requestsPerGeneration[g];
   }
 
-  // The Agent is removed and added back: the old Client goes, a new one takes its place.
-  void destroy() {
-    auto next = fresh();
+  // For an initiation, which then calls initiated().
+  [[nodiscard]] std::shared_ptr<ClientInstance> acquire(int generation) {
+    const std::scoped_lock lock(m_mutex);
+    return clientOf(generation);
+  }
+
+  void initiated(int generation) {
+    std::shared_ptr<ClientInstance> released;
+    const std::scoped_lock lock(m_mutex);
+    auto& g = m_generations.at(static_cast<std::size_t>(generation));
+    --g.initiationsLeft;
+    if (g.ended && g.initiationsLeft == 0) released = std::move(g.client);
+  }
+
+  // Stops the generation's Client, made now if its requests are yet to come so that they meet a
+  // stopped Client, as they would have had the plan run to the microsecond.
+  void stop(int generation) {
+    std::shared_ptr<ClientInstance> stopping;
     {
       const std::scoped_lock lock(m_mutex);
-      std::swap(m_current, next);
+      const auto& g = m_generations.at(static_cast<std::size_t>(generation));
+      if (g.client || g.initiationsLeft > 0) stopping = clientOf(generation);
     }
-    // The last hold on the old Client, unless an initiator still has it for a moment.
-    next.reset();
+    if (stopping) stopping->stop();
+    end(generation);
   }
 
-  void stop() {
-    const auto stopping = current();
-    stopping->stop();
-    auto next = fresh();
-    const std::scoped_lock lock(m_mutex);
-    if (m_current == stopping) std::swap(m_current, next);
-  }
+  // The Target leaves the inventory: the generation's Client goes once nothing else holds it.
+  void destroy(int generation) { end(generation); }
 
   // At the end, on the test thread.
   void retire() {
+    std::vector<std::shared_ptr<ClientInstance>> released;
     const std::scoped_lock lock(m_mutex);
-    m_current.reset();
+    released.reserve(m_generations.size());
+    for (auto& g : m_generations) released.push_back(std::move(g.client));
   }
 
  private:
-  [[nodiscard]] std::shared_ptr<Instance> fresh() const { return std::make_shared<Instance>(m_ex); }
+  struct Generation {
+    std::shared_ptr<ClientInstance> client;
+    int initiationsLeft = 0;
+    bool ended = false;
+  };
+
+  // Under m_mutex.
+  std::shared_ptr<ClientInstance> clientOf(int generation) {
+    auto& g = m_generations.at(static_cast<std::size_t>(generation));
+    if (!g.client) g.client = std::make_shared<ClientInstance>(m_ex);
+    return g.client;
+  }
+
+  void end(int generation) {
+    std::shared_ptr<ClientInstance> released;
+    const std::scoped_lock lock(m_mutex);
+    auto& g = m_generations.at(static_cast<std::size_t>(generation));
+    g.ended = true;
+    if (g.initiationsLeft == 0) released = std::move(g.client);
+  }
 
   net::Executor m_ex;
   std::mutex m_mutex;
-  std::shared_ptr<Instance> m_current;
+  std::vector<Generation> m_generations;
 };
 
 // Counts completions, so the test thread can wait for the last with a limit.
@@ -339,10 +399,27 @@ struct Record {
   steady_clock::time_point initiatedAt;
   std::atomic<bool> initiated = false;
 
-  // The cancelling thread's.
+  // The cancelling thread's. terminalAt is taken once emit() has returned, by when the signal is
+  // queued on the Client's strand, ahead of any reply that arrives after it: co_spawn dispatches
+  // the signal to its executor when the handler has one of its own, and Client::spawn always binds
+  // one.
   bool terminal = false;
   bool total = false;
   steady_clock::time_point terminalAt;
+
+  // When the Agent first sent a whole answer to the request, if it did: written on the Agent's
+  // strand, as a count of steady_clock ticks.
+  std::atomic<steady_clock::rep> firstAnswerAt = std::numeric_limits<steady_clock::rep>::max();
+
+  void noteAnswer() {
+    const auto now = steady_clock::now().time_since_epoch().count();
+    auto seen = firstAnswerAt.load();
+    while (now < seen && !firstAnswerAt.compare_exchange_weak(seen, now)) {
+    }
+  }
+  [[nodiscard]] bool answeredBy(steady_clock::time_point t) const {
+    return firstAnswerAt.load() <= t.time_since_epoch().count();
+  }
 
   // The completion's, on the caller strand. Whether Stopping had begun on the request's Client is
   // read there too: Stopping sets the flag before it does anything, and its ClientStopped reaches
@@ -360,6 +437,14 @@ bool isWalk(Operation op) {
   return op == Operation::Walk || op == Operation::WalkCollect;
 }
 
+// Whether the soak holds a request to how long it takes, as well as to its code. v2c only: a v3
+// Client's strand can be busy for longer than any of these bounds deriving a Master Key, and
+// everything queued on it waits behind the derivation -- threat model B7, until #37 moves the
+// derivation off the strand.
+bool heldToTiming(const Request& r) {
+  return !isV3(r.client.slot);
+}
+
 // One row of the MIB per request, spread over the rows, with the request's index after it so that
 // no two requests name the same instance.
 Oid nameFor(const Request& r, int index) {
@@ -372,9 +457,19 @@ Oid nameFor(const Request& r, int index) {
 class Soak {
  public:
   explicit Soak(Plan plan) : m_plan(std::move(plan)), m_records(m_plan.requests.size()) {
+    const DeliveryPlan delivery = [this](const Pdu& request) {
+      auto d = deliveryFor(request);
+      const auto index = requestIndexOf(request);
+      if (index && *index < m_records.size()) {
+        d.onAnswer = [record = &m_records[*index]] { record->noteAnswer(); };
+      }
+      return d;
+    };
     for (int slot = 0; slot < clientSlots; ++slot) {
-      m_agents.push_back(std::make_unique<SoakAgent>(m_clientIo, slot));
-      m_slots.push_back(std::make_unique<Slot>(m_clientIo.get_executor()));
+      m_agents.push_back(std::make_unique<SoakAgent>(m_clientIo, slot, delivery));
+      m_slots.push_back(
+          std::make_unique<Slot>(m_clientIo.get_executor(),
+                                 m_plan.requestsPerGeneration.at(static_cast<std::size_t>(slot))));
     }
     for (auto& record : m_records) record.oracle.emplace(m_callerIo);
   }
@@ -433,8 +528,8 @@ class Soak {
     if (planned(Behaviour::Twice)) {
       EXPECT_GT(sum.duplicated, 0) << "no Agent answered twice";
     }
-    if (planned(Behaviour::Garbled)) {
-      EXPECT_GT(sum.truncated, 0) << "no Agent sent a garbled copy";
+    if (planned(Behaviour::Malformed)) {
+      EXPECT_GT(sum.malformed, 0) << "no Agent sent malformed datagrams";
     }
   }
 
@@ -463,36 +558,46 @@ class Soak {
   void perform(const Event& e) {
     switch (e.action) {
       case Action::Initiate:
-        initiate(e.request);
+        initiate(e.request.value());
         break;
       case Action::CancelTerminal:
       case Action::CancelTotal:
-        cancel(e);
+        cancel(e.action, e.request.value());
         break;
       case Action::Stop:
-        m_slots.at(static_cast<std::size_t>(e.slot))->stop();
+        slotOf(e.client).stop(e.client.generation);
         break;
       case Action::Destroy:
-        m_slots.at(static_cast<std::size_t>(e.slot))->destroy();
+        slotOf(e.client).destroy(e.client.generation);
         break;
     }
+  }
+
+  Slot& slotOf(const ClientRef& client) {
+    return *m_slots.at(static_cast<std::size_t>(client.slot));
   }
 
   void initiate(int index) {
     const auto& request = m_plan.requests.at(static_cast<std::size_t>(index));
     auto& record = m_records.at(static_cast<std::size_t>(index));
-    const auto instance = m_slots.at(static_cast<std::size_t>(request.slot))->current();
-    record.client = instance->state();
-    record.initiatedAt = steady_clock::now();
+    auto& slot = slotOf(request.client);
+    {
+      const auto instance = slot.acquire(request.client.generation);
+      record.client = instance->state();
+      record.initiatedAt = steady_clock::now();
 
-    const auto target = m_agents.at(static_cast<std::size_t>(request.slot))->target();
-    if (isV3(request.slot)) {
-      initiateOn(instance->client(), target, credentialsFor(request.slot), request, index, record);
-    } else {
-      initiateOn(instance->client(), target, soakCommunity, request, index, record);
+      const auto target = m_agents.at(static_cast<std::size_t>(request.client.slot))->target();
+      if (isV3(request.client.slot)) {
+        initiateOn(instance->client(), target, credentialsFor(request.client.slot), request, index,
+                   record);
+      } else {
+        initiateOn(instance->client(), target, soakCommunity, request, index, record);
+      }
+      record.initiated.store(true, std::memory_order_release);
+      record.initiated.notify_all();
     }
-    record.initiated.store(true, std::memory_order_release);
-    record.initiated.notify_all();
+    // After this thread's own hold is gone, so that the slot's release can be the last.
+    slot.initiated(request.client.generation);
   }
 
   template <typename Auth>
@@ -548,13 +653,13 @@ class Soak {
   // Waits for the initiation, which the plan puts strictly earlier but perhaps on a thread that
   // has not reached it yet. One thread cancels each request (SoakPlan.hpp), so the signal is never
   // emitted from two at once.
-  void cancel(const Event& e) {
-    auto& record = m_records.at(static_cast<std::size_t>(e.request));
+  void cancel(Action action, int index) {
+    auto& record = m_records.at(static_cast<std::size_t>(index));
     record.initiated.wait(false, std::memory_order_acquire);
-    if (e.action == Action::CancelTerminal) {
+    if (action == Action::CancelTerminal) {
       record.terminal = true;
-      record.terminalAt = steady_clock::now();
       record.signal.emit(net::asio::cancellation_type::terminal);
+      record.terminalAt = steady_clock::now();
     } else {
       record.total = true;
       record.signal.emit(net::asio::cancellation_type::total);
@@ -564,8 +669,20 @@ class Soak {
   // True if the request failed a check.
   static bool checkOne(int index, const Request& request, const Record& record) {
     std::vector<net::ErrorCode> allowed;
-    allowed.push_back(request.behaviour == Behaviour::Never ? make_error_code(Errc::Timeout)
-                                                            : net::ErrorCode{});
+    // What the Agent's behaviour alone ends the request with, unless a terminal signal rules it
+    // out. The signal reaches the strand ahead of any answer sent after it, and the Client weighs
+    // terminal ahead of an answer in hand, so such an answer cannot complete the request. Nor can
+    // a deadline the signal went out before: the expiry reaches the strand behind it. Two gaps
+    // remain: an answer sent before the signal may still complete it, which is right for a Client
+    // that got there first and wrong for one that ignored the signal; and a Walk's answers name no
+    // single request, so a Walk's success stays allowed.
+    if (request.behaviour == Behaviour::Never) {
+      if (!record.terminal || record.terminalAt >= record.initiatedAt + wholeDeadline)
+        allowed.push_back(make_error_code(Errc::Timeout));
+    } else if (!record.terminal || isWalk(request.operation) ||
+               record.answeredBy(record.terminalAt)) {
+      allowed.emplace_back();
+    }
     // Client.hpp's rule: terminal is operation_aborted everywhere, and outranks total; total is
     // operation_aborted for a request and WalkIncomplete for a Walk.
     if (record.terminal || (record.total && !isWalk(request.operation)))
@@ -597,9 +714,7 @@ class Soak {
     }
     // A terminal signal drops a request at once, whatever wait it is in (L2): one that ended long
     // after it was ignored or lost on its way to the strand, and waited out something else (#71).
-    // v2c only: a v3 Client's strand can be busy for longer than this deriving a Master Key, which
-    // the signal then queues behind -- threat model B7, until #37 moves the derivation off it.
-    if (record.terminal && !isV3(request.slot) &&
+    if (record.terminal && heldToTiming(request) &&
         record.completedAt - record.terminalAt > terminalLimit) {
       ADD_FAILURE() << context() << ": completed "
                     << std::chrono::duration_cast<milliseconds>(record.completedAt -
@@ -626,9 +741,8 @@ class Soak {
     }
     // Every answer lands inside the first attempt's deadline, so one that took longer was lost
     // and retransmitted for -- a reply that overtook its send, say, which only several threads
-    // running the io_context produce. v2c only: a v3 request's first request to an Engine waits
-    // behind a discovery and a key derivation that its own deadline does not cover.
-    if (!code && !isV3(request.slot) && !isWalk(request.operation) && took >= attemptTimeout) {
+    // running the io_context produce.
+    if (!code && heldToTiming(request) && !isWalk(request.operation) && took >= attemptTimeout) {
       ADD_FAILURE() << context() << ": answered only after "
                     << std::chrono::duration_cast<milliseconds>(took).count()
                     << " ms, past the first attempt's deadline";

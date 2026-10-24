@@ -47,7 +47,7 @@ class ScriptedAgent {
 
   // What the Agent quotes back as the community. Empty means "echo whatever arrived".
   void setCommunityOverride(std::string community) { m_communityOverride = std::move(community); }
-  // How each reply goes out: late, twice, or behind a truncated copy of itself. One copy, at once,
+  // How each reply goes out: late, twice, or behind malformed datagrams. One copy, at once,
   // without it.
   void setDelivery(DeliveryPlan plan) { m_delivery = std::move(plan); }
   [[nodiscard]] const DeliveryCounts& deliveries() const noexcept { return m_sender.counts(); }

@@ -16,12 +16,17 @@
 namespace snmpio::test {
 
 // How a Scripted Agent puts a reply it has already decided on onto the wire: when, how many times,
-// and whether a truncated copy goes first. The default is what both Agents always did, one copy at
+// and whether malformed datagrams go first. The default is what both Agents always did, one copy at
 // once.
 struct ReplyDelivery {
   std::chrono::milliseconds delay{0};
   int copies = 1;
-  bool truncatedCopyFirst = false;
+  // Ahead of the reply: a datagram whose outer SEQUENCE claims four gigabytes, then a truncated
+  // copy of the reply itself.
+  bool malformedFirst = false;
+  // Called just before the first whole copy goes out, on the Agent's strand, for a test that has
+  // to know when a reply could first have reached its Client.
+  std::function<void()> onAnswer;
 };
 
 // Chooses the delivery from the request being answered.
@@ -31,12 +36,12 @@ using DeliveryPlan = std::function<ReplyDelivery(const Pdu& request)>;
 struct DeliveryCounts {
   int delayed = 0;
   int duplicated = 0;
-  int truncated = 0;
+  int malformed = 0;
 
   DeliveryCounts& operator+=(const DeliveryCounts& other) {
     delayed += other.delayed;
     duplicated += other.duplicated;
-    truncated += other.truncated;
+    malformed += other.malformed;
     return *this;
   }
 };
@@ -75,10 +80,15 @@ class ReplySender {
   void put(std::span<const std::byte> reply, const net::UdpEndpoint& to,
            const ReplyDelivery& delivery) {
     net::ErrorCode ignored;
-    if (delivery.truncatedCopyFirst && reply.size() > 1) {
-      ++m_counts.truncated;
+    if (delivery.malformedFirst && reply.size() > 1) {
+      ++m_counts.malformed;
+      std::vector<std::byte> overlong{std::byte{0x30}, std::byte{0x84}, std::byte{0xff},
+                                      std::byte{0xff}, std::byte{0xff}, std::byte{0xff}};
+      overlong.insert(overlong.end(), reply.begin(), reply.end());
+      m_socket.send_to(net::asio::buffer(overlong), to, 0, ignored);
       m_socket.send_to(net::asio::buffer(reply.data(), reply.size() / 2), to, 0, ignored);
     }
+    if (delivery.onAnswer) delivery.onAnswer();
     if (delivery.copies > 1) ++m_counts.duplicated;
     for (int i = 0; i < delivery.copies; ++i)
       m_socket.send_to(net::asio::buffer(reply.data(), reply.size()), to, 0, ignored);

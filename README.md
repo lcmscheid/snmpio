@@ -139,11 +139,13 @@ rows with `WalkIncomplete`.
 
 ### The deployment it is tested in
 
-snmpio is built for a control and management system that polls many Agents and must never block its
-own threads. The recommended shape is **one Client per Agent**, all on **one shared `io_context`
-run by a small thread pool**, with a Client destroyed when its Agent leaves the inventory. That is
-the shape the soak exercises (below), and the one this library's concurrency claims are checked
-against.
+snmpio is built for a control and management system that polls many Targets and must never block
+its own threads. The recommended shape is **one Client per Target**, all on **one shared
+`io_context` run by a small thread pool**, with a Client destroyed when its Target leaves the
+inventory. That is the shape the soak exercises (below), and the one this library's concurrency
+claims are checked against. The pool is Asio's own pattern: "multiple threads may call
+`io_context::run()` to set up a pool of threads from which completion handlers may be invoked"
+([Threads and Asio](https://www.boost.org/doc/libs/release/doc/html/boost_asio/overview/core/threads.html)).
 
 ```cpp
 namespace net = snmpio::net;
@@ -152,7 +154,7 @@ auto work = net::asio::make_work_guard(io);
 std::vector<std::thread> pool;
 for (int i = 0; i < 4; ++i) pool.emplace_back([&io] { io.run(); });
 
-// One Client per Agent, added and removed as the inventory changes. The map is the caller's to
+// One Client per Target, added and removed as the inventory changes. The map is the caller's to
 // guard; the Clients need no guarding.
 std::map<std::string, std::unique_ptr<snmpio::Client>> clients;
 clients.emplace("core-sw-1", std::make_unique<snmpio::Client>(io.get_executor()));
@@ -165,26 +167,27 @@ clients.at("core-sw-1")->asyncGet(
       // Runs on appStrand. Must not reach into a Client that may since have been destroyed.
     }));
 
-// The Agent is removed: destroying its Client stops it, and its Outstanding Requests complete
+// The Target is removed: destroying its Client stops it, and its Outstanding Requests complete
 // with Errc::ClientStopped, on their own executors.
 clients.erase("core-sw-1");
 ```
 
 Why this shape and not the other two:
 
-- **One `io_context` per Agent is not recommended.** Each needs a thread to run it, so a thousand
-  Agents cost a thousand threads, nearly all of them asleep waiting on a Target that answers a few
+- **One `io_context` per Target is not recommended.** Each needs a thread to run it, so a thousand
+  Targets cost a thousand threads, nearly all of them asleep waiting on a Target that answers a few
   times a minute.
 - **One Client for everything is allowed, but it serialises.** A Client owns one socket per address
-  family and does all its work on one strand (ADR-0003), so every Agent's replies are decoded,
+  family and does all its work on one strand (ADR-0003), so every Target's replies are decoded,
   authenticated and decrypted one after another, however many threads run the `io_context`. A
-  Client per Agent spreads that work across the pool, and confines a misbehaving Agent's traffic to
-  its own strand.
-- **What a Client per Agent gives up** is what ADR-0003 has one Client own: its Engine and key
+  Client per Target spreads that work across the pool, and confines a misbehaving Agent's traffic
+  to its own Client's strand.
+- **What a Client per Target gives up** is what ADR-0003 has one Client own: its Engine and key
   caches, shared across every Target it polls. Clients do not share them, so an Engine reachable at
   two Targets is discovered twice, and each Client derives the Master Key for its own Credentials.
   Where several Targets front one Engine, poll them through one Client. Where one password serves
-  many Agents, each Client pays the derivation once, on its strand.
+  many Targets, each Client pays the derivation once, on its strand. ADR-0003's amendment of
+  2026-10-24 records this trade.
 - **Completion handlers run on the caller's executor** — the one bound to the token, or the
   Client's strand when none is. They can run after the Client is gone, so a handler must not reach
   back into a destroyed Client, or into an owner that went with it.
@@ -195,10 +198,10 @@ Why this shape and not the other two:
 The soak, `Soak.ShapedLikeTheDeployment` in [`tests/TestSoak.cpp`](tests/TestSoak.cpp), runs this
 shape with eight Clients on an `io_context` run by four threads, half of them v2c and half v3, and
 callers on a second `io_context`. Four more threads initiate, cancel, stop and destroy Clients at
-moments its seed decides, against Agents that answer at once, late, never, twice, or after a
-garbled copy of the answer. Every completion is checked to happen exactly once, on the caller's
-executor, with a code that what was done to the request allows. It runs for two seconds in every
-test run, under ASan and TSan in CI, and carries the `stress` label:
+moments its seed decides, against Agents that answer at once, late, never, twice, or after malformed
+datagrams. Every completion is checked to happen exactly once, on the caller's executor, with a
+code that what was done to the request allows. It runs for two seconds in every test run, under
+ASan and TSan in CI, and carries the `stress` label:
 
 ```sh
 ctest --preset default -L stress                         # the soak alone
@@ -207,9 +210,12 @@ SNMPIO_SOAK_SEED=1234 SNMPIO_SOAK_SECONDS=2 \
   ctest --preset default -L stress                       # replay what a failure printed
 ```
 
-A replayed seed and duration repeat the same requests, cancellations, stops and destructions, in
-the same order, due at the same moments, and from the same threads. The interleavings around them are the scheduler's, so a seed
-that failed once usually fails again rather than always.
+A replayed seed and duration repeat the same sequence of disruptions: the same requests,
+cancellations, stops and destructions, in the same order, each reaching the same Client — the same
+generation of the same slot — due at the same moments, and from the same threads. What the seed
+cannot repeat is the scheduler: whether a request lands before or after a Stop that is due just
+after it, or how far a thread that waited falls behind. So a seed that failed once usually fails
+again rather than always.
 
 ## Errors
 

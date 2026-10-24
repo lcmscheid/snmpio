@@ -88,7 +88,7 @@ class ScriptedV3Agent {
   void setOnDatagram(std::function<void(std::span<const std::byte>)> onDatagram) {
     m_onDatagram = std::move(onDatagram);
   }
-  // How each reply goes out: late, twice, or behind a truncated copy of itself, chosen from the
+  // How each reply goes out: late, twice, or behind malformed datagrams, chosen from the
   // request's own PDU. One copy, at once, without it. A Report for a payload that would not open
   // always goes out at once: there is no request PDU to choose from.
   void setDelivery(DeliveryPlan plan) { m_delivery = std::move(plan); }

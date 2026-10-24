@@ -43,3 +43,20 @@ This narrows the two amendments above, which say the flag is the one atomic. A s
 sits beside the flag: the id of the thread delivering a Batch, written on the strand around each
 handler call and read by `stop()` and `~Client`, which wait for the handler when another thread is
 running it. Nothing else leaves the strand. ADR-0009's amendment on Batch delivery says why.
+
+## Amendment, 2026-10-24: one Client per Target is the recommended deployment
+
+The README now recommends one Client per Target on a shared `io_context` (#32), which reads like
+the opposite of a Client that owns the caches for every Target. It is not a session type: a Client
+still binds nothing to a Target, and any one of them can address any Target with any Credentials.
+What changes is how many Clients an application makes, and that trades this ADR's sharing against
+the strand. One Client does all its work on one strand, so every Target's replies are decoded,
+authenticated and decrypted one after another, however many threads run the `io_context`; a Client
+per Target spreads that across them and keeps a misbehaving Agent's traffic on its own Client's
+strand. The price is the one this ADR names: Clients share no Engine or key cache, so an Engine
+behind two Targets polled by different Clients is discovered twice, and each Client derives the
+Master Key for its own Credentials.
+
+So the recommendation is per Target for Targets that are Engines of their own, which is most of
+them, and one Client for Targets that front the same Engine. The decision above, one Client that
+owns transport and caches with no session type, is unchanged.

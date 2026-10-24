@@ -20,9 +20,10 @@
 // What the soak (TestSoak.cpp) will do, decided by its seed before any thread starts.
 //
 // Threads make a soak's interleavings unrepeatable, so the seed decides everything else: which
-// Client each request goes to, what it asks, how its Agent behaves, and every disruption with the
-// moment and the thread it comes from. A failing seed then replays to the same sequence of
-// disruptions, and the interleavings around them get another roll.
+// Client each request goes to -- the slot and the generation of it -- what it asks, how its Agent
+// behaves, and every disruption with the Client it reaches, the moment it is due and the thread it
+// comes from. A failing seed then replays to the same sequence of disruptions against the same
+// Clients, and only the interleavings around them get another roll.
 namespace snmpio::test::soak {
 
 // Clients, each with its own Scripted Agent, all on the one io_context. Even slots speak v2c and
@@ -36,21 +37,55 @@ inline constexpr int initiatorThreads = 4;
 }
 
 enum class Operation : std::uint8_t { Get, GetNext, GetBulk, Set, Walk, WalkCollect };
+inline constexpr int operationCount = 6;
+static_assert(static_cast<int>(Operation::WalkCollect) + 1 == operationCount);
 
 // How the Agent answers. The request carries it in its OID, so the Agent reads it from the
-// datagram and needs nothing shared with the test.
+// datagram and needs nothing shared with the test. From 1, so that it can name a MIB row's parent
+// without a zero sub-identifier.
+//
+// Malformed is the issue's "attacking one Client beside another" (#32, and C3): what a broken Agent
+// can send its own Client, beside Clients whose Agents behave.
 enum class Behaviour : std::uint8_t {
   Prompt = 1,  // answers at once
   Late,        // answers, but only after a delay within the first attempt's deadline
   Never,       // stays silent
   Twice,       // answers twice
-  Garbled,     // sends a truncated copy of its answer, then the answer
+  Malformed,   // sends a datagram claiming four gigabytes and a truncated copy, then the answer
 };
+inline constexpr int behaviourCount = 5;
+static_assert(static_cast<int>(Behaviour::Malformed) == behaviourCount);
+
+// How often each Behaviour is drawn, in percent.
+inline constexpr std::array<std::pair<Behaviour, int>, behaviourCount> behaviourWeights{{
+    {Behaviour::Prompt, 40},
+    {Behaviour::Late, 20},
+    {Behaviour::Never, 10},
+    {Behaviour::Twice, 15},
+    {Behaviour::Malformed, 15},
+}};
+static_assert(
+    [] {
+      int total = 0;
+      for (const auto& [behaviour, percent] : behaviourWeights) total += percent;
+      return total;
+    }() == 100,
+    "the weights are percentages");
 
 enum class Action : std::uint8_t { Initiate, CancelTerminal, CancelTotal, Stop, Destroy };
+inline constexpr int actionCount = 5;
+static_assert(static_cast<int>(Action::Destroy) + 1 == actionCount);
+
+// One Client: a slot, and which of the Clients that have served it. A Stop or a Destroy ends the
+// generation it reaches, and the slot's next request starts the next one.
+struct ClientRef {
+  int slot = 0;
+  int generation = 0;
+  friend bool operator==(const ClientRef&, const ClientRef&) = default;
+};
 
 struct Request {
-  int slot = 0;
+  ClientRef client;
   Operation operation = Operation::Get;
   Behaviour behaviour = Behaviour::Prompt;
   friend bool operator==(const Request&, const Request&) = default;
@@ -60,8 +95,8 @@ struct Event {
   std::chrono::microseconds at{};  // from the start of the soak
   int thread = 0;
   Action action = Action::Initiate;
-  int slot = 0;      // the Client slot an Initiate, Stop or Destroy acts on
-  int request = -1;  // an index into Plan::requests, for Initiate and both cancellations
+  ClientRef client;            // the Client it reaches; for a request's events, the request's own
+  std::optional<int> request;  // an index into Plan::requests, for Initiate and both cancellations
   friend bool operator==(const Event&, const Event&) = default;
 };
 
@@ -70,6 +105,9 @@ struct Plan {
   std::chrono::milliseconds duration{};
   std::vector<Request> requests;
   std::vector<Event> events;  // in time order
+  // For each slot, how many requests each of its generations is planned to take: one generation
+  // more than the slot's Stops and Destroys, the last of which nothing ends.
+  std::array<std::vector<int>, clientSlots> requestsPerGeneration;
   friend bool operator==(const Plan&, const Plan&) = default;
 };
 
@@ -102,13 +140,12 @@ inline constexpr std::uint64_t maxCancelDelayMicros = 300'000;
 inline constexpr std::uint64_t earlyCancelMicros = 20'000;
 
 inline Behaviour drawBehaviour(Rng& rng) {
-  // Prompt 40, Late 20, Never 10, Twice 15, Garbled 15.
-  const int roll = rng.below(100);
-  if (roll < 40) return Behaviour::Prompt;
-  if (roll < 60) return Behaviour::Late;
-  if (roll < 70) return Behaviour::Never;
-  if (roll < 85) return Behaviour::Twice;
-  return Behaviour::Garbled;
+  int roll = rng.below(100);
+  for (const auto& [behaviour, percent] : behaviourWeights) {
+    if (roll < percent) return behaviour;
+    roll -= percent;
+  }
+  return behaviourWeights.back().first;  // unreachable while the weights sum to 100
 }
 
 }  // namespace detail
@@ -123,24 +160,31 @@ inline Behaviour drawBehaviour(Rng& rng) {
   plan.seed = seed;
   plan.duration = duration;
 
+  // Every Initiate, Stop and Destroy is drawn at a later moment than the last, so counting
+  // generations as they are drawn counts them in time order.
+  for (auto& generations : plan.requestsPerGeneration) generations.assign(1, 0);
   microseconds at{0};
   while (true) {
     at += microseconds(rng.below(2 * detail::meanGapMicros + 1));
     if (at >= duration) break;
     const int thread = rng.below(initiatorThreads);
     const int slot = rng.below(clientSlots);
+    auto& generations = plan.requestsPerGeneration.at(static_cast<std::size_t>(slot));
+    const ClientRef client{slot, static_cast<int>(generations.size()) - 1};
 
     if (rng.chance(detail::clientDisruptionPercent)) {
       const auto action = rng.chance(50) ? Action::Stop : Action::Destroy;
-      plan.events.push_back(Event{at, thread, action, slot, -1});
+      plan.events.push_back(Event{at, thread, action, client, std::nullopt});
+      generations.push_back(0);
       continue;
     }
+    ++generations.back();
 
-    const auto operation = static_cast<Operation>(rng.below(6));
+    const auto operation = static_cast<Operation>(rng.below(operationCount));
     const auto behaviour = detail::drawBehaviour(rng);
     const int request = static_cast<int>(plan.requests.size());
-    plan.requests.push_back(Request{slot, operation, behaviour});
-    plan.events.push_back(Event{at, thread, Action::Initiate, slot, request});
+    plan.requests.push_back(Request{client, operation, behaviour});
+    plan.events.push_back(Event{at, thread, Action::Initiate, client, request});
 
     // Each request's cancellations come from one thread, which need not be the one that
     // initiated it, and strictly after the initiation.
@@ -154,17 +198,17 @@ inline Behaviour drawBehaviour(Rng& rng) {
     const auto second = first + microseconds(1 + rng.below(detail::maxCancelDelayMicros / 3));
     const bool terminalFirst = rng.chance(50);
     if (roll < detail::terminalOnlyPercent) {
-      plan.events.push_back(Event{first, canceller, Action::CancelTerminal, slot, request});
+      plan.events.push_back(Event{first, canceller, Action::CancelTerminal, client, request});
     } else if (roll < detail::terminalOnlyPercent + detail::totalOnlyPercent) {
-      plan.events.push_back(Event{first, canceller, Action::CancelTotal, slot, request});
+      plan.events.push_back(Event{first, canceller, Action::CancelTotal, client, request});
     } else if (roll <
                detail::terminalOnlyPercent + detail::totalOnlyPercent + detail::bothPercent) {
       plan.events.push_back(Event{first, canceller,
                                   terminalFirst ? Action::CancelTerminal : Action::CancelTotal,
-                                  slot, request});
+                                  client, request});
       plan.events.push_back(Event{second, canceller,
                                   terminalFirst ? Action::CancelTotal : Action::CancelTerminal,
-                                  slot, request});
+                                  client, request});
     }
   }
 
@@ -220,26 +264,28 @@ inline Behaviour drawBehaviour(Rng& rng) {
       return "never answers";
     case Behaviour::Twice:
       return "answers twice";
-    case Behaviour::Garbled:
-      return "answers after a garbled copy";
+    case Behaviour::Malformed:
+      return "answers after malformed datagrams";
   }
   return "unknown";
 }
 
 [[nodiscard]] inline std::string describe(const Request& r) {
   std::ostringstream out;
-  out << "slot " << r.slot << (isV3(r.slot) ? " (v3) " : " (v2c) ") << nameOf(r.operation)
-      << ", Agent " << nameOf(r.behaviour);
+  out << "slot " << r.client.slot << (isV3(r.client.slot) ? " (v3)" : " (v2c)") << ", generation "
+      << r.client.generation << ": " << nameOf(r.operation) << ", Agent " << nameOf(r.behaviour);
   return out.str();
 }
 
 // One line for the log, so that two runs of a seed can be seen to have planned the same thing.
 [[nodiscard]] inline std::string summary(const Plan& plan) {
-  std::array<std::size_t, 5> counts{};
+  std::array<std::size_t, actionCount> counts{};
   for (const auto& e : plan.events) ++counts.at(static_cast<std::size_t>(e.action));
+  const auto count = [&counts](Action a) { return counts.at(static_cast<std::size_t>(a)); };
   std::ostringstream out;
-  out << counts[0] << " requests, " << counts[1] << " terminal and " << counts[2]
-      << " total cancellations, " << counts[3] << " stops, " << counts[4] << " destructions";
+  out << count(Action::Initiate) << " requests, " << count(Action::CancelTerminal)
+      << " terminal and " << count(Action::CancelTotal) << " total cancellations, "
+      << count(Action::Stop) << " stops, " << count(Action::Destroy) << " destructions";
   return out.str();
 }
 

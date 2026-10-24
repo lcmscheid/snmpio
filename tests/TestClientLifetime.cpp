@@ -19,6 +19,7 @@
 
 #include <snmpio/Client.hpp>
 
+#include "AfterHops.hpp"
 #include "CompletionOracle.hpp"
 #include "ScriptedAgent.hpp"
 #include "ScriptedV3Agent.hpp"
@@ -32,10 +33,12 @@
 namespace snmpio {
 namespace {
 
+using test::afterHops;
 using test::CompletionOracle;
 using test::respondWith;
 using test::ScriptedAgent;
 using test::ScriptedV3Agent;
+using test::sweepHops;
 using test::tableAgent;
 using test::targetFor;
 
@@ -353,19 +356,6 @@ TEST(ClientLifetime, DestroyedWhileOtherThreadsRunAndInitiate) {
     if (testing::Test::HasFailure()) return;
   }
 }
-
-// Runs `then` after `hops` trips through the io_context. Nothing in the public API lands an event
-// at a chosen step inside the Client, so the sweeps below try every step in turn: which hop count
-// lands in which step is Asio's business and may change, and the rule has to hold at all of them.
-void afterHops(net::IoContext& io, int hops, std::function<void()> then) {
-  // Built inside out, one post wrapped around the next, so that nothing here recurses.
-  for (int i = 0; i < hops; ++i) {
-    then = [&io, next = std::move(then)]() mutable { net::asio::post(io, std::move(next)); };
-  }
-  then();
-}
-
-constexpr int sweepHops = 8;
 
 // The matrix's mid-Walk cell destroys the Client before the Agent answers, and its cleanup then
 // reaches the strand ahead of the reply. The case worth guarding is the other order: the reply

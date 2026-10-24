@@ -1,13 +1,16 @@
 #include <gtest/gtest.h>
 
+#include <array>
 #include <atomic>
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <future>
 #include <latch>
 #include <memory>
 #include <optional>
+#include <semaphore>
 #include <span>
 #include <thread>
 #include <tuple>
@@ -18,6 +21,7 @@
 
 #include "CompletionOracle.hpp"
 #include "ScriptedAgent.hpp"
+#include "ScriptedV3Agent.hpp"
 
 // ADR-0009: destroying a Client stops it. Each test here ends a Client some way the disruption
 // matrix does not -- from inside a completion, from another thread, before the io_context ever ran
@@ -31,6 +35,7 @@ namespace {
 using test::CompletionOracle;
 using test::respondWith;
 using test::ScriptedAgent;
+using test::ScriptedV3Agent;
 using test::tableAgent;
 using test::targetFor;
 
@@ -144,6 +149,209 @@ TEST(ClientLifetime, DestroyedFromAnotherThreadStopsItsOutstandingRequests) {
   ASSERT_TRUE(finished) << "the request was still outstanding after the Client was destroyed";
   // Well before the request's own deadline, or it was the deadline that ended it.
   EXPECT_TRUE(oracle.completedExactlyOnce({make_error_code(Errc::ClientStopped)}));
+}
+
+// A countdown that can be waited on with a limit, which std::latch cannot, so a signal that never
+// comes is a failure rather than a hang. Counting down past zero does nothing more.
+class Countdown {
+ public:
+  explicit Countdown(int count) : m_left(count) {}
+  void countDown() {
+    if (--m_left == 0) m_done.set_value();
+  }
+  [[nodiscard]] bool waitFor(std::chrono::milliseconds limit) const {
+    return m_reached.wait_for(limit) == std::future_status::ready;
+  }
+
+ private:
+  std::atomic<int> m_left;
+  std::promise<void> m_done;
+  std::shared_future<void> m_reached = m_done.get_future().share();
+};
+
+// The disruption matrix's four waits, in the order the test below holds a request in each.
+constexpr std::array<const char*, 4> waitNames = {"AwaitingAReply", "BetweenRetransmissions",
+                                                  "QueuedBehindDiscovery", "MidWalk"};
+
+constexpr int runnerThreads = 4;
+// Requests thread B initiates on the doomed Client as it hands off, one per runner, so that some
+// may still be queued on the strand, not yet started, when destruction begins.
+constexpr std::size_t lastMinuteRequests = runnerThreads;
+// The survivor's Outstanding Requests at once: enough that B is always initiating, few enough that
+// the loop cannot run away while a sanitizer slows the destruction down.
+constexpr std::ptrdiff_t survivorOutstanding = 4;
+// Rounds, tuned to about a second under the default preset.
+constexpr int destructionRounds = 40;
+
+// Research §3.1's last case: ~Client on thread A while four threads run the io_context and thread
+// B initiates requests. When A destroys it, the doomed Client has an Outstanding Request in each of
+// the disruption matrix's four waits, and B's last requests may not have started; B goes on
+// initiating on a second Client sharing the io_context, the README's topology, which must not
+// notice. The runners vary the interleavings from round to round; there is no jitter and no seed,
+// which are the soak's (#32).
+void destroyWhileOthersRunAndInitiate(int round) {
+  SCOPED_TRACE(testing::Message() << "round " << round);
+  net::IoContext io;
+  // Each Agent signals once the request it holds is in its wait. Their responders run on the
+  // Agent's own strand, so the attempt counts in them need nothing more.
+  std::array<Countdown, waitNames.size()> inWait{Countdown(1), Countdown(1), Countdown(1),
+                                                 Countdown(1)};
+  ScriptedAgent silent(io, [&inWait, attempts = 0](const V2cMessage&) mutable {
+    if (++attempts == 1) inWait[0].countDown();
+    return std::optional<Pdu>{};
+  });
+  ScriptedAgent retransmitted(io, [&inWait, attempts = 0](const V2cMessage&) mutable {
+    if (++attempts == 2) inWait[1].countDown();
+    return std::optional<Pdu>{};
+  });
+  ScriptedV3Agent withholding(io, credentials(), [](const Pdu& request) { return request; });
+  withholding.setResponder([](const ScriptedV3Agent::Request&) { return std::nullopt; });
+  withholding.setOnDatagram([&inWait, datagrams = 0](std::span<const std::byte>) mutable {
+    if (++datagrams == 1) inWait[2].countDown();
+  });
+  std::vector<Varbind> rows;
+  for (std::uint32_t i = 1; i <= 6; ++i)
+    rows.emplace_back(systemGroup.child(i).child(0), Gauge32{i});
+  // Answers the first exchange and falls silent on the second, so the Walk stays mid-way.
+  ScriptedAgent walked(io,
+                       [&inWait, table = tableAgent(rows),
+                        exchanges = 0](const V2cMessage& msg) mutable -> std::optional<Pdu> {
+                         if (++exchanges == 1) return table(msg);
+                         if (exchanges == 2) inWait[3].countDown();
+                         return std::nullopt;
+                       });
+  ScriptedAgent answering(io, answerOnlySysDescr);
+
+  // A short attempt so the second goes out early, and enough of them that the request is still
+  // retransmitting at the long deadline.
+  auto retransmitting = targetFor(retransmitted, 250);
+  retransmitting.timeout = std::chrono::milliseconds(20);
+  auto discovering = targetFor(withholding, 0);
+  discovering.timeout = longDeadline;
+
+  std::optional<Client> doomed{std::in_place, io.get_executor()};
+  Client survivor(io.get_executor());
+
+  // The doomed Client's four waits, then B's last-minute requests. Each completes exactly once with
+  // ClientStopped, at destruction rather than at its deadline.
+  std::vector<CompletionOracle> doomedOracles;
+  doomedOracles.reserve(waitNames.size() + lastMinuteRequests);
+  for (std::size_t i = 0; i < waitNames.size() + lastMinuteRequests; ++i)
+    doomedOracles.emplace_back(io);
+  Countdown doomedCompleted(static_cast<int>(doomedOracles.size()));
+  const auto completes = [&doomedCompleted](net::ErrorCode, const auto&) {
+    doomedCompleted.countDown();
+  };
+
+  std::vector<std::thread> runners;
+  runners.reserve(runnerThreads);
+  for (int i = 0; i < runnerThreads; ++i) runners.emplace_back([&io] { io.run(); });
+
+  // Everything a completion handler signals lives out here rather than on B's stack, so that B
+  // returning cannot cut short a signal still being raised on a runner.
+  Countdown handedOff(1);
+  std::atomic<bool> destroyed = false;
+  std::counting_semaphore<survivorOutstanding> outstanding(survivorOutstanding);
+  Countdown answered(1);
+  std::vector<CompletionOracle> survivorOracles;
+  std::optional<CompletionOracle> afterDestruction;
+  bool afterDestructionCompleted = false;
+  // The survivor's Agent answers at once, so a request of its that took half a deadline sat one
+  // out: the ErrorCode alone would pass a reply that overtook its send and was reported only at the
+  // deadline.
+  std::atomic<bool> survivorLate = false;
+  const auto onTime = [&survivorLate](auto then) {
+    return [&survivorLate, then = std::move(then), initiated = std::chrono::steady_clock::now()](
+               net::ErrorCode, const Response&) {
+      if (std::chrono::steady_clock::now() - initiated > longDeadline / 2) survivorLate = true;
+      then();
+    };
+  };
+
+  // Thread B. It touches the doomed Client only before it hands off, and A destroys it only after,
+  // so the handoff is the one thing keeping B off freed memory and it hides no race in the Client.
+  std::thread initiator([&] {
+    doomed->asyncGet(slowTarget(silent), publicCommunity, {sysDescr},
+                     doomedOracles[0].handler(completes));
+    doomed->asyncGet(retransmitting, publicCommunity, {sysDescr},
+                     doomedOracles[1].handler(completes));
+    doomed->asyncGet(discovering, credentials(), {sysDescr}, doomedOracles[2].handler(completes));
+    doomed->asyncWalkCollect(slowTarget(walked), publicCommunity, systemGroup, WalkOptions{2},
+                             doomedOracles[3].handler(completes));
+    for (const auto& wait : inWait) std::ignore = wait.waitFor(longDeadline);
+    for (std::size_t i = 0; i < lastMinuteRequests; ++i) {
+      doomed->asyncGet(slowTarget(silent), publicCommunity, {sysDescr},
+                       doomedOracles[waitNames.size() + i].handler(completes));
+    }
+    const auto initiateOnSurvivor = [&] {
+      survivorOracles.emplace_back(io);
+      survivor.asyncGet(
+          slowTarget(answering), publicCommunity, {sysDescr},
+          survivorOracles.back().handler(onTime([&outstanding] { outstanding.release(); })));
+    };
+    // One of the survivor's requests is outstanding before the handoff, so destruction always has
+    // one to disturb however B is scheduled after it. Nothing is outstanding yet, so this never
+    // waits.
+    outstanding.acquire();
+    initiateOnSurvivor();
+    handedOff.countDown();
+
+    while (!destroyed && outstanding.try_acquire_for(longDeadline)) initiateOnSurvivor();
+
+    afterDestruction.emplace(io);
+    survivor.asyncGet(slowTarget(answering), publicCommunity, {sysDescr},
+                      afterDestruction->handler(onTime([&answered] { answered.countDown(); })));
+    afterDestructionCompleted = answered.waitFor(longDeadline);
+    // The loop's last requests may still be outstanding; the survivor is stopped only once they
+    // are not, or one would complete with ClientStopped for a reason that is not this test's. The
+    // limit outlasts their deadlines, so one that never had a reply shows up as Timeout.
+    for (std::ptrdiff_t i = 0; i < survivorOutstanding; ++i)
+      std::ignore = outstanding.try_acquire_for(2 * longDeadline);
+  });
+
+  // Thread A, this one.
+  std::array<bool, waitNames.size()> reached{};
+  for (std::size_t i = 0; i < inWait.size(); ++i)
+    reached.at(i) = inWait.at(i).waitFor(longDeadline);
+  const bool wasHandedOff = handedOff.waitFor(longDeadline);
+  doomed.reset();
+  destroyed = true;
+  // Well before any of the deadlines, or it was a deadline that ended a request.
+  const bool doomedFinished = doomedCompleted.waitFor(longDeadline / 2);
+
+  initiator.join();
+  survivor.stop();
+  for (auto* agent : {&silent, &retransmitted, &walked, &answering})
+    net::asio::dispatch(agent->executor(), [agent] { agent->close(); });
+  net::asio::dispatch(withholding.executor(), [&withholding] { withholding.close(); });
+  for (auto& runner : runners) runner.join();
+
+  for (std::size_t i = 0; i < reached.size(); ++i)
+    EXPECT_TRUE(reached.at(i)) << "the doomed Client's request never reached " << waitNames.at(i);
+  if (testing::Test::HasFailure()) return;
+  ASSERT_TRUE(wasHandedOff) << "thread B never handed off";
+  EXPECT_TRUE(doomedFinished) << "the doomed Client's requests were still outstanding";
+  for (std::size_t i = 0; i < doomedOracles.size(); ++i) {
+    EXPECT_TRUE(doomedOracles[i].completedExactlyOnce({make_error_code(Errc::ClientStopped)}))
+        << "the doomed Client's request " << i;
+  }
+  for (std::size_t i = 0; i < survivorOracles.size(); ++i) {
+    EXPECT_TRUE(survivorOracles[i].completedExactlyOnce({net::ErrorCode{}}))
+        << "the survivor's request " << i;
+  }
+  EXPECT_FALSE(survivorLate) << "a survivor's request completed only near its deadline";
+  EXPECT_TRUE(afterDestructionCompleted) << "the survivor's request after destruction never ended";
+  ASSERT_TRUE(afterDestruction.has_value());
+  EXPECT_TRUE(afterDestruction->completedExactlyOnce({net::ErrorCode{}}))
+      << "the survivor's request after destruction";
+}
+
+TEST(ClientLifetime, DestroyedWhileOtherThreadsRunAndInitiate) {
+  for (int round = 0; round < destructionRounds; ++round) {
+    destroyWhileOthersRunAndInitiate(round);
+    // One failing round says what the rest would, and each waits out its limits to say it.
+    if (testing::Test::HasFailure()) return;
+  }
 }
 
 // Runs `then` after `hops` trips through the io_context. Nothing in the public API lands an event

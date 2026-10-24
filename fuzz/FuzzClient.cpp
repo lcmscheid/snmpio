@@ -375,7 +375,14 @@ void run(Script& script) {
   }
   const bool stranded = !allCompleted();
 
+  // Before the Agent closes, it reads every request still waiting for it, so that the Ledger knows
+  // who owns each Message ID the Client used, including any a reply guessed before the Agent got
+  // to it. Loopback has already delivered them all; polling until nothing runs reads each one.
   client.stop();
+  agent.stopAnswering();
+  io.restart();
+  while (io.poll() != 0) {
+  }
   agent.close();
   io.restart();
   io.run();

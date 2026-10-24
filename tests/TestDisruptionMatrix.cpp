@@ -15,12 +15,14 @@
 #include <snmpio/Client.hpp>
 
 #include "CompletionOracle.hpp"
+#include "Deadlines.hpp"
 #include "ScriptedAgent.hpp"
 #include "ScriptedV3Agent.hpp"
 
 namespace snmpio {
 namespace {
 
+using test::atOnceLimit;
 using test::CompletionOracle;
 using test::ScriptedAgent;
 using test::ScriptedV3Agent;
@@ -165,10 +167,6 @@ constexpr auto deadline = std::chrono::milliseconds(100);
 // Longer than the deadline the request could still have running when it completed, so anything
 // it left behind reaches the Agent first.
 constexpr auto quietPeriod = 2 * deadline;
-// What a terminal cancellation or Stopping may take to complete the request. Waiting out the
-// deadline instead, as total does, takes the whole deadline, less the moment between the attempt
-// going out and the Agent seeing it.
-constexpr auto atOnceLimit = deadline / 2;
 // A request that never completes would otherwise hang the test, since the Agent's pending receive
 // keeps run() going; this turns it into a failure the oracle can report.
 constexpr auto backstopAfter = std::chrono::seconds(10);
@@ -353,7 +351,8 @@ TEST_P(DisruptionMatrix, CompletesExactlyOnceWithTheRulesCode) {
   // whatever the request was doing when it began. Only a silent Target makes this bite; elsewhere
   // the reply or the discovery ends the wait at once either way.
   if (disruption != Disruption::Total) {
-    EXPECT_LT(rig.completedAt - rig.disruptedAt, atOnceLimit) << "waited for the deadline";
+    EXPECT_LT(rig.completedAt - rig.disruptedAt, atOnceLimit(deadline))
+        << "waited for the deadline";
   }
 }
 

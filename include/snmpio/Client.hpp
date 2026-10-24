@@ -47,7 +47,9 @@ struct Response {
 // signal drops it at once, reply in hand or not; a `total` one stops it cleanly, retransmitting no
 // further but still taking a reply already on its way, which means waiting out the deadline of the
 // exchange in flight. Both complete with `operation_aborted` where no reply counted, never with
-// Errc::Timeout -- the Target's silence is not why the request ended.
+// Errc::Timeout -- the Target's silence is not why the request ended. Terminal outranks total in
+// either order: a request still outstanding when it hears `terminal` is dropped, whether `total`
+// came before it or follows it.
 // Cancelling one request queued behind a discovery leaves the discovery and its other waiters
 // running (ADR-0003). A Walk reads `total` differently, and ADR-0004 says why -- see asyncWalk.
 //
@@ -143,7 +145,7 @@ class Client {
   // core, collecting is the wrapper -- a Walk has no bounded size). Completion: void(ErrorCode).
   //
   // Cancellation is split: a `total` signal finishes the in-flight Batch and completes with
-  // Errc::WalkIncomplete; a `terminal` one drops everything immediately.
+  // Errc::WalkIncomplete; a `terminal` one drops everything immediately, total or no total.
   template <typename Token>
   auto asyncWalk(Target target, Community community, Oid base, WalkOptions options,
                  BatchHandler onBatch, Token&& token) {

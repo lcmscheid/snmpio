@@ -167,6 +167,12 @@ class HostileAgent {
     return it == m_seen.end() ? nullptr : &it->second;
   }
 
+  // From now on, read what the Client sent without answering it. A reply that guessed a Message ID
+  // or request-id ahead of the Client -- the next one, say, which a sequential counter (#33) makes
+  // easy -- can complete a request whose datagram this Agent has not read by the time every
+  // request has completed. Reading what is left is what lets the oracle attribute such a reply.
+  void stopAnswering() { m_answering = false; }
+
   void close() {
     net::ErrorCode ignored;
     std::ignore = m_socket.close(ignored);
@@ -291,6 +297,7 @@ class HostileAgent {
     const auto msg = decodeV2cMessage(datagram, ec);
     if (!msg) return;
     remember(msg->pdu.requestId, seenFrom(msg->pdu));
+    if (!m_answering) return;
 
     sendReplies(
         V2cReply{msg->community, respondTo(msg->pdu)},
@@ -326,6 +333,7 @@ class HostileAgent {
     seen.level = msg->header.level;
     seen.engineId = msg->security.engineId;
     remember(msg->header.msgId, std::move(seen));
+    if (!m_answering) return;
 
     const V3Message& request = *msg;
     sendReplies(
@@ -575,6 +583,7 @@ class HostileAgent {
 
   std::int32_t m_boots = 3;
   std::int32_t m_time = 1000;
+  bool m_answering = true;
   std::map<std::int32_t, Seen> m_seen;
   std::vector<std::int32_t> m_ids;
   net::UdpEndpoint m_from;

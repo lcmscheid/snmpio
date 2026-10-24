@@ -118,6 +118,25 @@ constexpr auto rethrow = [](const std::exception_ptr& e) {
   if (e) std::rethrow_exception(e);
 };
 
+// What a request's cancellation state records: every type that has reached it, not only the last.
+// Asio's state overwrites what it holds with each signal (`cancelled_ = in_filter_(in)`), although
+// cancelled() is documented as the types "that have been triggered" and clear() takes a mask. So a
+// total signal that follows a terminal one before the request has acted on it would read as total
+// alone, and the dropped request would go back to waiting out its deadline. A filter is where
+// Asio lets an operation shape that record; this one passes every type, as
+// enable_total_cancellation does, and keeps it. Nothing here clears the state, and a clear()
+// would last only until the next signal brought back what this has kept.
+class EveryCancellationSoFar {
+ public:
+  net::asio::cancellation_type_t operator()(net::asio::cancellation_type_t type) noexcept {
+    m_seen |= type;
+    return m_seen;
+  }
+
+ private:
+  net::asio::cancellation_type_t m_seen = net::asio::cancellation_type::none;
+};
+
 }  // namespace
 
 // Everything the Client knows, shared by every coroutine working on it (ADR-0009), so that the
@@ -685,13 +704,15 @@ net::Awaitable<net::ErrorCode> Client::Impl::transact(Ref self, Target target,
     if (pending->answered || m_stopping || aborted()) break;
 
     if (softCancelled()) {
-      // A total signal stops this request cleanly rather than dropping it: the exchange already
-      // in flight is allowed to finish, so wait out the rest of the deadline on a slot nothing
-      // can cancel -- a reply that arrives inside it still counts. No further retransmission,
-      // and no new exchange after this one, which is also what the Walk above wants when it
-      // stops at a Batch boundary (ADR-0004).
+      // Total lets the exchange in flight finish: wait out the rest of the deadline, so a reply
+      // inside it still counts, on a slot only terminal reaches, so terminal still drops the
+      // request at once (#74). No retransmission and no new exchange, which is also where the
+      // Walk above stops at a Batch boundary (ADR-0004). A child state is Asio's own way to
+      // narrow a slot, as its composed operations do.
+      const net::asio::cancellation_state terminalOnly(cancelState.slot(),
+                                                       net::asio::enable_terminal_cancellation());
       co_await pending->timer.async_wait(net::asio::bind_cancellation_slot(
-          net::asio::cancellation_slot(), redirect_error(use_awaitable, waitEc)));
+          terminalOnly.slot(), redirect_error(use_awaitable, waitEc)));
       break;
     }
   }
@@ -736,12 +757,14 @@ Client::RequestResult Client::Impl::toResult(const Pdu& response) {
 
 // The one place an operation decides which cancellation signals it can see: neither type is
 // thrown, and total is turned on explicitly because co_spawn's default filter would otherwise
-// drop it before any of the waits below could act on it. Per coroutine, at its start -- a Walk
+// drop it before any of the waits below could act on it. The state keeps every type it has seen,
+// so terminal is never lost to a total signal behind it. Per coroutine, at its start -- a Walk
 // calls it and so does each request underneath, which is why doWalk re-reads the state it needs
 // rather than holding it.
 net::Awaitable<void> Client::Impl::observeBothCancellationTypes() {
   co_await net::asio::this_coro::throw_if_cancelled(false);
-  co_await net::asio::this_coro::reset_cancellation_state(net::asio::enable_total_cancellation());
+  co_await net::asio::this_coro::reset_cancellation_state(EveryCancellationSoFar(),
+                                                          net::asio::enable_total_cancellation());
 }
 
 net::Awaitable<Client::RequestResult> Client::Impl::doRequest(Ref self, Target target, Auth auth,

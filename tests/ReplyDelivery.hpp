@@ -32,6 +32,13 @@ struct DeliveryCounts {
   int delayed = 0;
   int duplicated = 0;
   int truncated = 0;
+
+  DeliveryCounts& operator+=(const DeliveryCounts& other) {
+    delayed += other.delayed;
+    duplicated += other.duplicated;
+    truncated += other.truncated;
+    return *this;
+  }
 };
 
 // The sending half both Agents share. Lives on the Agent's strand, as everything in an Agent does:

@@ -180,6 +180,11 @@ Why this shape and not the other two:
   authenticated and decrypted one after another, however many threads run the `io_context`. A
   Client per Agent spreads that work across the pool, and confines a misbehaving Agent's traffic to
   its own strand.
+- **What a Client per Agent gives up** is what ADR-0003 has one Client own: its Engine and key
+  caches, shared across every Target it polls. Clients do not share them, so an Engine reachable at
+  two Targets is discovered twice, and each Client derives the Master Key for its own Credentials.
+  Where several Targets front one Engine, poll them through one Client. Where one password serves
+  many Agents, each Client pays the derivation once, on its strand.
 - **Completion handlers run on the caller's executor** — the one bound to the token, or the
   Client's strand when none is. They can run after the Client is gone, so a handler must not reach
   back into a destroyed Client, or into an owner that went with it.
@@ -198,11 +203,12 @@ test run, under ASan and TSan in CI, and carries the `stress` label:
 ```sh
 ctest --preset default -L stress                         # the soak alone
 SNMPIO_SOAK_SECONDS=600 ctest --preset tsan -L stress    # for ten minutes, under TSan
-SNMPIO_SOAK_SEED=1234 ctest --preset default -L stress   # replay the seed a failure printed
+SNMPIO_SOAK_SEED=1234 SNMPIO_SOAK_SECONDS=2 \
+  ctest --preset default -L stress                       # replay what a failure printed
 ```
 
-A replayed seed repeats the same requests, cancellations, stops and destructions, at the same
-moments and from the same threads. The interleavings around them are the scheduler's, so a seed
+A replayed seed and duration repeat the same requests, cancellations, stops and destructions, in
+the same order, due at the same moments, and from the same threads. The interleavings around them are the scheduler's, so a seed
 that failed once usually fails again rather than always.
 
 ## Errors

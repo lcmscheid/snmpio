@@ -45,9 +45,10 @@
 // another's requests fails it (C3).
 //
 // The seed is printed, and SNMPIO_SOAK_SEED replays it: the same requests, cancellations, stops
-// and destructions, at the same moments and from the same threads. SNMPIO_SOAK_SECONDS sets the
-// duration, two seconds by default. The threads' interleavings around the plan are not the seed's
-// to repeat, so a seed that failed once fails again more often than not, rather than every time.
+// and destructions, in the same order, due at the same moments, and from the same threads.
+// SNMPIO_SOAK_SECONDS sets the duration, two seconds by default. The threads' interleavings around
+// the plan are not the seed's to repeat, so a seed that failed once fails again more often than
+// not, rather than every time.
 
 namespace snmpio::test::soak {
 namespace {
@@ -59,12 +60,15 @@ using std::chrono::steady_clock;
 // request names its Behaviour as the component after soakRoot, and the Agent reads it from there.
 const Oid soakRoot{1, 3, 6, 1, 4, 1, 32, 1};
 constexpr std::uint32_t rowsPerBehaviour = 6;
-constexpr std::uint32_t behaviours = 5;
+constexpr std::uint32_t behaviourCount = 5;
 
 constexpr auto attemptTimeout = milliseconds(200);
 constexpr int retries = 1;
 constexpr auto wholeDeadline = attemptTimeout * (retries + 1);
 constexpr WalkOptions walkOptions{2};
+// How long a request may still take once a terminal signal has gone out: half an attempt's
+// deadline, as Deadlines.hpp's atOnceLimit reasons, so that one ignored until a deadline shows.
+constexpr auto terminalLimit = attemptTimeout / 2;
 // A late reply lands in this window, well inside the first attempt's deadline.
 constexpr auto lateFrom = milliseconds(20);
 constexpr auto lateSpread = milliseconds(80);
@@ -102,7 +106,7 @@ Behaviour behaviourOf(const Pdu& pdu) {
   const Oid& name = pdu.varbinds.front().name;
   if (name.size() <= soakRoot.size() || !soakRoot.isPrefixOf(name)) return Behaviour::Prompt;
   const auto b = name[soakRoot.size()];
-  if (b < 1 || b > behaviours) return Behaviour::Prompt;
+  if (b < 1 || b > behaviourCount) return Behaviour::Prompt;
   return static_cast<Behaviour>(b);
 }
 
@@ -133,7 +137,7 @@ ReplyDelivery deliveryFor(const Pdu& request) {
 const std::vector<Varbind>& mib() {
   static const std::vector<Varbind> rows = [] {
     std::vector<Varbind> out;
-    for (std::uint32_t b = 1; b <= behaviours; ++b) {
+    for (std::uint32_t b = 1; b <= behaviourCount; ++b) {
       for (std::uint32_t k = 1; k <= rowsPerBehaviour; ++k)
         out.emplace_back(soakRoot.child(b).child(k), Gauge32{k});
     }
@@ -338,6 +342,7 @@ struct Record {
   // The cancelling thread's.
   bool terminal = false;
   bool total = false;
+  steady_clock::time_point terminalAt;
 
   // The completion's, on the caller strand. Whether Stopping had begun on the request's Client is
   // read there too: Stopping sets the flag before it does anything, and its ClientStopped reaches
@@ -418,11 +423,7 @@ class Soak {
     // A run whose Agents never misbehaved proved less than it says. Asked only of a plan with
     // enough requests of the kind that a few lost to Stopping cannot account for none at all.
     DeliveryCounts sum;
-    for (const auto& agent : m_agents) {
-      sum.delayed += agent->deliveries().delayed;
-      sum.duplicated += agent->deliveries().duplicated;
-      sum.truncated += agent->deliveries().truncated;
-    }
+    for (const auto& agent : m_agents) sum += agent->deliveries();
     const auto planned = [this](Behaviour b) {
       return std::ranges::count(m_plan.requests, b, &Request::behaviour) >= minimumPlanned;
     };
@@ -552,6 +553,7 @@ class Soak {
     record.initiated.wait(false, std::memory_order_acquire);
     if (e.action == Action::CancelTerminal) {
       record.terminal = true;
+      record.terminalAt = steady_clock::now();
       record.signal.emit(net::asio::cancellation_type::terminal);
     } else {
       record.total = true;
@@ -564,7 +566,10 @@ class Soak {
     std::vector<net::ErrorCode> allowed;
     allowed.push_back(request.behaviour == Behaviour::Never ? make_error_code(Errc::Timeout)
                                                             : net::ErrorCode{});
-    if (record.terminal || record.total) allowed.emplace_back(net::asio::error::operation_aborted);
+    // Client.hpp's rule: terminal is operation_aborted everywhere, and outranks total; total is
+    // operation_aborted for a request and WalkIncomplete for a Walk.
+    if (record.terminal || (record.total && !isWalk(request.operation)))
+      allowed.emplace_back(net::asio::error::operation_aborted);
     if (record.total && isWalk(request.operation))
       allowed.push_back(make_error_code(Errc::WalkIncomplete));
     if (record.clientWasStopping) allowed.push_back(make_error_code(Errc::ClientStopped));
@@ -588,6 +593,19 @@ class Soak {
 
     if (record.batchAfterStopping) {
       ADD_FAILURE() << context() << ": a Batch was delivered after Stopping returned";
+      failed = true;
+    }
+    // A terminal signal drops a request at once, whatever wait it is in (L2): one that ended long
+    // after it was ignored or lost on its way to the strand, and waited out something else (#71).
+    // v2c only: a v3 Client's strand can be busy for longer than this deriving a Master Key, which
+    // the signal then queues behind -- threat model B7, until #37 moves the derivation off it.
+    if (record.terminal && !isV3(request.slot) &&
+        record.completedAt - record.terminalAt > terminalLimit) {
+      ADD_FAILURE() << context() << ": completed "
+                    << std::chrono::duration_cast<milliseconds>(record.completedAt -
+                                                                record.terminalAt)
+                           .count()
+                    << " ms after its terminal cancellation";
       failed = true;
     }
     // Deadlines under concurrency: no request gives up early (R5).

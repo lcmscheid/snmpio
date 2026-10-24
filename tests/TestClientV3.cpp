@@ -1,9 +1,12 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <chrono>
+#include <cstdint>
 #include <functional>
 #include <optional>
 #include <span>
+#include <string>
 #include <vector>
 
 #include <snmpio/Client.hpp>
@@ -945,6 +948,126 @@ TEST_P(QueuedBehindDiscovery, IsAbortedAndLeavesTheDiscoveryRunning) {
 INSTANTIATE_TEST_SUITE_P(ClientV3, QueuedBehindDiscovery,
                          testing::Values(net::asio::cancellation_type::terminal,
                                          net::asio::cancellation_type::total));
+
+// A total signal lets the reply already on its way count, and here that reply is a Report asking
+// for a second attempt. A retryable Report is not an answer to the request, only a call for another
+// exchange, which total forbids: the request ends with operation_aborted and makes no second
+// attempt (#73). Depending on the Report, that attempt would be a fresh exchange or the first
+// datagram of a rediscovery. The Agent goes silent after the Report until the request ends, so
+// either would sit out a whole deadline.
+struct RetryableReport {
+  std::uint32_t counter;
+  SecurityLevel level;  // signed, so the Client acts on its clock; or not, so it forgets the Engine
+  std::int32_t bootsInTheReport;  // the Agent's default is 3, the boots discovery cached
+  int nextRequestDatagrams;       // what the request after the cancelled one costs; see the table
+  const char* name;
+};
+
+class TotalCancelThenRetryableReport : public testing::TestWithParam<RetryableReport> {
+ protected:
+  static constexpr auto deadline = std::chrono::seconds(4);
+
+  TotalCancelThenRetryableReport() {
+    m_f.agent = &m_agent;
+    m_target.timeout = deadline;
+  }
+
+  // Sends the request that a total signal cancels as the Agent answers it with this row's Report.
+  // The Agent's clock moves to the Report's boots as it does. The Agent is silent from then until
+  // the request ends, and compliant after. `then` runs as the request ends.
+  void sendTheCancelledRequest(std::function<void()> then) {
+    m_agent.setResponder(
+        [this](const ScriptedV3Agent::Request& req) -> std::optional<ScriptedV3Agent::Reply> {
+          if (m_cancelled.ended) return m_agent.behaveLikeACompliantAgent(req);
+          if (m_cancelled.reported) return std::nullopt;
+          if (req.message.scoped.pdu.varbinds.empty())
+            return m_agent.behaveLikeACompliantAgent(req);
+          m_cancelled.reported = true;
+          m_emittedAt = std::chrono::steady_clock::now();
+          m_signal.emit(net::asio::cancellation_type::total);
+          m_agent.setBoots(GetParam().bootsInTheReport);
+          return ScriptedV3Agent::report(GetParam().counter, GetParam().level);
+        });
+
+    m_f.client.asyncGet(
+        m_target, credentials(), {sysDescr},
+        net::asio::bind_cancellation_slot(
+            m_signal.slot(), [this, then = std::move(then)](net::ErrorCode ec, const Response&) {
+              m_cancelled.took = std::chrono::steady_clock::now() - m_emittedAt;
+              m_cancelled.ec = ec;
+              m_cancelled.datagrams = m_agent.requestsSeen();
+              m_cancelled.ended = true;
+              then();
+            }));
+  }
+
+  Fixture m_f;
+  ScriptedV3Agent m_agent{m_f.io, credentials(), echoAnswer};
+  Target m_target = targetFor(m_agent, 0);
+
+  // What the cancelled request did, as it ended.
+  struct {
+    bool reported = false;
+    bool ended = false;
+    net::ErrorCode ec;
+    int datagrams = 0;                           // the Agent had seen, discovery's included
+    std::chrono::steady_clock::duration took{};  // from the signal to the end
+  } m_cancelled;
+
+ private:
+  net::asio::cancellation_signal m_signal;
+  std::chrono::steady_clock::time_point m_emittedAt;
+};
+
+TEST_P(TotalCancelThenRetryableReport, EndsWithoutASecondAttempt) {
+  sendTheCancelledRequest([this] { m_f.finish(); });
+  m_f.run();
+
+  ASSERT_TRUE(m_cancelled.reported) << "the Agent never sent the Report";
+  EXPECT_EQ(m_cancelled.ec, net::asio::error::operation_aborted) << m_cancelled.ec.message();
+  // The discovery's two datagrams and the request's one. A fourth is the second attempt.
+  EXPECT_EQ(m_cancelled.datagrams, 3);
+  EXPECT_LT(m_cancelled.took, deadline / 2) << "waited out the second attempt";
+}
+
+// What the Report said about the Engine still reaches the cache: it is as true for the next request
+// as it would have been for the retry, and must not hinge on whether the request that heard it is
+// still wanted. The next request's datagram count shows what the Client made of it; each row's
+// count differs from the one a cache left as it was would cost.
+TEST_P(TotalCancelThenRetryableReport, StillActsOnTheReportForTheNextRequest) {
+  m_f.expectedCompletions = 2;
+  sendTheCancelledRequest([this] {
+    m_f.client.asyncGet(m_target, credentials(), {sysUpTime}, m_f.requestToken());
+    m_f.finish();
+  });
+  m_f.run();
+
+  ASSERT_EQ(m_cancelled.ec, net::asio::error::operation_aborted) << m_cancelled.ec.message();
+  EXPECT_FALSE(m_f.ec) << "the next request failed: " << m_f.ec.message();
+  EXPECT_EQ(m_agent.requestsSeen() - m_cancelled.datagrams, GetParam().nextRequestDatagrams)
+      << "the cancelled request's Report never reached the Engine cache";
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    ClientV3, TotalCancelThenRetryableReport,
+    testing::Values(
+        // A signed later boots is adopted, so the next request is timely at once: one datagram.
+        // Unadopted, it would draw a notInTimeWindows of its own and retry: two.
+        RetryableReport{ScriptedV3Agent::notInTimeWindows, SecurityLevel::AuthNoPriv, 4, 1,
+                        "NotInTimeWindows"},
+        // A signed lower boots forgets the Engine's clock (ADR-0010), so the next request
+        // rediscovers the Engine, both phases, before it goes out: three. Remembered, it would be
+        // untimely, forget the clock at its own Report and rediscover before retrying: four.
+        RetryableReport{ScriptedV3Agent::notInTimeWindows, SecurityLevel::AuthNoPriv, 2, 3,
+                        "BootsRegression"},
+        // An unknownEngineIds forgets which Engine the Target reaches, so the next request
+        // re-runs the identity phase first: two. The Engine keeps its synced clock, so there is
+        // no time-sync phase. Remembered, the request would go straight out: one.
+        RetryableReport{ScriptedV3Agent::unknownEngineIds, SecurityLevel::NoAuthNoPriv, 3, 2,
+                        "UnknownEngineIds"}),
+    [](const testing::TestParamInfo<RetryableReport>& param) {
+      return std::string(param.param.name);
+    });
 
 TEST(ClientV3Walk, CollectsTheWholeSubtreeAcrossSeveralRounds) {
   Fixture f;

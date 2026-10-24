@@ -9,7 +9,6 @@
 #include <cstdint>
 #include <cstdlib>
 #include <iostream>
-#include <limits>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -62,11 +61,13 @@ namespace {
 using std::chrono::milliseconds;
 using std::chrono::steady_clock;
 
-// The MIB every Agent serves: rowsPerBehaviour rows under soakRoot.b for each Behaviour b. A
-// request names its Behaviour as the component after soakRoot, and the Agent reads it from there.
+// The MIB every Agent serves: a Subtree of its own for each planned request, soakRoot.b.i for
+// request i with Behaviour b, holding rowsPerRequest rows. The Agent reads the Behaviour from the
+// component after soakRoot and the request from the one after that, so every exchange -- a Walk's
+// included -- says which request it belongs to.
 const Oid soakRoot{1, 3, 6, 1, 4, 1, 32, 1};
-constexpr std::uint32_t rowsPerBehaviour = 6;
-// The highest Behaviour, as the sub-identifier its rows sit under.
+constexpr std::uint32_t rowsPerRequest = 6;
+// The highest Behaviour, as the sub-identifier its Subtrees sit under.
 constexpr auto lastBehaviourArc = static_cast<std::uint32_t>(behaviourCount);
 
 constexpr auto attemptTimeout = milliseconds(200);
@@ -141,15 +142,26 @@ ReplyDelivery deliveryFor(const Pdu& request) {
   return d;
 }
 
-const std::vector<Varbind>& mib() {
-  static const std::vector<Varbind> rows = [] {
-    std::vector<Varbind> out;
-    for (std::uint32_t b = 1; b <= lastBehaviourArc; ++b) {
-      for (std::uint32_t k = 1; k <= rowsPerBehaviour; ++k)
-        out.emplace_back(soakRoot.child(b).child(k), Gauge32{k});
-    }
-    return out;
-  }();
+// The request's Subtree a name lies in, soakRoot.b.i, if it lies in one.
+std::optional<Oid> subtreeOf(const Oid& name) {
+  const auto depth = soakRoot.size() + 2;
+  if (name.size() < depth || !soakRoot.isPrefixOf(name)) return std::nullopt;
+  return Oid(std::span(name.begin(), name.begin() + static_cast<std::ptrdiff_t>(depth)));
+}
+
+// The rows of the Subtree a name lies in, and what follows them. An even request's Subtree runs on
+// into the next request's first row, so a Walk of it ends by leaving its Subtree; an odd one's
+// ends the MIB, so a Walk of it ends at endOfMibView. Both are ways a Walk can end.
+std::vector<Varbind> rowsAround(const Oid& name) {
+  std::vector<Varbind> rows;
+  const auto base = subtreeOf(name);
+  if (!base) return rows;
+  for (std::uint32_t k = 1; k <= rowsPerRequest; ++k) rows.emplace_back(base->child(k), Gauge32{k});
+  const auto request = (*base)[base->size() - 1];
+  if (request % 2 == 0) {
+    const auto next = Oid(std::span(base->begin(), base->end() - 1));
+    rows.emplace_back(next.child(request + 1).child(1), Gauge32{1});
+  }
   return rows;
 }
 
@@ -169,7 +181,7 @@ Pdu answer(const Pdu& request) {
   const auto count = request.type == PduType::GetBulk
                          ? static_cast<std::size_t>(request.maxRepetitions())
                          : std::size_t{1};
-  for (const auto& vb : mib()) {
+  for (const auto& vb : rowsAround(from)) {
     if (p.varbinds.size() >= count) break;
     if (from < vb.name) p.varbinds.push_back(vb);
   }
@@ -178,13 +190,13 @@ Pdu answer(const Pdu& request) {
   return p;
 }
 
-// Which planned request a PDU belongs to: the last sub-identifier of a name nameFor() made. A
-// Walk's names are a Subtree's, one shorter, and belong to no single request.
+// Which planned request a PDU belongs to: the Subtree its first name lies in. Engine Discovery's
+// requests name nothing, and belong to none.
 std::optional<std::size_t> requestIndexOf(const Pdu& pdu) {
   if (pdu.varbinds.empty()) return std::nullopt;
-  const Oid& name = pdu.varbinds.front().name;
-  if (name.size() != soakRoot.size() + 3 || !soakRoot.isPrefixOf(name)) return std::nullopt;
-  return static_cast<std::size_t>(name[name.size() - 1]);
+  const auto base = subtreeOf(pdu.varbinds.front().name);
+  if (!base) return std::nullopt;
+  return static_cast<std::size_t>((*base)[base->size() - 1]);
 }
 
 bool staysSilent(const Pdu& pdu) {
@@ -407,18 +419,24 @@ struct Record {
   bool total = false;
   steady_clock::time_point terminalAt;
 
-  // When the Agent first sent a whole answer to the request, if it did: written on the Agent's
-  // strand, as a count of steady_clock ticks.
-  std::atomic<steady_clock::rep> firstAnswerAt = std::numeric_limits<steady_clock::rep>::max();
+  // When the Agent first sent a whole answer to each exchange of the request, keyed by the name
+  // the exchange asked from: one for a request, one per step for a Walk. Retransmissions ask from
+  // the same name, so only the first answer to each counts. Written on the Agent's strand.
+  mutable std::mutex answersMutex;
+  std::map<Oid, steady_clock::time_point> firstAnswers;
 
-  void noteAnswer() {
-    const auto now = steady_clock::now().time_since_epoch().count();
-    auto seen = firstAnswerAt.load();
-    while (now < seen && !firstAnswerAt.compare_exchange_weak(seen, now)) {
-    }
+  void noteAnswer(const Oid& askedFrom) {
+    const auto now = steady_clock::now();
+    const std::scoped_lock lock(answersMutex);
+    firstAnswers.try_emplace(askedFrom, now);
   }
+  // Whether every exchange the request was answered in had its answer on the way by t. A request
+  // can succeed only once each of its exchanges is answered, so one that succeeded after a
+  // terminal signal sent at t, with an exchange answered only later, ignored the signal.
   [[nodiscard]] bool answeredBy(steady_clock::time_point t) const {
-    return firstAnswerAt.load() <= t.time_since_epoch().count();
+    const std::scoped_lock lock(answersMutex);
+    return !firstAnswers.empty() &&
+           std::ranges::all_of(firstAnswers, [t](const auto& kv) { return kv.second <= t; });
   }
 
   // The completion's, on the caller strand. Whether Stopping had begun on the request's Client is
@@ -445,13 +463,15 @@ bool heldToTiming(const Request& r) {
   return !isV3(r.client.slot);
 }
 
-// One row of the MIB per request, spread over the rows, with the request's index after it so that
-// no two requests name the same instance.
-Oid nameFor(const Request& r, int index) {
-  const auto row = 1 + (static_cast<std::uint32_t>(index) % rowsPerBehaviour);
+// The request's own Subtree, which a Walk walks: soakRoot.b.i, as subtreeOf() reads it back.
+Oid subtreeFor(const Request& r, int index) {
   return soakRoot.child(static_cast<std::uint32_t>(r.behaviour))
-      .child(row)
       .child(static_cast<std::uint32_t>(index));
+}
+
+// One row of the request's Subtree, spread over the rows, for a request that is not a Walk.
+Oid nameFor(const Request& r, int index) {
+  return subtreeFor(r, index).child(1 + (static_cast<std::uint32_t>(index) % rowsPerRequest));
 }
 
 class Soak {
@@ -461,7 +481,9 @@ class Soak {
       auto d = deliveryFor(request);
       const auto index = requestIndexOf(request);
       if (index && *index < m_records.size()) {
-        d.onAnswer = [record = &m_records[*index]] { record->noteAnswer(); };
+        d.onAnswer = [record = &m_records[*index], askedFrom = request.varbinds.front().name] {
+          record->noteAnswer(askedFrom);
+        };
       }
       return d;
     };
@@ -613,7 +635,7 @@ class Soak {
                                                record.oracle->handler(std::move(then)));
     };
     const Oid name = nameFor(request, index);
-    const Oid base = soakRoot.child(static_cast<std::uint32_t>(request.behaviour));
+    const Oid base = subtreeFor(request, index);
 
     switch (request.operation) {
       case Operation::Get:
@@ -672,15 +694,15 @@ class Soak {
     // What the Agent's behaviour alone ends the request with, unless a terminal signal rules it
     // out. The signal reaches the strand ahead of any answer sent after it, and the Client weighs
     // terminal ahead of an answer in hand, so such an answer cannot complete the request. Nor can
-    // a deadline the signal went out before: the expiry reaches the strand behind it. Two gaps
-    // remain: an answer sent before the signal may still complete it, which is right for a Client
-    // that got there first and wrong for one that ignored the signal; and a Walk's answers name no
-    // single request, so a Walk's success stays allowed.
+    // a deadline the signal went out before: the expiry reaches the strand behind it. One gap
+    // remains: an answer sent before the signal may still complete it, which is right for a Client
+    // that got there first and wrong for one that ignored the signal. The two look the same from
+    // here; ClientCancel's sweep of a terminal signal across a reply in hand (#74) pins that race
+    // deterministically.
     if (request.behaviour == Behaviour::Never) {
       if (!record.terminal || record.terminalAt >= record.initiatedAt + wholeDeadline)
         allowed.push_back(make_error_code(Errc::Timeout));
-    } else if (!record.terminal || isWalk(request.operation) ||
-               record.answeredBy(record.terminalAt)) {
+    } else if (!record.terminal || record.answeredBy(record.terminalAt)) {
       allowed.emplace_back();
     }
     // Client.hpp's rule: terminal is operation_aborted everywhere, and outranks total; total is
@@ -733,9 +755,9 @@ class Soak {
     if (!code && isWalk(request.operation)) {
       const auto rows =
           request.operation == Operation::Walk ? record.batched.load() : record.collected;
-      if (rows != rowsPerBehaviour) {
+      if (rows != rowsPerRequest) {
         ADD_FAILURE() << context() << ": a complete Walk handed back " << rows << " rows, not "
-                      << rowsPerBehaviour;
+                      << rowsPerRequest;
         failed = true;
       }
     }

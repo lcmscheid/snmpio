@@ -24,6 +24,7 @@
 #include <snmpio/Client.hpp>
 
 #include "CompletionOracle.hpp"
+#include "MasterKeys.hpp"
 #include "ReplyDelivery.hpp"
 #include "ScriptedAgent.hpp"
 #include "ScriptedV3Agent.hpp"
@@ -93,7 +94,8 @@ constexpr int failuresInDetail = 20;
 
 const Community soakCommunity{Community("public")};
 
-// Two Security Levels among the v3 slots, so that one run takes authPriv's path as well.
+// Two Security Levels among the v3 slots, so that one run takes authPriv's path as well. These are
+// the Agents' Credentials; the Clients get clientCredentialsFor's.
 Credentials credentialsFor(int slot) {
   if (slot % 4 == 1) {
     return Credentials{"bert",       SecurityLevel::AuthNoPriv, AuthProtocol::Sha256,
@@ -101,6 +103,17 @@ Credentials credentialsFor(int slot) {
   }
   return Credentials{"ernie",      SecurityLevel::AuthPriv, AuthProtocol::Sha256,
                      "maplesyrup", PrivProtocol::Aes128,    "rubberduck"};
+}
+
+// The last v3 slot, an authPriv one, whose Clients are handed the passwords and derive both Master
+// Keys on their own strands, so that the soak takes that path too.
+constexpr int passwordSlot = clientSlots - 1;
+static_assert(isV3(passwordSlot));
+
+// What every Client in a v3 slot is handed: as the README's deployment does, each password replaced
+// by its Master Key, derived before the soak starts -- but for passwordSlot's, which keep them.
+Credentials clientCredentialsFor(int slot) {
+  return slot == passwordSlot ? credentialsFor(slot) : test::withMasterKeys(credentialsFor(slot));
 }
 
 // ---------------------------------------------------------------------------
@@ -455,12 +468,12 @@ bool isWalk(Operation op) {
   return op == Operation::Walk || op == Operation::WalkCollect;
 }
 
-// Whether the soak holds a request to how long it takes, as well as to its code. v2c only: a v3
-// Client's strand can be busy for longer than any of these bounds deriving a Master Key, and
-// everything queued on it waits behind the derivation -- threat model B7, until #37 moves the
-// derivation off the strand.
+// Whether the soak holds a request to how long it takes, as well as to its code. All but
+// passwordSlot's: a Client handed a password derives its Master Key on its strand, and under TSan a
+// terminal signal can queue behind that for longer than either bound -- threat model B7, until #80
+// moves the derivation off the strand and removes this.
 bool heldToTiming(const Request& r) {
-  return !isV3(r.client.slot);
+  return r.client.slot != passwordSlot;
 }
 
 // The request's own Subtree, which a Walk walks: soakRoot.b.i, as subtreeOf() reads it back.
@@ -488,6 +501,8 @@ class Soak {
       return d;
     };
     for (int slot = 0; slot < clientSlots; ++slot) {
+      m_credentials.push_back(isV3(slot) ? std::optional(clientCredentialsFor(slot))
+                                         : std::nullopt);
       m_agents.push_back(std::make_unique<SoakAgent>(m_clientIo, slot, delivery));
       m_slots.push_back(
           std::make_unique<Slot>(m_clientIo.get_executor(),
@@ -610,7 +625,8 @@ class Soak {
 
       const auto target = m_agents.at(static_cast<std::size_t>(request.client.slot))->target();
       if (isV3(request.client.slot)) {
-        initiateOn(instance->client(), target, credentialsFor(request.client.slot), request, index,
+        initiateOn(instance->client(), target,
+                   *m_credentials.at(static_cast<std::size_t>(request.client.slot)), request, index,
                    record);
       } else {
         initiateOn(instance->client(), target, soakCommunity, request, index, record);
@@ -781,6 +797,9 @@ class Soak {
   net::asio::executor_work_guard<net::IoContext::executor_type> m_callerWork =
       net::asio::make_work_guard(m_callerIo);
   std::vector<std::unique_ptr<SoakAgent>> m_agents;
+  // Per slot, for the v3 ones: what every Client in the slot is handed. Written before any thread
+  // starts, and only read after.
+  std::vector<std::optional<Credentials>> m_credentials;
   std::vector<std::unique_ptr<Slot>> m_slots;
   std::vector<Record> m_records;
   Completions m_completions;

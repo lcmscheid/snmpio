@@ -3,6 +3,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -77,6 +78,13 @@ enum class SecurityLevel : std::uint8_t {
 //
 // Independent of Target by construction (CONTEXT.md): the same Credentials may be used against
 // many Targets. What binds a key to one Engine is localizeKey(), not this type.
+//
+// Either secret may be given as the Master Key passwordToKey() derives from it, in place of the
+// password: derived once, on a thread of the caller's choosing, and handed to every Client, it
+// leaves no I/O thread a megabyte to hash and no Client a plaintext password to hold. A Master Key
+// must be keySize(authProtocol) Octets -- the privacy one too, since USM derives it under the
+// authentication protocol's hash -- and stands *instead of* its password, which is then left
+// empty. A Client refuses either mistake with Errc::ArgumentOutOfRange before it sends anything.
 struct Credentials {
   std::string userName;
   SecurityLevel level = SecurityLevel::NoAuthNoPriv;
@@ -86,31 +94,43 @@ struct Credentials {
   // USM derives the privacy key with the *authentication* protocol's hash, so there is no second
   // protocol to name here -- only a second secret.
   std::string privPassword;
+  // Last, so that a braced initialiser naming the six fields above still means what it did; and
+  // initialised, redundantly, because that is what keeps GCC's and Clang's
+  // -Wmissing-field-initializers quiet about such an initialiser leaving these two out.
+  std::optional<Octets> authMasterKey = std::nullopt;
+  std::optional<Octets> privMasterKey = std::nullopt;
 };
 
-// RFC 3414 appendix A.2: the password repeated to exactly one megabyte and hashed once. The
-// megabyte is the point -- it is what makes a dictionary attack against the Master Key expensive
-// -- so this is not a function to call on a hot path.
+// RFC 3414 appendix A.2: the password repeated to exactly one megabyte and hashed once, giving
+// the Master Key. The megabyte is the point -- it is what makes a dictionary attack against the
+// Master Key expensive -- so this is not a function to call on a hot path, nor on an I/O thread:
+// call it once per password, where blocking for a few milliseconds is harmless, and hand the
+// result to every Client in Credentials::authMasterKey or privMasterKey.
 [[nodiscard]] Octets passwordToKey(AuthProtocol p, std::string_view password, net::ErrorCode& ec);
 
 // RFC 3414 section 2.6: hash(masterKey || engineId || masterKey). Binds a Master Key to one
-// Authoritative Engine, so a key lifted from one Engine is useless against another.
+// Authoritative Engine, so a key lifted from one Engine is useless against another. One short
+// hash: this is the authentication key's whole per-Engine cost once the Master Key is known.
 [[nodiscard]] Octets localizeKey(AuthProtocol p, std::span<const std::byte> masterKey,
                                  std::span<const std::byte> engineId, net::ErrorCode& ec);
 
-// passwordToKey followed by localizeKey. This is the expensive pair the Client caches per
-// (Credentials, engineID); it is deliberately not cached here, because a cache without an owner
-// is a leak.
-[[nodiscard]] Octets localizedAuthKey(const Credentials& creds, std::span<const std::byte> engineId,
-                                      net::ErrorCode& ec);
-
-// The privacy key for one Engine: password-to-key and localizeKey over the privacy password, both
-// under creds.authProtocol's hash, extended if the protocol needs more key material than that hash
-// produces, and truncated to privKeySize(creds.privProtocol).
+// The privacy key for one Engine, from the privacy secret's Master Key: localizeKey under the
+// authentication protocol's hash, extended if the privacy protocol needs more key material than
+// that hash produces, and truncated to privKeySize(priv).
 //
 // The extension is the whole of the Blumenthal/Reeder difference. Blumenthal appends the hash of
 // the key so far; Reeder appends the key so far run back through password-to-key and localized
-// again -- a second megabyte, which is why this is cached by its caller and not called twice.
+// again -- a megabyte per Engine whatever the caller supplied, which is why its caller caches it.
+[[nodiscard]] Octets localizedPrivKey(AuthProtocol auth, PrivProtocol priv,
+                                      std::span<const std::byte> masterKey,
+                                      std::span<const std::byte> engineId, net::ErrorCode& ec);
+
+// The same two keys from Credentials: the Master Key they carry, or else the one their password
+// derives to, localized to one Engine. Each derivation from a password is the megabyte hash, and
+// is deliberately not cached here, because a cache without an owner is a leak; the Client caches
+// per Master Key and engineID.
+[[nodiscard]] Octets localizedAuthKey(const Credentials& creds, std::span<const std::byte> engineId,
+                                      net::ErrorCode& ec);
 [[nodiscard]] Octets localizedPrivKey(const Credentials& creds, std::span<const std::byte> engineId,
                                       net::ErrorCode& ec);
 

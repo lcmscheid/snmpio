@@ -46,6 +46,9 @@ running it. Nothing else leaves the strand. ADR-0009's amendment on Batch delive
 
 ## Amendment, 2026-10-24: one Client per Target is the recommended deployment
 
+_Narrowed by the amendment "the key caches are keyed by Master Key, and the caller may supply
+one", below: a Master Key the caller supplies costs no Client a derivation._
+
 The README now recommends one Client per Target on a shared `io_context` (#32), which reads like
 the opposite of a Client that owns the caches for every Target. It is not a session type: a Client
 still binds nothing to a Target, and any one of them can address any Target with any Credentials.
@@ -60,3 +63,20 @@ Master Key for its own Credentials.
 So the recommendation is per Target for Targets that are Engines of their own, which is most of
 them, and one Client for Targets that front the same Engine. The decision above, one Client that
 owns transport and caches with no session type, is unchanged.
+
+## Amendment, 2026-10-25: the key caches are keyed by Master Key, and the caller may supply one
+
+The consequence above names the localized-key cache "(master key, engineID)". Until now it was
+keyed by the password the Master Key is derived from, so that a lookup never had to derive
+anything, and the Master Key itself was never kept: every new Engine paid the megabyte hash again.
+The cache is now keyed as written, and a second cache sits in front of it, of Master Keys per
+(hash, password), with the password held only as a keyed digest (#37). A password costs one
+derivation per Client, however many Engines it meets.
+
+Credentials may also carry the Master Key in place of the password, derived by the caller once, on
+a thread of their choosing. That narrows the trade the amendment of 2026-10-24 names: Clients still
+share no cache, but a Master Key handed to every Client costs none of them a Master Key derivation.
+One megabyte hash is left on the strand whatever the caller supplies: a Reeder privacy key
+(`Aes192C`, `Aes256C`), whose Key Extension reruns password-to-key over the Localized Key, costs one
+per Engine. Moving it, and a password's derivation, off the strand is #80. Both caches stay the
+Client's own and on its strand, so nothing else here changes.

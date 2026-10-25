@@ -156,10 +156,16 @@ constexpr bool withinCeiling(T value, T ceiling) noexcept {
   return value >= T{} && value <= ceiling;
 }
 
-// A request's: its Target's retries and, for a GETBULK, both of its parameters. nonRepeaters has
-// no ceiling, since RFC 3416 4.2.3 reads one past the OIDs given as all of them.
+bool targetInRange(const Target& target) noexcept {
+  return withinCeiling(target.retries, retriesCeiling);
+}
+
+// A request's: its Target's and, for a GETBULK, both of its parameters. A negative nonRepeaters is
+// outside the PDU's own range, non-repeaters INTEGER (0..max-bindings) in RFC 3416 section 3. None
+// past the OIDs given needs refusing: section 4.2.3 reads it as all of them, and it never makes an
+// Agent send more.
 bool requestInRange(const Target& target, const Pdu& pdu) noexcept {
-  if (!withinCeiling(target.retries, retriesCeiling)) return false;
+  if (!targetInRange(target)) return false;
   if (pdu.type != PduType::GetBulk) return true;
   return pdu.nonRepeaters() >= 0 && withinCeiling(pdu.maxRepetitions(), maxRepetitionsCeiling);
 }
@@ -167,8 +173,7 @@ bool requestInRange(const Target& target, const Pdu& pdu) noexcept {
 // A Walk's: its Target's retries, and the WalkOptions. A negative maxRepetitions would otherwise
 // read as GETNEXT, and a negative time limit as one already reached.
 bool walkInRange(const Target& target, const WalkOptions& options) noexcept {
-  return withinCeiling(target.retries, retriesCeiling) &&
-         withinCeiling(options.maxRepetitions, maxRepetitionsCeiling) &&
+  return targetInRange(target) && withinCeiling(options.maxRepetitions, maxRepetitionsCeiling) &&
          (!options.timeLimit || *options.timeLimit >= std::chrono::milliseconds::zero());
 }
 
@@ -439,9 +444,12 @@ class Client::Impl {
   static net::Awaitable<void> observeBothCancellationTypes();
 
   // The request itself, by SNMP version, with nothing asked first: doRequest asks refusal(), and a
-  // Walk asks it once, before its first request. Stopping between them is transact's to catch,
-  // before anything is sent.
+  // Walk asks it once, before its first request, and doWalkRequest before each.
   net::Awaitable<RequestResult> doExchange(Ref self, Target target, Auth auth, Pdu pdu);
+  // One of a Walk's requests, whose arguments were judged before the first. Stopping is asked again
+  // of each, since each begins after the Batch before it: a Client stopped meanwhile must not start
+  // an Engine Discovery or derive keys only for transact to refuse the send.
+  net::Awaitable<RequestResult> doWalkRequest(Ref self, Target target, Auth auth, Pdu pdu);
   net::Awaitable<RequestResult> doRequestV2c(Ref self, Target target, Community community, Pdu pdu);
   net::Awaitable<RequestResult> doRequestV3(Ref self, Target target, Credentials creds, Pdu pdu);
 
@@ -888,6 +896,12 @@ net::Awaitable<Client::RequestResult> Client::Impl::doRequest(Ref self, Target t
   if (const auto refused = refusal(requestInRange(target, pdu))) {
     co_return RequestResult{*refused, Response{}};
   }
+  co_return co_await doExchange(self, std::move(target), std::move(auth), std::move(pdu));
+}
+
+net::Awaitable<Client::RequestResult> Client::Impl::doWalkRequest(Ref self, Target target,
+                                                                  Auth auth, Pdu pdu) {
+  if (m_stopping) co_return RequestResult{make_error_code(Errc::ClientStopped), Response{}};
   co_return co_await doExchange(self, std::move(target), std::move(auth), std::move(pdu));
 }
 
@@ -1368,8 +1382,8 @@ net::Awaitable<Client::WalkResult> Client::Impl::doWalk(Ref self, Target target,
                                         : makeBulkPdu(toVarbinds({current}), 0, maxRepetitions);
 
     auto [ec, resp] = timeLimit ? co_await underTimeLimit(timeLimit, state.slot(),
-                                                          doExchange(self, target, auth, req))
-                                : co_await doExchange(self, target, auth, req);
+                                                          doWalkRequest(self, target, auth, req))
+                                : co_await doWalkRequest(self, target, auth, req);
     // tooBig means the Response did not fit, not that the request was wrong: ask for less and try
     // again. Only a deliberately misbehaving Simulator reaches this path (ADR-0006).
     if (ec == ErrorStatus::TooBig && maxRepetitions > 1) {

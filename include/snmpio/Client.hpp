@@ -182,7 +182,7 @@ class Client {
   //
   // Engine Discovery, time synchronisation and Report routing happen underneath and never surface.
   // The first request against an unknown Engine simply costs extra round trips, and requests
-  // issued while that is in flight queue behind it rather than each probing separately.
+  // issued while that is in flight queue behind it rather than each discovering separately.
   //
   // At authPriv the Credentials name the privacy protocol as well; an authPriv level with none
   // named fails with Errc::UnsupportedPrivProtocol rather than being sent in the clear.

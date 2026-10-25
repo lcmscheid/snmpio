@@ -1111,6 +1111,39 @@ TEST(ClientV3Walk, CollectsTheWholeSubtreeAcrossSeveralRounds) {
   EXPECT_EQ(f.collected.size(), 3U);
 }
 
+// Over v3 a request does work of its own before it sends -- Engine Discovery, key localisation --
+// so a Client stopped between a Walk's requests must refuse the next one before any of it.
+TEST(ClientV3Walk, AWalkStoppedBetweenItsRequestsSendsNothingMore) {
+  Fixture f;
+  std::uint32_t next = 1;
+  ScriptedV3Agent agent(f.io, credentials(), [&](const Pdu&) {
+    Pdu p;
+    p.type = PduType::Response;
+    p.varbinds = {Varbind{Oid{1, 3, 6, 1, 2, 1, 1, next, 0}, Counter32{next}}};
+    ++next;
+    return p;
+  });
+  f.agent = &agent;
+
+  int batches = 0;
+  f.client.asyncWalk(
+      targetFor(agent), credentials(), Oid{1, 3, 6, 1, 2, 1, 1}, WalkOptions{1},
+      [&](std::span<const Varbind>) {
+        ++batches;
+        f.client.stop();
+        return true;
+      },
+      [&](net::ErrorCode e) {
+        f.ec = e;
+        f.finish();
+      });
+  f.run();
+
+  EXPECT_EQ(f.ec, Errc::ClientStopped) << f.ec.message();
+  EXPECT_EQ(batches, 1);
+  EXPECT_EQ(agent.requestsSeen(), 3) << "two for Engine Discovery, one for the first Batch";
+}
+
 // A Walk's time limit is a cancellation the caller asked for in advance, so ADR-0008's rule for
 // cancellations holds: the Walk says it was cut short, not why the replies it never got to use were
 // refused. Discovery succeeds; every Response after it carries a bad digest and is dropped.

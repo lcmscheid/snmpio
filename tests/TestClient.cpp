@@ -788,6 +788,36 @@ TEST(ClientWalkLimits, AZeroTimeLimitSendsNothing) {
   EXPECT_EQ(agent.requestsSeen(), 0);
 }
 
+// Stopping from a Batch handler, on the strand, between one of a Walk's requests and the next: the
+// Walk's arguments were judged before its first request, so each later one asks about Stopping
+// again before doing anything. With a time limit the next request also begins in a coroutine of its
+// own, after a hop.
+TEST(ClientWalkLimits, AWalkStoppedBetweenItsRequestsSendsNothingMore) {
+  for (const bool timeLimited : {false, true}) {
+    SCOPED_TRACE(timeLimited ? "time-limited" : "unlimited");
+    Fixture f;
+    ScriptedAgent agent(f.io, tableAgent(smallTable()));
+    f.agent = &agent;
+
+    WalkOptions options{2};
+    if (timeLimited) options.timeLimit = longDeadline;
+    int batches = 0;
+    f.client.asyncWalk(
+        targetFor(agent), publicCommunity, systemGroup, options,
+        [&](std::span<const Varbind>) {
+          ++batches;
+          f.client.stop();
+          return true;
+        },
+        f.walkToken());
+    f.run();
+
+    EXPECT_EQ(f.ec, Errc::ClientStopped) << f.ec.message();
+    EXPECT_EQ(batches, 1);
+    EXPECT_EQ(agent.requestsSeen(), 1);
+  }
+}
+
 // A time-limited Walk runs each request on a slot of its own, so these two hold the caller's
 // signals to reaching the exchange underneath, and to meaning what they meant without the limit.
 TEST(ClientWalkLimits, ACallersTerminalSignalStillDropsATimeLimitedWalkAtOnce) {
@@ -937,6 +967,7 @@ TEST(ClientArguments, AWalkAtBothCeilingsIsAccepted) {
 }
 
 TEST(ClientArguments, ANegativeNonRepeatersIsRefusedBeforeAnythingIsSent) {
+  // Outside the PDU's own range, non-repeaters INTEGER (0..max-bindings) in RFC 3416 section 3.
   Fixture f;
   ScriptedAgent agent(f.io, answerAnything());
   f.agent = &agent;

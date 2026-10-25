@@ -3,6 +3,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <optional>
 #include <span>
 #include <utility>
@@ -520,34 +521,32 @@ Oid longerOid(const Oid& from) {
   return Oid(std::move(subids));
 }
 
-// An Agent answering every GETNEXT -- and every repetition of a GETBULK -- with longerOid of the
-// name before it: a Walk of it ends only at a limit (research §1.4.3).
-ScriptedAgent::Responder endlessAgent() {
-  return [](const V2cMessage& msg) -> std::optional<Pdu> {
+// An Agent whose Subtree never ends: every GETNEXT, and every repetition of a GETBULK, is answered
+// with `next` of the name before it, so a Walk of it ends only at a limit (research §1.4.3).
+ScriptedAgent::Responder endlessAgent(std::function<Oid(const Oid&)> next) {
+  return [next = std::move(next)](const V2cMessage& msg) -> std::optional<Pdu> {
     const auto count = msg.pdu.type == PduType::GetBulk ? msg.pdu.maxRepetitions() : 1;
     std::vector<Varbind> out;
     out.reserve(static_cast<std::size_t>(count));
     Oid name = msg.pdu.varbinds.at(0).name;
     for (std::int32_t i = 0; i < count; ++i) {
-      name = longerOid(name);
-      out.emplace_back(name, Gauge32{static_cast<std::uint32_t>(i)});
+      name = next(name);
+      out.emplace_back(name, Gauge32{1});
     }
     return respondWith(std::move(out));
   };
 }
 
-// The same endless Subtree, flat: base.1, base.2, base.3, ... -- short enough names that a
-// GETBULK's thousand repetitions still fit in one datagram.
+// The ever-longer one, and a flat one -- base.1, base.2, ... -- whose names stay short enough that
+// a GETBULK's thousand repetitions still fit in one datagram.
+ScriptedAgent::Responder endlessAgent() {
+  return endlessAgent(longerOid);
+}
+
 ScriptedAgent::Responder endlessFlatAgent(const Oid& base) {
-  return [base](const V2cMessage& msg) -> std::optional<Pdu> {
-    const auto count = msg.pdu.type == PduType::GetBulk ? msg.pdu.maxRepetitions() : 1;
-    const Oid& from = msg.pdu.varbinds.at(0).name;
-    std::uint32_t next = from.size() > base.size() ? from[base.size()] + 1 : 1;
-    std::vector<Varbind> out;
-    out.reserve(static_cast<std::size_t>(count));
-    for (std::int32_t i = 0; i < count; ++i) out.emplace_back(base.child(next++), Gauge32{1});
-    return respondWith(std::move(out));
-  };
+  return endlessAgent([base](const Oid& from) {
+    return base.child(from.size() > base.size() ? from[base.size()] + 1 : 1);
+  });
 }
 
 // The names an endless Walk from systemGroup should have delivered, in order.
@@ -608,8 +607,8 @@ TEST(ClientWalkLimits, AWalkWhoseEndArrivesWithItsLastAllowedVarbindIsComplete) 
   ScriptedAgent agent(f.io, tableAgent(smallTable()));
   f.agent = &agent;
 
-  // One GETBULK brings all five rows and the endOfMibView after them, so the limit and the end of
-  // the Subtree arrive together, and the end is what the Walk saw.
+  // One GETBULK brings all five Varbinds and the endOfMibView after them, so the limit and the end
+  // of the Subtree arrive together, and the end is what the Walk saw.
   WalkOptions options{10};
   options.maxVarbinds = smallTable().size();
   f.client.asyncWalkCollect(targetFor(agent), publicCommunity, systemGroup, options,
@@ -625,8 +624,9 @@ TEST(ClientWalkLimits, AWalkThatFillsItsLimitWithoutSeeingTheEndIsIncomplete) {
   ScriptedAgent agent(f.io, tableAgent(smallTable()));
   f.agent = &agent;
 
-  // GETNEXT: the fifth row comes alone, and finding out that nothing follows it would take a sixth
-  // request the limit does not allow. Incomplete is the honest answer; complete might be a lie.
+  // GETNEXT: the fifth Varbind comes alone, and finding out that nothing follows it would take a
+  // sixth request the limit does not allow. Incomplete is the honest answer; complete might be a
+  // lie.
   WalkOptions options{0};
   options.maxVarbinds = smallTable().size();
   f.client.asyncWalkCollect(targetFor(agent), publicCommunity, systemGroup, options,

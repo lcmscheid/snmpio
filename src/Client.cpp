@@ -346,17 +346,17 @@ class Client::Impl {
                                              bool mayRetry, net::asio::cancellation_type cancelled);
 
   // A Walk's time limit: a timer, and the slot each of the Walk's requests runs on so that the
-  // timer can drop it. `passed` is how the Walk tells that drop from the caller's.
+  // timer can drop it. `fired` is how the Walk tells that drop from the caller's.
   struct WalkDeadline {
     explicit WalkDeadline(const net::Executor& ex) : timer(ex) {}
     net::SteadyTimer timer;
     net::asio::cancellation_signal signal;
     std::chrono::steady_clock::time_point at;
-    bool passed = false;
+    bool fired = false;  // the timer expired, and dropped whatever was in flight
 
     // By the clock as well as by the flag: the timer's handler may be queued behind the strand's
     // current work when the limit passes.
-    [[nodiscard]] bool reached() const { return passed || std::chrono::steady_clock::now() >= at; }
+    [[nodiscard]] bool reached() const { return fired || std::chrono::steady_clock::now() >= at; }
   };
 
   // Starts the timer, which drops the exchange in flight, if any, when `limit` has passed.
@@ -368,13 +368,15 @@ class Client::Impl {
                                                 net::asio::cancellation_slot walkSlot,
                                                 Target target, Auth auth, Pdu pdu);
 
-  // Why a Walk will not start: Stopping, then its arguments -- the order doRequest keeps, here so
-  // that a Walk refuses them before its first request, and refuses a negative maxRepetitions that
-  // would otherwise read as GETNEXT.
-  [[nodiscard]] std::optional<net::ErrorCode> refuseWalk(const Target& target,
-                                                         const WalkOptions& options) const {
+  // Why an operation will not start, in the order every operation keeps: Stopping first, so that
+  // one initiated after it completes with ClientStopped whatever else is wrong with it; then the
+  // arguments, before anything is sent or discovered. A Walk asks before its first request, which
+  // also refuses a negative maxRepetitions that would otherwise read as GETNEXT; a request passes
+  // zero when it carries no maxRepetitions.
+  [[nodiscard]] std::optional<net::ErrorCode> refusal(const Target& target,
+                                                      std::int32_t maxRepetitions) const {
     if (m_stopping) return make_error_code(Errc::ClientStopped);
-    if (!retriesInRange(target.retries) || !repetitionsInRange(options.maxRepetitions)) {
+    if (!retriesInRange(target.retries) || !repetitionsInRange(maxRepetitions)) {
       return make_error_code(Errc::ArgumentOutOfRange);
     }
     return std::nullopt;
@@ -388,7 +390,7 @@ class Client::Impl {
                                     const net::asio::cancellation_state& state,
                                     const WalkDeadline* deadline) {
     if (const auto stop = cancellationEnding(state)) return *stop;
-    if (deadline != nullptr && deadline->passed && ec == net::asio::error::operation_aborted) {
+    if (deadline != nullptr && deadline->fired && ec == net::asio::error::operation_aborted) {
       return make_error_code(Errc::WalkIncomplete);
     }
     return ec;
@@ -850,12 +852,9 @@ net::Awaitable<void> Client::Impl::observeBothCancellationTypes() {
 
 net::Awaitable<Client::RequestResult> Client::Impl::doRequest(Ref self, Target target, Auth auth,
                                                               Pdu pdu) {
-  // Stopping first: an operation initiated after it completes with ClientStopped, whatever else is
-  // wrong with it. Then the arguments, before anything is sent or discovered.
-  if (m_stopping) co_return RequestResult{make_error_code(Errc::ClientStopped), Response{}};
-  if (!retriesInRange(target.retries) ||
-      (pdu.type == PduType::GetBulk && !repetitionsInRange(pdu.maxRepetitions()))) {
-    co_return RequestResult{make_error_code(Errc::ArgumentOutOfRange), Response{}};
+  if (const auto refused =
+          refusal(target, pdu.type == PduType::GetBulk ? pdu.maxRepetitions() : 0)) {
+    co_return RequestResult{*refused, Response{}};
   }
   if (const auto* community = std::get_if<Community>(&auth)) {
     co_return co_await doRequestV2c(self, std::move(target), *community, std::move(pdu));
@@ -1244,7 +1243,7 @@ std::shared_ptr<Client::Impl::WalkDeadline> Client::Impl::armDeadline(
   deadline->timer.async_wait([weak = std::weak_ptr<WalkDeadline>(deadline)](net::ErrorCode ec) {
     const auto d = weak.lock();
     if (ec || !d) return;
-    d->passed = true;
+    d->fired = true;
     d->signal.emit(net::asio::cancellation_type::terminal);
   });
   return deadline;
@@ -1302,7 +1301,7 @@ net::Awaitable<Client::WalkResult> Client::Impl::doWalk(Ref self, Target target,
   // everything, so it has to be observable here -- and observed, not thrown. The state is asked
   // for at each use rather than held, because each request underneath re-seats it.
   co_await observeBothCancellationTypes();
-  if (const auto refused = refuseWalk(target, options)) co_return WalkResult{*refused};
+  if (const auto refused = refusal(target, options.maxRepetitions)) co_return WalkResult{*refused};
 
   // Either limit ends the Walk with WalkIncomplete, never as a whole one (ADR-0004). Both are
   // checked before each request, after the caller's cancellation, so a Walk that has used up

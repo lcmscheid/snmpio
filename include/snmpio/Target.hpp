@@ -69,11 +69,14 @@ struct WalkOptions {
   // asyncWalk, whose Batch handler already decides when to stop, and defaultCollectLimit for
   // asyncWalkCollect. A Walk that reaches it without having seen the end of the Subtree ends with
   // Errc::WalkIncomplete, even if the next request would have found nothing more: a Walk that was
-  // cut short must never look complete (ADR-0004).
+  // cut short must never look complete (ADR-0004). Zero is a limit like any other, not "none": the
+  // Walk sends nothing and ends WalkIncomplete.
   std::optional<std::size_t> maxVarbinds;
   // How long the whole Walk may take, from its start; unset means no limit. Reaching it drops the
   // exchange in flight and ends the Walk with Errc::WalkIncomplete, keeping every Batch already
-  // delivered. Per-attempt patience is still Target::timeout's.
+  // delivered -- including over a reason ADR-0008 would otherwise report at the exchange's own
+  // deadline, such as AuthFailed: that deadline never came, and the limit the caller set did.
+  // Per-attempt patience is still Target::timeout's.
   std::optional<std::chrono::milliseconds> timeLimit;
 };
 

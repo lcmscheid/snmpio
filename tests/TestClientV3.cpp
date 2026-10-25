@@ -112,7 +112,7 @@ TEST(ClientV3, NoAuthNoPrivNeedsOnlyTheFirstDiscoveryPhase) {
   EXPECT_EQ(agent.requestsSeen(), 2);
 }
 
-TEST(ClientV3, ASecondRequestSendsNoProbe) {
+TEST(ClientV3, ASecondRequestSkipsEngineDiscovery) {
   Fixture f;
   f.expectedCompletions = 2;
   ScriptedV3Agent agent(f.io, credentials(), echoAnswer);
@@ -567,7 +567,7 @@ TEST(ClientV3, RefusesAnArgumentPastItsCeilingBeforeDiscovering) {
   f.run();
 
   EXPECT_EQ(f.ec, Errc::ArgumentOutOfRange) << f.ec.message();
-  EXPECT_EQ(agent.requestsSeen(), 0) << "nothing is sent, not even a discovery probe";
+  EXPECT_EQ(agent.requestsSeen(), 0) << "nothing is sent, Engine Discovery included";
 }
 
 TEST(ClientV3, SurfacesAnAgentErrorStatusInTheAgentCategory) {

@@ -72,13 +72,16 @@ struct WalkOptions {
   // cut short must never look complete (ADR-0004). Zero is a limit like any other, not "none": the
   // Walk sends nothing and ends WalkIncomplete.
   std::optional<std::size_t> maxVarbinds;
-  // How long the whole Walk may take, from its start; unset means no limit. Reaching it drops the
-  // exchange in flight and ends the Walk with Errc::WalkIncomplete, keeping every Batch already
+  // How long the whole Walk may take, from its start; unset means no limit. Reaching it ends the
+  // Walk's Outstanding Request in whichever wait it is -- awaiting a reply, or queued behind Engine
+  // Discovery -- and ends the Walk with Errc::WalkIncomplete, keeping every Batch already
   // delivered. It is a cancellation the caller asked for in advance, so ADR-0008's rule for those
   // holds: it reports the cancellation, not a reason the exchange's own deadline would have given,
   // such as AuthFailed -- that deadline never came. A limit shorter than one exchange can therefore
-  // hide a wrong password behind WalkIncomplete.
-  // Per-attempt patience is still Target::timeout's.
+  // hide a wrong password behind WalkIncomplete. Zero is a limit like any other, as for
+  // maxVarbinds: the Walk sends nothing and ends WalkIncomplete. Below zero is refused with
+  // Errc::ArgumentOutOfRange. One too long for the steady clock to reach, such as
+  // milliseconds::max(), is no limit. Per-attempt patience is still Target::timeout's.
   std::optional<std::chrono::milliseconds> timeLimit;
 };
 

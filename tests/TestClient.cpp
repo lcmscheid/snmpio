@@ -642,9 +642,9 @@ TEST(ClientWalkLimits, CollectingStopsAtItsDefaultLimit) {
   ScriptedAgent agent(f.io, endlessFlatAgent(systemGroup));
   f.agent = &agent;
 
-  // No limit given: asyncWalkCollect still has one, where asyncWalk has none.
-  f.client.asyncWalkCollect(targetFor(agent), publicCommunity, systemGroup,
-                            WalkOptions{maxRepetitionsCeiling}, f.collectToken());
+  // No options given: asyncWalkCollect still has a limit, where asyncWalk has none.
+  f.client.asyncWalkCollect(targetFor(agent), publicCommunity, systemGroup, WalkOptions{},
+                            f.collectToken());
   f.run();
 
   EXPECT_EQ(f.ec, Errc::WalkIncomplete) << f.ec.message();
@@ -709,7 +709,7 @@ TEST(ClientWalkLimits, ATimeLimitEndsAnEndlessWalkWithWhatItGathered) {
   EXPECT_LT(f.completedAt - start, limit + atOnceLimit(longDeadline));
 }
 
-TEST(ClientWalkLimits, ATimeLimitDropsTheExchangeInFlight) {
+TEST(ClientWalkLimits, ATimeLimitEndsTheOutstandingRequest) {
   Fixture f;
   // One Batch, then silence against a Target that would wait five seconds for the next. The Walk's
   // own limit is what ends it, not the exchange's deadline.
@@ -752,6 +752,40 @@ TEST(ClientWalkLimits, AWalkInsideItsTimeLimitIsUntouchedByIt) {
   EXPECT_FALSE(f.ec) << f.ec.message();
   EXPECT_EQ(f.collected, smallTable());
   EXPECT_LT(std::chrono::steady_clock::now() - start, atOnceLimit(longDeadline));
+}
+
+TEST(ClientWalkLimits, ATimeLimitTooLongToReachIsNoLimit) {
+  Fixture f;
+  ScriptedAgent agent(f.io, tableAgent(smallTable()));
+  f.agent = &agent;
+
+  // The largest limit a caller can write is a natural way to say "none", and adding it to the
+  // clock's now() would overflow the clock's nanoseconds.
+  WalkOptions options{2};
+  options.timeLimit = std::chrono::milliseconds::max();
+  f.client.asyncWalkCollect(targetFor(agent), publicCommunity, systemGroup, options,
+                            f.collectToken());
+  f.run();
+
+  EXPECT_FALSE(f.ec) << f.ec.message();
+  EXPECT_EQ(f.collected, smallTable());
+}
+
+TEST(ClientWalkLimits, AZeroTimeLimitSendsNothing) {
+  Fixture f;
+  ScriptedAgent agent(f.io, tableAgent(smallTable()));
+  f.agent = &agent;
+
+  // A limit like any other, as a zero maxVarbinds is: already reached, so nothing is asked for.
+  WalkOptions options{2};
+  options.timeLimit = std::chrono::milliseconds::zero();
+  f.client.asyncWalkCollect(targetFor(agent), publicCommunity, systemGroup, options,
+                            f.collectToken());
+  f.run();
+
+  EXPECT_EQ(f.ec, Errc::WalkIncomplete) << f.ec.message();
+  EXPECT_TRUE(f.collected.empty());
+  EXPECT_EQ(agent.requestsSeen(), 0);
 }
 
 // A time-limited Walk runs each request on a slot of its own, so these two hold the caller's
@@ -900,6 +934,46 @@ TEST(ClientArguments, AWalkAtBothCeilingsIsAccepted) {
 
   EXPECT_FALSE(f.ec) << f.ec.message();
   EXPECT_EQ(f.collected, smallTable());
+}
+
+TEST(ClientArguments, ANegativeNonRepeatersIsRefusedBeforeAnythingIsSent) {
+  Fixture f;
+  ScriptedAgent agent(f.io, answerAnything());
+  f.agent = &agent;
+
+  f.client.asyncGetBulk(targetFor(agent), publicCommunity, {sysDescr}, -1, 10, f.requestToken());
+  f.run();
+
+  EXPECT_EQ(f.ec, Errc::ArgumentOutOfRange) << f.ec.message();
+  EXPECT_EQ(agent.requestsSeen(), 0);
+}
+
+TEST(ClientArguments, NonRepeatersPastTheOidsGivenAreAccepted) {
+  // No ceiling: RFC 3416 4.2.3 reads a nonRepeaters past the OIDs given as all of them, and no
+  // value of it makes an Agent send more.
+  Fixture f;
+  ScriptedAgent agent(f.io, answerAnything());
+  f.agent = &agent;
+
+  f.client.asyncGetBulk(targetFor(agent), publicCommunity, {sysDescr}, 5, 10, f.requestToken());
+  f.run();
+
+  EXPECT_FALSE(f.ec) << f.ec.message();
+}
+
+TEST(ClientArguments, ANegativeTimeLimitIsRefusedBeforeAnythingIsSent) {
+  Fixture f;
+  ScriptedAgent agent(f.io, tableAgent(smallTable()));
+  f.agent = &agent;
+
+  WalkOptions options{2};
+  options.timeLimit = std::chrono::milliseconds(-1);
+  f.client.asyncWalkCollect(targetFor(agent), publicCommunity, systemGroup, options,
+                            f.collectToken());
+  f.run();
+
+  EXPECT_EQ(f.ec, Errc::ArgumentOutOfRange) << f.ec.message();
+  EXPECT_EQ(agent.requestsSeen(), 0);
 }
 
 TEST(ClientArguments, AStoppedClientSaysSoAheadOfABadArgument) {

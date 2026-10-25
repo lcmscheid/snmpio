@@ -95,8 +95,9 @@ class Client {
   [[nodiscard]] net::Executor getExecutor() const { return m_strand; }
 
   // Every operation checks its arguments before it sends anything: Target::retries outside
-  // 0..retriesCeiling, or a maxRepetitions outside 0..maxRepetitionsCeiling, completes it with
-  // Errc::ArgumentOutOfRange rather than being clamped.
+  // 0..retriesCeiling, a maxRepetitions outside 0..maxRepetitionsCeiling, a negative nonRepeaters
+  // or a negative WalkOptions::timeLimit completes it with Errc::ArgumentOutOfRange rather than
+  // being clamped.
   //
   // Stopping: refuses new work, closes the sockets and fails every outstanding operation with
   // Errc::ClientStopped. Idempotent, safe from any thread, and harmless before the destructor,
@@ -125,7 +126,8 @@ class Client {
   }
 
   // GETBULK: the first nonRepeaters OIDs get one successor each, the rest get maxRepetitions of
-  // them, which must lie in 0..maxRepetitionsCeiling. Completion: void(ErrorCode, Response).
+  // them. nonRepeaters must not be negative, and maxRepetitions must lie in
+  // 0..maxRepetitionsCeiling. Completion: void(ErrorCode, Response).
   template <typename Token>
   auto asyncGetBulk(Target target, Community community, std::vector<Oid> oids,
                     std::int32_t nonRepeaters, std::int32_t maxRepetitions, Token&& token) {

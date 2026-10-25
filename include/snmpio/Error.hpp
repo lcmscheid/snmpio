@@ -80,8 +80,7 @@ enum class Errc {
   UnexpectedReport,  // a Report whose usmStats counter we do not recognise
 
   // The caller's own arguments.
-  ArgumentOutOfRange,  // an argument past its documented bound: Target::retries outside
-                       // 0..retriesCeiling, or maxRepetitions outside 0..maxRepetitionsCeiling
+  ArgumentOutOfRange,  // an argument past its documented bound; Client.hpp lists them
 };
 
 // What a caller can do about a failure, across all three categories a completion can carry --

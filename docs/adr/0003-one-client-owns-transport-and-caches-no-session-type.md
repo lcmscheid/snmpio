@@ -60,3 +60,17 @@ Master Key for its own Credentials.
 So the recommendation is per Target for Targets that are Engines of their own, which is most of
 them, and one Client for Targets that front the same Engine. The decision above, one Client that
 owns transport and caches with no session type, is unchanged.
+
+## Amendment, 2026-10-25: the key caches are keyed by Master Key, and the caller may supply one
+
+The consequence above names the localized-key cache "(master key, engineID)". Until now it was
+keyed by the password the Master Key is derived from, so that a lookup never had to derive
+anything, and the Master Key itself was never kept: every new Engine paid the megabyte hash again.
+The cache is now keyed as written, and a second cache sits in front of it, of Master Keys per
+(hash, password), with the password held only as a keyed digest (#37). A password costs one
+derivation per Client, however many Engines it meets.
+
+Credentials may also carry the Master Key in place of the password, derived by the caller once, on
+a thread of their choosing. That narrows the trade the amendment of 2026-10-24 names: Clients still
+share no cache, but a Master Key handed to every Client costs none of them a derivation. Both
+caches stay the Client's own and on its strand, so nothing else here changes.

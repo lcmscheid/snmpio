@@ -1,4 +1,5 @@
 #include <snmpio/Client.hpp>
+#include <snmpio/detail/CacheView.hpp>
 
 #include <algorithm>
 #include <atomic>
@@ -11,6 +12,7 @@
 #include <memory>
 #include <optional>
 #include <random>
+#include <span>
 #include <string>
 #include <thread>
 #include <tuple>
@@ -110,6 +112,21 @@ std::int32_t randomRequestId() {
   return dist(rd);
 }
 
+// A Client's own random key for passwordDigest, so that two Clients' digests of one password differ
+// and none can be looked up in a table built before the Client existed.
+Octets randomDigestKey() {
+  std::random_device rd;
+  Octets key;
+  constexpr std::size_t keyOctets = 32;
+  while (key.size() < keyOctets) {
+    const auto word = rd();
+    for (unsigned shift = 0; shift < 32 && key.size() < keyOctets; shift += 8) {
+      key.push_back(static_cast<std::byte>((word >> shift) & 0xFFU));
+    }
+  }
+  return key;
+}
+
 // The completion of an Engine Discovery, which no operation awaits. It does not throw by design, so
 // an exception here is bad_alloc or a programming error, and it leaves run() the way spawn lets one
 // out of an operation. `detached` would swallow it, and leave every request that discovery was
@@ -170,6 +187,21 @@ bool requestInRange(const Target& target, const Pdu& pdu) noexcept {
   return pdu.nonRepeaters() >= 0 && withinCeiling(pdu.maxRepetitions(), maxRepetitionsCeiling);
 }
 
+// The Credentials' Master Keys, where they carry any: each the width of the authentication
+// protocol's hash -- the privacy one too, since USM derives it under that hash -- and each in place
+// of its password, not beside it. A Community has nothing to check.
+bool secretInRange(AuthProtocol p, const std::optional<Octets>& masterKey,
+                   const std::string& password) noexcept {
+  return !masterKey || (masterKey->size() == keySize(p) && password.empty());
+}
+
+bool credentialsInRange(const std::variant<Community, Credentials>& auth) noexcept {
+  const auto* creds = std::get_if<Credentials>(&auth);
+  return creds == nullptr ||
+         (secretInRange(creds->authProtocol, creds->authMasterKey, creds->authPassword) &&
+          secretInRange(creds->authProtocol, creds->privMasterKey, creds->privPassword));
+}
+
 // A Walk's: its Target's retries, and the WalkOptions. A negative maxRepetitions would otherwise
 // read as GETNEXT, and a negative time limit as one already reached.
 bool walkInRange(const Target& target, const WalkOptions& options) noexcept {
@@ -209,7 +241,15 @@ class Client::Impl {
  public:
   using Ref = std::shared_ptr<Impl>;
 
-  explicit Impl(net::Strand strand) : m_strand(std::move(strand)), m_nextId(randomRequestId()) {}
+  explicit Impl(net::Strand strand)
+      : m_strand(std::move(strand)), m_digestKey(randomDigestKey()), m_nextId(randomRequestId()) {}
+
+  // detail::CacheView's, and only safe where it says.
+  [[nodiscard]] detail::CacheCounts cacheCounts() const noexcept {
+    return {.masterKeys = m_masterKeys.size(),
+            .localizedKeys = m_keys.size(),
+            .masterKeyDerivations = m_masterKeyDerivations};
+  }
 
   // Stopping, from any thread. The flag is set at once, and the strand checks it before each
   // exchange and each Batch, so nothing begins once the strand has seen it; the cleanup that needs
@@ -368,8 +408,13 @@ class Client::Impl {
   // The Engine currently believed to answer at this endpoint, or nullptr if none is known.
   EngineState* engineAt(const net::UdpEndpoint& endpoint);
 
-  // Cached because the derivation is a megabyte hash and deliberately expensive (CONTEXT.md) --
-  // twice over for Reeder, whose key extension is a second one.
+  // The Master Key for one secret: the one the Credentials carry, or the one this Client derived
+  // from the password -- once, the first time it met it, since the derivation is a megabyte hash
+  // and deliberately expensive (CONTEXT.md).
+  const Octets* masterKey(AuthProtocol p, const std::optional<Octets>& supplied,
+                          const std::string& password, net::ErrorCode& ec);
+  // Localized per Engine from the Master Key, and cached: a short hash for the authentication key,
+  // but a second megabyte for a Reeder privacy key, whose extension runs password-to-key again.
   const Octets* localizedKey(const Credentials& creds, const Octets& engineId, net::ErrorCode& ec);
   const Octets* localizedPrivacyKey(const Credentials& creds, const Octets& engineId,
                                     net::ErrorCode& ec);
@@ -407,7 +452,8 @@ class Client::Impl {
 
   // Why an operation will not start, in the order every operation keeps: Stopping first, so that
   // one initiated after it completes with ClientStopped whatever else is wrong with it; then the
-  // arguments (requestInRange, walkInRange), before anything is sent or discovered.
+  // arguments (requestInRange, walkInRange, credentialsInRange), before anything is sent or
+  // discovered.
   [[nodiscard]] std::optional<net::ErrorCode> refusal(bool argumentsInRange) const {
     if (m_stopping) return make_error_code(Errc::ClientStopped);
     if (!argumentsInRange) return make_error_code(Errc::ArgumentOutOfRange);
@@ -472,11 +518,18 @@ class Client::Impl {
   std::map<Octets, EngineState> m_engines;
   std::map<net::UdpEndpoint, Octets> m_engineAt;
   std::map<net::UdpEndpoint, std::shared_ptr<Discovery>> m_discovering;
-  // (engineID, hash, secret, privacy protocol) -- ADR-0003's (master key, engineID), spelled as
-  // the things the master key is derived from so that nothing has to derive it to look one up.
-  // The privacy protocol is part of the key rather than of the value because it decides how far
-  // the derivation is extended: PrivProtocol::None is the authentication key's row.
-  std::map<std::tuple<Octets, AuthProtocol, std::string, PrivProtocol>, Octets> m_keys;
+  // Master Keys this Client derived, per (hash, password) -- the password as an HMAC under
+  // m_digestKey rather than in plaintext, so that no password outlives the Credentials that brought
+  // it (threat model S4). Master Keys the caller supplied are not copied here; they are already as
+  // cheap to reach as a cache could make them.
+  std::map<std::pair<AuthProtocol, Octets>, Octets> m_masterKeys;
+  Octets m_digestKey;
+  std::size_t m_masterKeyDerivations = 0;  // for detail::CacheView, and nothing else
+  // (engineID, hash, Master Key, privacy protocol) -- ADR-0003's (master key, engineID), whether
+  // the Master Key was derived above or supplied. The privacy protocol is part of the key rather
+  // than of the value because it decides how far the derivation is extended: PrivProtocol::None is
+  // the authentication key's row.
+  std::map<std::tuple<Octets, AuthProtocol, Octets, PrivProtocol>, Octets> m_keys;
   // One counter for both the v3 msgID and the PDU request-id, so that the two protocols cannot
   // collide in m_pending -- which is keyed on the msgID for v3, as CONTEXT.md requires, because a
   // message we cannot open must still be attributable.
@@ -893,7 +946,7 @@ net::Awaitable<void> Client::Impl::observeBothCancellationTypes() {
 
 net::Awaitable<Client::RequestResult> Client::Impl::doRequest(Ref self, Target target, Auth auth,
                                                               Pdu pdu) {
-  if (const auto refused = refusal(requestInRange(target, pdu))) {
+  if (const auto refused = refusal(requestInRange(target, pdu) && credentialsInRange(auth))) {
     co_return RequestResult{*refused, Response{}};
   }
   co_return co_await doExchange(self, std::move(target), std::move(auth), std::move(pdu));
@@ -934,32 +987,47 @@ net::Awaitable<Client::RequestResult> Client::Impl::doRequestV2c(Ref self, Targe
   co_return toResult(pending->response);
 }
 
+const Octets* Client::Impl::masterKey(AuthProtocol p, const std::optional<Octets>& supplied,
+                                      const std::string& password, net::ErrorCode& ec) {
+  ec = {};
+  if (supplied) return &*supplied;
+  // A keyed digest, not a bare hash: a bare one could be checked against a table of guesses built
+  // for any Client. It is still far cheaper to guess against than the megabyte-hashed Master Key
+  // beside it, which is why it is keyed per Client and not kept anywhere else.
+  auto digest = authDigest(AuthProtocol::Sha256, m_digestKey,
+                           std::as_bytes(std::span(password.data(), password.size())), ec);
+  if (ec) return nullptr;
+  auto cacheKey = std::make_pair(p, std::move(digest));
+  const auto it = m_masterKeys.find(cacheKey);
+  if (it != m_masterKeys.end()) return &it->second;
+  auto derived = passwordToKey(p, password, ec);
+  if (ec) return nullptr;
+  ++m_masterKeyDerivations;
+  return &m_masterKeys.emplace(std::move(cacheKey), std::move(derived)).first->second;
+}
+
 const Octets* Client::Impl::localizedKey(const Credentials& creds, const Octets& engineId,
                                          net::ErrorCode& ec) {
-  // The user name is deliberately not part of the key: what the derivation consumes is the
-  // password, the protocol and the engineID, so two users sharing a password share a key.
-  auto cacheKey =
-      std::make_tuple(engineId, creds.authProtocol, creds.authPassword, PrivProtocol::None);
+  const Octets* master = masterKey(creds.authProtocol, creds.authMasterKey, creds.authPassword, ec);
+  if (master == nullptr) return nullptr;
+  // The user name is deliberately not part of the key: what the derivation consumes is the Master
+  // Key, the protocol and the engineID, so two users sharing a password share a key.
+  auto cacheKey = std::make_tuple(engineId, creds.authProtocol, *master, PrivProtocol::None);
   const auto it = m_keys.find(cacheKey);
-  if (it != m_keys.end()) {
-    ec = {};
-    return &it->second;
-  }
-  auto derived = localizedAuthKey(creds, engineId, ec);
+  if (it != m_keys.end()) return &it->second;
+  auto derived = localizeKey(creds.authProtocol, *master, engineId, ec);
   if (ec) return nullptr;
   return &m_keys.emplace(std::move(cacheKey), std::move(derived)).first->second;
 }
 
 const Octets* Client::Impl::localizedPrivacyKey(const Credentials& creds, const Octets& engineId,
                                                 net::ErrorCode& ec) {
-  auto cacheKey =
-      std::make_tuple(engineId, creds.authProtocol, creds.privPassword, creds.privProtocol);
+  const Octets* master = masterKey(creds.authProtocol, creds.privMasterKey, creds.privPassword, ec);
+  if (master == nullptr) return nullptr;
+  auto cacheKey = std::make_tuple(engineId, creds.authProtocol, *master, creds.privProtocol);
   const auto it = m_keys.find(cacheKey);
-  if (it != m_keys.end()) {
-    ec = {};
-    return &it->second;
-  }
-  auto derived = localizedPrivKey(creds, engineId, ec);
+  if (it != m_keys.end()) return &it->second;
+  auto derived = localizedPrivKey(creds.authProtocol, creds.privProtocol, *master, engineId, ec);
   if (ec) return nullptr;
   return &m_keys.emplace(std::move(cacheKey), std::move(derived)).first->second;
 }
@@ -1356,7 +1424,9 @@ net::Awaitable<Client::WalkResult> Client::Impl::doWalk(Ref self, Target target,
   // everything, so it has to be observable here -- and observed, not thrown. The state is asked
   // for at each use rather than held, because each request underneath re-seats it.
   co_await observeBothCancellationTypes();
-  if (const auto refused = refusal(walkInRange(target, options))) co_return WalkResult{*refused};
+  if (const auto refused = refusal(walkInRange(target, options) && credentialsInRange(auth))) {
+    co_return WalkResult{*refused};
+  }
 
   // Either limit ends the Walk with WalkIncomplete, never as a whole one (ADR-0004). Both are
   // checked before each request, after the caller's cancellation, so a Walk that has used up
@@ -1425,6 +1495,10 @@ net::Awaitable<Client::CollectResult> Client::Impl::doWalkCollect(Ref self, Targ
   // ADR-0004 again: `total` keeps what arrived, `terminal` drops everything immediately.
   if (ec == net::asio::error::operation_aborted) collected.clear();
   co_return CollectResult{ec, std::move(collected)};
+}
+
+detail::CacheCounts detail::CacheView::counts(const Client& client) {
+  return client.m_impl->cacheCounts();
 }
 
 }  // namespace snmpio

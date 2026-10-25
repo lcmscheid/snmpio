@@ -22,6 +22,10 @@
 
 namespace snmpio {
 
+namespace detail {
+struct CacheView;
+}  // namespace detail
+
 // What a completed request hands back.
 struct Response {
   std::vector<Varbind> varbinds;
@@ -97,7 +101,8 @@ class Client {
   // Every operation checks its arguments before it sends anything: Target::retries outside
   // 0..retriesCeiling, a maxRepetitions outside 0..maxRepetitionsCeiling, a negative nonRepeaters
   // or a negative WalkOptions::timeLimit completes it with Errc::ArgumentOutOfRange rather than
-  // being clamped.
+  // being clamped. So does a Master Key in the Credentials that is not keySize(authProtocol)
+  // Octets, or that is given beside its password rather than in place of it.
   //
   // Stopping: refuses new work, closes the sockets and fails every outstanding operation with
   // Errc::ClientStopped. Idempotent, safe from any thread, and harmless before the destructor,
@@ -183,6 +188,11 @@ class Client {
   // Engine Discovery, time synchronisation and Report routing happen underneath and never surface.
   // The first request against an unknown Engine simply costs extra round trips, and requests
   // issued while that is in flight queue behind it rather than each discovering separately.
+  //
+  // Keys are cached per Client: the Master Key per (hash, password) when the Credentials carry a
+  // password, so that it is derived once however many Engines it meets, and the Localized Keys per
+  // (engineID, Master Key). The derivation runs on the strand; Credentials carrying Master Keys the
+  // caller derived elsewhere leave it only the short per-Engine hash (Usm.hpp).
   //
   // At authPriv the Credentials name the privacy protocol as well; an authPriv level with none
   // named fails with Errc::UnsupportedPrivProtocol rather than being sent in the clear.
@@ -294,6 +304,8 @@ class Client {
         },
         token, std::move(coro));
   }
+
+  friend struct detail::CacheView;
 
   // Everything the Client knows, and the coroutines that act on it, co-owned by each of those
   // coroutines (ADR-0009). Defined in Client.cpp.

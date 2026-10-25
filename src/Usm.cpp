@@ -7,6 +7,7 @@
 #include <string>
 #include <vector>
 
+#include <openssl/crypto.h>
 #include <openssl/evp.h>
 #include <openssl/hmac.h>
 #include <openssl/provider.h>
@@ -15,11 +16,13 @@ namespace snmpio {
 namespace {
 
 // RFC 3414 appendix A.2.1: the password is repeated into exactly one megabyte, which is then
-// hashed once. Fed 64 Octets at a time to stay line-for-line comparable with the C listing in
-// appendix A.2.1 itself; the digest is of the whole megabyte, so the chunk size is otherwise
-// free. Written from the RFC, not ported from anyone -- hence no NOTICE entry (ADR-0007).
+// hashed once. The RFC's listing feeds it 64 Octets at a time; the digest is of the whole
+// megabyte, so the chunk size is otherwise free, and 16,384 calls into EVP cost about 3.6 times
+// what the hash itself does (research note section 5.4). Each chunk here is a whole number of
+// passwords, so every one begins where the password does and they all share one buffer. Written
+// from the RFC, not ported from anyone -- hence no NOTICE entry (ADR-0007).
 constexpr std::size_t expandedPasswordSize = 1048576;
-constexpr std::size_t chunkSize = 64;
+constexpr std::size_t targetChunkSize = 16384;
 
 const EVP_MD* digestFor(AuthProtocol p) noexcept {
   switch (p) {
@@ -328,20 +331,24 @@ Octets passwordToKey(AuthProtocol p, std::string_view password, net::ErrorCode& 
     return {};
   }
 
-  const DigestContext ctx;
-  if (!begin(ctx, md, ec)) return {};
+  // A password longer than the target is one password per chunk.
+  const std::size_t chunkSize =
+      std::max<std::size_t>(1, targetChunkSize / password.size()) * password.size();
+  std::string chunk;
+  chunk.reserve(chunkSize);
+  while (chunk.size() < chunkSize) chunk += password;
 
-  std::array<unsigned char, chunkSize> chunk{};
-  std::size_t index = 0;
-  for (std::size_t done = 0; done < expandedPasswordSize; done += chunkSize) {
-    for (auto& octet : chunk) {
-      octet = static_cast<unsigned char>(password[index % password.size()]);
-      ++index;
-    }
-    if (EVP_DigestUpdate(ctx.get(), chunk.data(), chunk.size()) != 1) {
-      ec = make_error_code(Errc::CryptoFailure);
-      return {};
-    }
+  const DigestContext ctx;
+  bool hashed = begin(ctx, md, ec);
+  for (std::size_t done = 0; hashed && done < expandedPasswordSize; done += chunkSize) {
+    hashed = EVP_DigestUpdate(ctx.get(), chunk.data(),
+                              std::min(chunkSize, expandedPasswordSize - done)) == 1;
+  }
+  // A buffer full of the password: wiped, as far as a std::string's storage can be.
+  OPENSSL_cleanse(chunk.data(), chunk.size());
+  if (!hashed) {
+    if (!ec) ec = make_error_code(Errc::CryptoFailure);
+    return {};
   }
   return finish(ctx, ec);
 }
@@ -369,29 +376,19 @@ Octets localizeKey(AuthProtocol p, std::span<const std::byte> masterKey,
   return finish(ctx, ec);
 }
 
-Octets localizedAuthKey(const Credentials& creds, std::span<const std::byte> engineId,
-                        net::ErrorCode& ec) {
-  const auto master = passwordToKey(creds.authProtocol, creds.authPassword, ec);
-  if (ec) return {};
-  return localizeKey(creds.authProtocol, master, engineId, ec);
-}
-
-Octets localizedPrivKey(const Credentials& creds, std::span<const std::byte> engineId,
-                        net::ErrorCode& ec) {
-  const auto want = privKeySize(creds.privProtocol);
+Octets localizedPrivKey(AuthProtocol auth, PrivProtocol priv, std::span<const std::byte> masterKey,
+                        std::span<const std::byte> engineId, net::ErrorCode& ec) {
+  const auto want = privKeySize(priv);
   if (want == 0) {
     ec = make_error_code(Errc::UnsupportedPrivProtocol);
     return {};
   }
   // The privacy key is derived under the *authentication* protocol's hash -- USM has no second
   // hash to name (RFC 3414 section 2.6).
-  const auto master = passwordToKey(creds.authProtocol, creds.privPassword, ec);
-  if (ec) return {};
-  auto key = localizeKey(creds.authProtocol, master, engineId, ec);
+  auto key = localizeKey(auth, masterKey, engineId, ec);
   if (ec) return {};
 
-  const bool reeder =
-      creds.privProtocol == PrivProtocol::Aes192C || creds.privProtocol == PrivProtocol::Aes256C;
+  const bool reeder = priv == PrivProtocol::Aes192C || priv == PrivProtocol::Aes256C;
   // Neither extension is standardised and the two are mutually incompatible (ADR-0005), so which
   // one runs is read off the protocol the caller named and never inferred from anything else.
   while (key.size() < want) {
@@ -400,12 +397,12 @@ Octets localizedPrivKey(const Credentials& creds, std::span<const std::byte> eng
       // draft-reeder-snmpv3-usm-3desede: the key so far is fed back in as a *password*, so each
       // round costs another megabyte expansion. Nothing here caches; Client does.
       const std::string_view asPassword(reinterpret_cast<const char*>(key.data()), key.size());
-      const auto next = passwordToKey(creds.authProtocol, asPassword, ec);
+      const auto next = passwordToKey(auth, asPassword, ec);
       if (ec) return {};
-      more = localizeKey(creds.authProtocol, next, engineId, ec);
+      more = localizeKey(auth, next, engineId, ec);
     } else {
       // draft-blumenthal-aes-usm-04 section 3.1.2.1: Kul = Kul || H(Kul), until it is long enough.
-      more = hashOf(creds.authProtocol, key, ec);
+      more = hashOf(auth, key, ec);
     }
     if (ec) return {};
     if (more.empty()) {  // unreachable: every protocol with a key size has a hash behind it
@@ -417,6 +414,39 @@ Octets localizedPrivKey(const Credentials& creds, std::span<const std::byte> eng
   key.resize(want);
   ec = {};
   return key;
+}
+
+namespace {
+
+// The Master Key the Credentials carry for one secret, or the one its password derives to.
+Octets masterKeyOf(AuthProtocol p, const std::optional<Octets>& supplied, std::string_view password,
+                   net::ErrorCode& ec) {
+  if (supplied) {
+    ec = {};
+    return *supplied;
+  }
+  return passwordToKey(p, password, ec);
+}
+
+}  // namespace
+
+Octets localizedAuthKey(const Credentials& creds, std::span<const std::byte> engineId,
+                        net::ErrorCode& ec) {
+  const auto master = masterKeyOf(creds.authProtocol, creds.authMasterKey, creds.authPassword, ec);
+  if (ec) return {};
+  return localizeKey(creds.authProtocol, master, engineId, ec);
+}
+
+Octets localizedPrivKey(const Credentials& creds, std::span<const std::byte> engineId,
+                        net::ErrorCode& ec) {
+  // Asked first, as before Master Keys: no privacy protocol is the answer whatever the secret.
+  if (privKeySize(creds.privProtocol) == 0) {
+    ec = make_error_code(Errc::UnsupportedPrivProtocol);
+    return {};
+  }
+  const auto master = masterKeyOf(creds.authProtocol, creds.privMasterKey, creds.privPassword, ec);
+  if (ec) return {};
+  return localizedPrivKey(creds.authProtocol, creds.privProtocol, master, engineId, ec);
 }
 
 Octets privEncrypt(PrivProtocol p, std::span<const std::byte> privKey, std::int32_t boots,

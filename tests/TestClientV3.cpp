@@ -4,12 +4,14 @@
 #include <chrono>
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <optional>
 #include <span>
 #include <string>
 #include <vector>
 
 #include <snmpio/Client.hpp>
+#include <snmpio/detail/CacheView.hpp>
 
 #include "Deadlines.hpp"
 #include "ScriptedV3Agent.hpp"
@@ -1276,6 +1278,210 @@ TEST(ClientV3, SurfacesADecryptionErrorReport) {
   f.run();
 
   EXPECT_EQ(f.ec, make_error_code(Errc::DecryptionError));
+}
+
+// ---------------------------------------------------------------------------
+// Master Keys
+// ---------------------------------------------------------------------------
+
+// What an integrator hands every Client: the Credentials with each password replaced by the Master
+// Key derived from it, once, on a thread of their own. The Agent keeps the passwords, so it derives
+// its keys independently of these.
+Credentials withMasterKeys(Credentials creds) {
+  net::ErrorCode ec;
+  creds.authMasterKey = passwordToKey(creds.authProtocol, creds.authPassword, ec);
+  EXPECT_FALSE(ec) << ec.message();
+  creds.authPassword.clear();
+  if (creds.privProtocol != PrivProtocol::None) {
+    creds.privMasterKey = passwordToKey(creds.authProtocol, creds.privPassword, ec);
+    EXPECT_FALSE(ec) << ec.message();
+    creds.privPassword.clear();
+  }
+  return creds;
+}
+
+Octets engineIdNumbered(std::uint8_t n) {
+  return {std::byte{0x80}, std::byte{0x00}, std::byte{0x1f}, std::byte{0x88},
+          std::byte{0x02}, std::byte{0x00}, std::byte{0x00}, std::byte{n}};
+}
+
+TEST(ClientV3MasterKey, AuthNoPrivSucceedsAndDerivesNothing) {
+  for (const auto protocol :
+       {AuthProtocol::Md5, AuthProtocol::Sha1, AuthProtocol::Sha256, AuthProtocol::Sha512}) {
+    Fixture f;
+    ScriptedV3Agent agent(f.io, credentials(protocol), echoAnswer);
+    f.agent = &agent;
+
+    f.client.asyncGet(targetFor(agent), withMasterKeys(credentials(protocol)), {sysDescr},
+                      f.requestToken());
+    f.run();
+
+    EXPECT_FALSE(f.ec) << "protocol " << static_cast<int>(protocol) << ": " << f.ec.message();
+    ASSERT_EQ(f.response.varbinds.size(), 1U);
+    EXPECT_EQ(f.response.varbinds[0].name, sysDescr);
+    const auto counts = detail::CacheView::counts(f.client);
+    EXPECT_EQ(counts.masterKeyDerivations, 0U)
+        << "a Master Key the caller supplied is never derived";
+    EXPECT_EQ(counts.masterKeys, 0U) << "nor cached";
+  }
+}
+
+// SHA-1 and MD5 keys are shorter than AES-192's and AES-256's, so these pairs are the ones where
+// the Key Extension runs, and where Blumenthal and Reeder disagree (ADR-0005).
+TEST(ClientV3MasterKey, AuthPrivSucceedsUnderBothKeyExtensions) {
+  for (const auto auth : {AuthProtocol::Md5, AuthProtocol::Sha1}) {
+    for (const auto priv : {PrivProtocol::Des, PrivProtocol::Aes128, PrivProtocol::Aes192,
+                            PrivProtocol::Aes256, PrivProtocol::Aes192C, PrivProtocol::Aes256C}) {
+      Fixture f;
+      ScriptedV3Agent agent(f.io, privCredentials(priv, auth), echoAnswer);
+      f.agent = &agent;
+
+      f.client.asyncGet(targetFor(agent), withMasterKeys(privCredentials(priv, auth)), {sysDescr},
+                        f.requestToken());
+      f.run();
+
+      EXPECT_FALSE(f.ec) << "auth " << static_cast<int>(auth) << " priv " << static_cast<int>(priv)
+                         << ": " << f.ec.message();
+      ASSERT_EQ(f.response.varbinds.size(), 1U);
+      EXPECT_EQ(f.response.varbinds[0].name, sysDescr);
+      EXPECT_EQ(detail::CacheView::counts(f.client).masterKeyDerivations, 0U);
+    }
+  }
+}
+
+// A key one Octet short, one Octet long, empty, or derived under a hash of another width: each
+// would sign or encrypt with something the Agent can never match, so each is refused before
+// anything is sent, Engine Discovery included.
+TEST(ClientV3MasterKey, AWrongLengthMasterKeyIsRefused) {
+  net::ErrorCode ec;
+  const auto sha1Key = passwordToKey(AuthProtocol::Sha1, "maplesyrup", ec);
+  ASSERT_FALSE(ec) << ec.message();
+  const auto good = withMasterKeys(privCredentials(PrivProtocol::Aes128));
+  const auto shortened = [](Octets key) {
+    key.pop_back();
+    return key;
+  };
+  const auto lengthened = [](Octets key) {
+    key.push_back(std::byte{0});
+    return key;
+  };
+
+  std::vector<Credentials> cases;
+  for (const auto& key :
+       {shortened(*good.authMasterKey), lengthened(*good.authMasterKey), Octets{}, sha1Key}) {
+    auto authWrong = good;
+    authWrong.authMasterKey = key;
+    cases.push_back(authWrong);
+    auto privWrong = good;
+    privWrong.privMasterKey = key;
+    cases.push_back(privWrong);
+  }
+
+  for (std::size_t i = 0; i < cases.size(); ++i) {
+    Fixture f;
+    ScriptedV3Agent agent(f.io, privCredentials(PrivProtocol::Aes128), echoAnswer);
+    f.agent = &agent;
+
+    f.client.asyncGet(targetFor(agent), cases[i], {sysDescr}, f.requestToken());
+    f.run();
+
+    EXPECT_EQ(f.ec, Errc::ArgumentOutOfRange) << "case " << i << ": " << f.ec.message();
+    EXPECT_EQ(agent.requestsSeen(), 0) << "case " << i << ": nothing is sent";
+  }
+}
+
+// A Walk takes its Credentials through the same check, before its first request.
+TEST(ClientV3MasterKey, AWalkWithAWrongLengthMasterKeyIsRefused) {
+  Fixture f;
+  ScriptedV3Agent agent(f.io, credentials(), echoAnswer);
+  f.agent = &agent;
+
+  auto creds = withMasterKeys(credentials());
+  creds.authMasterKey->pop_back();
+  f.client.asyncWalkCollect(targetFor(agent), creds, Oid{1, 3, 6, 1, 2, 1, 1}, WalkOptions{},
+                            f.collectToken());
+  f.run();
+
+  EXPECT_EQ(f.ec, Errc::ArgumentOutOfRange) << f.ec.message();
+  EXPECT_EQ(agent.requestsSeen(), 0);
+}
+
+// "In place of" the password, not beside it: with both, which one the Agent holds cannot be told
+// from here without deriving the very key the caller supplied to avoid deriving. Refused rather
+// than resolved by a rule the caller has to know.
+TEST(ClientV3MasterKey, AMasterKeyBesideItsPasswordIsRefused) {
+  for (const bool privacy : {false, true}) {
+    Fixture f;
+    ScriptedV3Agent agent(f.io, privCredentials(PrivProtocol::Aes128), echoAnswer);
+    f.agent = &agent;
+
+    auto creds = withMasterKeys(privCredentials(PrivProtocol::Aes128));
+    if (privacy) {
+      creds.privPassword = "privatepass";
+    } else {
+      creds.authPassword = "maplesyrup";
+    }
+    f.client.asyncGet(targetFor(agent), creds, {sysDescr}, f.requestToken());
+    f.run();
+
+    EXPECT_EQ(f.ec, Errc::ArgumentOutOfRange) << (privacy ? "privacy" : "authentication");
+    EXPECT_EQ(agent.requestsSeen(), 0);
+  }
+}
+
+// One Client polling several Engines with one user: the password costs one Master Key per secret,
+// not one per Engine, and each Engine one Localized Key per secret -- a short hash.
+TEST(ClientV3MasterKey, OnePasswordDerivesItsMasterKeyOncePerClient) {
+  net::IoContext io;
+  Client client{io.get_executor()};
+  constexpr int engines = 3;
+  const auto creds = privCredentials(PrivProtocol::Aes128);
+
+  std::vector<std::unique_ptr<ScriptedV3Agent>> agents;
+  for (int i = 0; i < engines; ++i) {
+    agents.push_back(std::make_unique<ScriptedV3Agent>(io, creds, echoAnswer));
+    agents.back()->setEngineId(engineIdNumbered(static_cast<std::uint8_t>(i + 1)));
+  }
+
+  int completions = 0;
+  for (const auto& agent : agents) {
+    client.asyncGet(targetFor(*agent), creds, {sysDescr}, [&](net::ErrorCode e, const Response&) {
+      EXPECT_FALSE(e) << e.message();
+      if (++completions < engines) return;
+      client.stop();
+      for (const auto& a : agents) a->close();
+    });
+  }
+  io.run();
+  ASSERT_EQ(completions, engines);
+
+  const auto counts = detail::CacheView::counts(client);
+  EXPECT_EQ(counts.masterKeyDerivations, 2U)
+      << "one for the authentication password, one for privacy, whatever the number of Engines";
+  EXPECT_EQ(counts.masterKeys, 2U);
+  EXPECT_EQ(counts.localizedKeys, 2U * engines) << "two per Engine";
+}
+
+// The same password under two hashes is two Master Keys: what the cache is keyed on is what the
+// derivation consumes.
+TEST(ClientV3MasterKey, OnePasswordUnderTwoHashesIsTwoMasterKeys) {
+  Fixture f;
+  f.expectedCompletions = 2;
+  ScriptedV3Agent agent(f.io, credentials(AuthProtocol::Sha1), echoAnswer);
+  f.agent = &agent;
+
+  const auto target = targetFor(agent);
+  f.client.asyncGet(
+      target, credentials(AuthProtocol::Sha1), {sysDescr}, [&](net::ErrorCode e, const Response&) {
+        EXPECT_FALSE(e) << e.message();
+        f.client.asyncGet(target, credentials(AuthProtocol::Sha256), {sysDescr}, f.requestToken());
+        f.finish();
+      });
+  f.run();
+
+  // The second fails at the Agent, which holds the SHA-1 user; the derivation happened regardless.
+  EXPECT_EQ(detail::CacheView::counts(f.client).masterKeyDerivations, 2U);
+  EXPECT_EQ(detail::CacheView::counts(f.client).masterKeys, 2U);
 }
 
 }  // namespace

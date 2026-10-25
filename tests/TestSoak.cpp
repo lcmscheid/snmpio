@@ -93,7 +93,8 @@ constexpr int failuresInDetail = 20;
 
 const Community soakCommunity{Community("public")};
 
-// Two Security Levels among the v3 slots, so that one run takes authPriv's path as well.
+// Two Security Levels among the v3 slots, so that one run takes authPriv's path as well. These are
+// the Agents' Credentials; the Clients get masterKeyCredentialsFor's.
 Credentials credentialsFor(int slot) {
   if (slot % 4 == 1) {
     return Credentials{"bert",       SecurityLevel::AuthNoPriv, AuthProtocol::Sha256,
@@ -101,6 +102,23 @@ Credentials credentialsFor(int slot) {
   }
   return Credentials{"ernie",      SecurityLevel::AuthPriv, AuthProtocol::Sha256,
                      "maplesyrup", PrivProtocol::Aes128,    "rubberduck"};
+}
+
+// The same Credentials as the README's deployment hands them to every Client: each password
+// replaced by its Master Key, derived once, here on the test's own thread rather than on any I/O
+// thread.
+Credentials masterKeyCredentialsFor(int slot) {
+  auto creds = credentialsFor(slot);
+  net::ErrorCode ec;
+  creds.authMasterKey = passwordToKey(creds.authProtocol, creds.authPassword, ec);
+  EXPECT_FALSE(ec) << ec.message();
+  creds.authPassword.clear();
+  if (creds.privProtocol != PrivProtocol::None) {
+    creds.privMasterKey = passwordToKey(creds.authProtocol, creds.privPassword, ec);
+    EXPECT_FALSE(ec) << ec.message();
+    creds.privPassword.clear();
+  }
+  return creds;
 }
 
 // ---------------------------------------------------------------------------
@@ -455,14 +473,6 @@ bool isWalk(Operation op) {
   return op == Operation::Walk || op == Operation::WalkCollect;
 }
 
-// Whether the soak holds a request to how long it takes, as well as to its code. v2c only: a v3
-// Client's strand can be busy for longer than any of these bounds deriving a Master Key, and
-// everything queued on it waits behind the derivation -- threat model B7, until #37 moves the
-// derivation off the strand.
-bool heldToTiming(const Request& r) {
-  return !isV3(r.client.slot);
-}
-
 // The request's own Subtree, which a Walk walks: soakRoot.b.i, as subtreeOf() reads it back.
 Oid subtreeFor(const Request& r, int index) {
   return soakRoot.child(static_cast<std::uint32_t>(r.behaviour))
@@ -488,6 +498,8 @@ class Soak {
       return d;
     };
     for (int slot = 0; slot < clientSlots; ++slot) {
+      m_credentials.push_back(isV3(slot) ? std::optional(masterKeyCredentialsFor(slot))
+                                         : std::nullopt);
       m_agents.push_back(std::make_unique<SoakAgent>(m_clientIo, slot, delivery));
       m_slots.push_back(
           std::make_unique<Slot>(m_clientIo.get_executor(),
@@ -610,7 +622,8 @@ class Soak {
 
       const auto target = m_agents.at(static_cast<std::size_t>(request.client.slot))->target();
       if (isV3(request.client.slot)) {
-        initiateOn(instance->client(), target, credentialsFor(request.client.slot), request, index,
+        initiateOn(instance->client(), target,
+                   *m_credentials.at(static_cast<std::size_t>(request.client.slot)), request, index,
                    record);
       } else {
         initiateOn(instance->client(), target, soakCommunity, request, index, record);
@@ -736,8 +749,7 @@ class Soak {
     }
     // A terminal signal drops a request at once, whatever wait it is in (L2): one that ended long
     // after it was ignored or lost on its way to the strand, and waited out something else (#71).
-    if (record.terminal && heldToTiming(request) &&
-        record.completedAt - record.terminalAt > terminalLimit) {
+    if (record.terminal && record.completedAt - record.terminalAt > terminalLimit) {
       ADD_FAILURE() << context() << ": completed "
                     << std::chrono::duration_cast<milliseconds>(record.completedAt -
                                                                 record.terminalAt)
@@ -764,7 +776,7 @@ class Soak {
     // Every answer lands inside the first attempt's deadline, so one that took longer was lost
     // and retransmitted for -- a reply that overtook its send, say, which only several threads
     // running the io_context produce.
-    if (!code && heldToTiming(request) && !isWalk(request.operation) && took >= attemptTimeout) {
+    if (!code && !isWalk(request.operation) && took >= attemptTimeout) {
       ADD_FAILURE() << context() << ": answered only after "
                     << std::chrono::duration_cast<milliseconds>(took).count()
                     << " ms, past the first attempt's deadline";
@@ -781,6 +793,9 @@ class Soak {
   net::asio::executor_work_guard<net::IoContext::executor_type> m_callerWork =
       net::asio::make_work_guard(m_callerIo);
   std::vector<std::unique_ptr<SoakAgent>> m_agents;
+  // Per slot, for the v3 ones: what every Client in the slot is handed. Written before any thread
+  // starts, and only read after.
+  std::vector<std::optional<Credentials>> m_credentials;
   std::vector<std::unique_ptr<Slot>> m_slots;
   std::vector<Record> m_records;
   Completions m_completions;

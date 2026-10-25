@@ -33,7 +33,7 @@ Stage 6 has begun. Its sanitizer builds, the stateful Client fuzzer and the
 
 ## Using it
 
-Both snippets below are condensed from [`examples/`](examples/), which is a separate CMake project
+The first two snippets below are condensed from [`examples/`](examples/), which is a separate CMake project
 that `find_package()`s an installed snmpio — so building it is what proves the install rules work,
 and CI builds it on every push: the examples and the package cannot drift apart. There is one
 example per operation; the [table below](#the-examples) says what each shows.
@@ -76,6 +76,35 @@ auto varbinds = co_await client.asyncWalkCollect(
     target, credentials, *snmpio::Oid::parse("1.3.6.1.2.1.1"), {},
     net::asio::redirect_error(net::asio::use_awaitable, ec));
 ```
+
+A password costs a Master Key derivation, RFC 3414's deliberately expensive hash over a megabyte,
+and a Client does it on its own strand the first time it meets that password. It caches the
+result, so one Client pays once per password however many Engines it polls, but every Client pays
+it, and on an I/O thread. To pay nothing there, derive the Master Key once, on a thread of your
+own, and hand it to every Client in place of the password:
+
+```cpp
+net::ErrorCode ec;
+snmpio::Credentials credentials;
+credentials.userName = "privsha1aes";
+credentials.level = snmpio::SecurityLevel::AuthPriv;
+credentials.authProtocol = snmpio::AuthProtocol::Sha1;
+credentials.authMasterKey = snmpio::passwordToKey(credentials.authProtocol, authPassword, ec);
+if (ec) return;  // each call clears ec when it succeeds, so check each one
+credentials.privProtocol = snmpio::PrivProtocol::Aes128;
+// Under the authentication protocol's hash: USM names no second one.
+credentials.privMasterKey = snmpio::passwordToKey(credentials.authProtocol, privPassword, ec);
+if (ec) return;
+
+// Every Client, on any thread, now gets the Credentials and never the passwords.
+for (auto& [name, client] : clients) client->asyncGet(targetOf(name), credentials, oids, token);
+```
+
+What is left on the strand per Engine is localising the key, one short hash, except under the
+Reeder Key Extension (`Aes192C`, `Aes256C`), whose extension runs the megabyte hash again over the
+Localized Key. A Master Key must be `snmpio::keySize(authProtocol)` Octets and stands in place of
+its password, which stays empty; a request breaking either rule completes with
+`Errc::ArgumentOutOfRange` before anything is sent.
 
 Three things the compiler will not tell you:
 
@@ -186,8 +215,9 @@ Why this shape and not the other two:
   caches, shared across every Target it polls. Clients do not share them, so an Engine reachable at
   two Targets is discovered twice, and each Client derives the Master Key for its own Credentials.
   Where several Targets front one Engine, poll them through one Client. Where one password serves
-  many Targets, each Client pays the derivation once, on its strand. ADR-0003's amendment of
-  2026-10-24 records this trade.
+  many Targets, each Client pays the derivation once, on its strand, unless the Credentials carry
+  the Master Key [derived once beforehand](#using-it), when none of them does. ADR-0003's
+  amendment of 2026-10-24 records this trade.
 - **Completion handlers run on the caller's executor** — the one bound to the token, or the
   Client's strand when none is. They can run after the Client is gone, so a handler must not reach
   back into a destroyed Client, or into an owner that went with it.
@@ -197,10 +227,12 @@ Why this shape and not the other two:
 
 The soak, `Soak.ShapedLikeTheDeployment` in [`tests/TestSoak.cpp`](tests/TestSoak.cpp), runs this
 shape with eight Clients on an `io_context` run by four threads, half of them v2c and half v3, and
-callers on a second `io_context`. Four more threads initiate, cancel, stop and destroy Clients at
+callers on a second `io_context`. The v3 Clients are handed Master Keys derived before it starts,
+as above. Four more threads initiate, cancel, stop and destroy Clients at
 moments its seed decides, against Agents that answer at once, late, never, twice, or after malformed
 datagrams. Every completion is checked to happen exactly once, on the caller's executor, with a
-code that what was done to the request allows. It runs for two seconds in every test run, under
+code that what was done to the request allows, and, for either version, within half an attempt's
+deadline of a terminal cancellation and inside its first attempt when answered. It runs for two seconds in every test run, under
 ASan and TSan in CI, and carries the `stress` label:
 
 ```sh

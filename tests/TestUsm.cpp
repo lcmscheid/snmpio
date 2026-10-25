@@ -75,6 +75,33 @@ TEST(PasswordToKey, MatchesTheKnownVectors) {
   }
 }
 
+// The expansion is hashed in chunks far larger than the password, so what each chunk starts with
+// depends on where the one before it ended. These lengths are the ones a chunking mistake shows up
+// at: one character, a length that divides nothing, either side of RFC 3414's 64-Octet line, and
+// a password longer than a chunk. Computed with Python's hashlib over the megabyte built whole.
+TEST(PasswordToKey, MatchesAWholeMegabyteHashAtAwkwardLengths) {
+  struct Row {
+    std::string password;
+    std::string_view master;
+  };
+  std::string longPassword;
+  while (longPassword.size() < 5000) longPassword += "0123456789abcdef";
+  longPassword.resize(5000);
+  const std::array<Row, 5> rows = {{
+      {"a", "9bc1b2a288b26af7257a36277ae3816a7d4f16e89c1e7e77d0a5c48bad62b360"},
+      {"seven77", "f0d372e8f5a95c7e16b75b9a67ccae1f02b7153d5ab8c4f506df6112ad1dd3a9"},
+      {std::string(64, 'x'), "8f990ba0b577b51cf009ea049368c16bbda1b21e1b93be07a824758bb253c39b"},
+      {std::string(65, 'y'), "34bc6ad8178071438d388d4680bc6c236abeb0c88be1cee99a16f921d7d84999"},
+      {longPassword, "1096a56a200363fa5ebe4063f8e5df3926098bd5df90945d860f31a02dbcfcb7"},
+  }};
+  for (const auto& row : rows) {
+    net::ErrorCode ec;
+    const auto master = passwordToKey(AuthProtocol::Sha256, row.password, ec);
+    EXPECT_FALSE(ec) << ec.message();
+    EXPECT_EQ(hex(master), hex(fromHex(row.master))) << row.password.size() << " characters";
+  }
+}
+
 TEST(LocalizeKey, MatchesTheKnownVectors) {
   for (const auto& v : keyVectors) {
     net::ErrorCode ec;
@@ -222,6 +249,40 @@ TEST(LocalizedPrivKey, MatchesTheVectors) {
     EXPECT_FALSE(ec) << ec.message();
     EXPECT_EQ(hex(key), hex(fromHex(v.key)))
         << "auth " << static_cast<int>(v.auth) << " priv " << static_cast<int>(v.priv);
+  }
+}
+
+// The same rows from a Master Key the caller derived, which is how Credentials carrying one reach
+// the Engine: what the password would have been expanded into, and nothing else, is the input.
+TEST(LocalizedPrivKey, FromAMasterKeyMatchesTheVectors) {
+  for (const auto& v : privKeyVectors) {
+    net::ErrorCode ec;
+    const auto master = passwordToKey(v.auth, privPassword, ec);
+    ASSERT_FALSE(ec) << ec.message();
+    const auto key = localizedPrivKey(v.auth, v.priv, master, privEngineId(), ec);
+    EXPECT_FALSE(ec) << ec.message();
+    EXPECT_EQ(hex(key), hex(fromHex(v.key)))
+        << "auth " << static_cast<int>(v.auth) << " priv " << static_cast<int>(v.priv);
+  }
+}
+
+// Credentials may carry either secret as a Master Key, and the Credentials overloads read it in
+// place of the password.
+TEST(LocalizedKeys, ReadAMasterKeyTheCredentialsCarry) {
+  for (const auto& v : privKeyVectors) {
+    net::ErrorCode ec;
+    auto creds = privCreds(v.auth, v.priv);
+    const auto viaPasswords = localizedAuthKey(creds, privEngineId(), ec);
+    ASSERT_FALSE(ec) << ec.message();
+    creds.authMasterKey = passwordToKey(v.auth, creds.authPassword, ec);
+    creds.privMasterKey = passwordToKey(v.auth, creds.privPassword, ec);
+    creds.authPassword.clear();
+    creds.privPassword.clear();
+
+    EXPECT_EQ(hex(localizedAuthKey(creds, privEngineId(), ec)), hex(viaPasswords));
+    EXPECT_FALSE(ec) << ec.message();
+    EXPECT_EQ(hex(localizedPrivKey(creds, privEngineId(), ec)), hex(fromHex(v.key)));
+    EXPECT_FALSE(ec) << ec.message();
   }
 }
 

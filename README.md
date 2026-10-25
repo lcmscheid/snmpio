@@ -257,6 +257,12 @@ co_return response;
 reporting `Errc::Timeout` — the loop above is the layer above that, for a Target that stayed
 unreachable across whole exchanges.
 
+Two arguments have ceilings: `Target::retries` at `retriesCeiling` (10), and the `maxRepetitions`
+of a GETBULK or a Walk at `maxRepetitionsCeiling` (1000). Past either, or below zero, the operation
+sends nothing and completes with `Errc::ArgumentOutOfRange`, which classifies as `Configuration`.
+The value is refused rather than clamped. A request that quietly sent something other than what was
+asked for would hide a bug in the caller.
+
 The borderline calls are documented next to the enumeration in
 [`include/snmpio/Error.hpp`](include/snmpio/Error.hpp), with the reasoning. Three worth knowing
 here:
@@ -876,6 +882,12 @@ error-status the Agent returned.
 
 Walks stream by default and collect on request (ADR-0004). Both reject a non-increasing OID, both
 stop at the Subtree boundary, and both degrade `max-repetitions` when an Agent answers `tooBig`.
+An Agent can still answer with strictly increasing OIDs forever, so `WalkOptions` can also limit
+the number of Varbinds a Walk delivers (`maxVarbinds`) and how long the whole Walk may take
+(`timeLimit`). Reaching either ends the Walk with `Errc::WalkIncomplete`, and a collecting Walk
+still hands back what it gathered. A streaming Walk has no limit unless one is set, since its Batch
+handler already decides when to stop. `asyncWalkCollect` buffers everything, so it collects at
+most `defaultCollectLimit` (100,000) Varbinds unless it is given a higher limit.
 Cancellation is split as the ADR requires: `total` stops at a Batch boundary and reports
 `Errc::WalkIncomplete` alongside what was already delivered, `terminal` drops everything with
 `operation_aborted`.

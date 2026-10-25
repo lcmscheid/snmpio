@@ -219,10 +219,12 @@ void destroyWhileOthersRunAndInitiate(int round) {
                        });
   ScriptedAgent answering(io, answerOnlySysDescr);
 
-  // A short attempt so the second goes out early, and enough of them that the request is still
-  // retransmitting at the long deadline.
-  auto retransmitting = targetFor(retransmitted, 250);
-  retransmitting.timeout = std::chrono::milliseconds(20);
+  // A short attempt so the second goes out early, and as many as a Target may ask for, so that the
+  // request is still retransmitting, a quarter of a second on, when A destroys the Client. That is
+  // the whole window it needs: once ~Client has set the flag, an attempt that expires still ends
+  // the request with ClientStopped.
+  auto retransmitting = targetFor(retransmitted, retriesCeiling);
+  retransmitting.timeout = std::chrono::milliseconds(30);
   auto discovering = targetFor(withholding, 0);
   discovering.timeout = longDeadline;
 

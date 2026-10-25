@@ -137,6 +137,28 @@ class EveryCancellationSoFar {
   net::asio::cancellation_type_t m_seen = net::asio::cancellation_type::none;
 };
 
+// The two halves of ADR-0004's split, in one place so they cannot drift apart: terminal drops a
+// Walk and says so with operation_aborted, total stops it and reports it incomplete. Nothing else
+// may turn a cancellation into an ordinary failure.
+std::optional<net::ErrorCode> cancellationEnding(const net::asio::cancellation_state& state) {
+  const auto c = state.cancelled();
+  if ((c & net::asio::cancellation_type::terminal) != net::asio::cancellation_type::none) {
+    return net::ErrorCode(net::asio::error::operation_aborted);
+  }
+  if (c != net::asio::cancellation_type::none) return make_error_code(Errc::WalkIncomplete);
+  return std::nullopt;
+}
+
+// Target.hpp's documented bounds. Refused rather than clamped: a value past them is a bug in the
+// caller, and quietly rewriting it would hide the bug and send something other than was asked.
+bool retriesInRange(int retries) noexcept {
+  return retries >= 0 && retries <= retriesCeiling;
+}
+
+bool repetitionsInRange(std::int32_t maxRepetitions) noexcept {
+  return maxRepetitions >= 0 && maxRepetitions <= maxRepetitionsCeiling;
+}
+
 }  // namespace
 
 // Everything the Client knows, shared by every coroutine working on it (ADR-0009), so that the
@@ -322,6 +344,65 @@ class Client::Impl {
   // cancellation state as the Report arrived, since a cancelled request never asks again.
   std::optional<net::ErrorCode> handleReport(const net::UdpEndpoint& from, const Pending& pending,
                                              bool mayRetry, net::asio::cancellation_type cancelled);
+
+  // A Walk's time limit: a timer, and the slot each of the Walk's requests runs on so that the
+  // timer can drop it. `passed` is how the Walk tells that drop from the caller's.
+  struct WalkDeadline {
+    explicit WalkDeadline(const net::Executor& ex) : timer(ex) {}
+    net::SteadyTimer timer;
+    net::asio::cancellation_signal signal;
+    std::chrono::steady_clock::time_point at;
+    bool passed = false;
+
+    // By the clock as well as by the flag: the timer's handler may be queued behind the strand's
+    // current work when the limit passes.
+    [[nodiscard]] bool reached() const { return passed || std::chrono::steady_clock::now() >= at; }
+  };
+
+  // Starts the timer, which drops the exchange in flight, if any, when `limit` has passed.
+  static std::shared_ptr<WalkDeadline> armDeadline(const net::Executor& ex,
+                                                   std::chrono::milliseconds limit);
+
+  // One of a time-limited Walk's requests, on the deadline's slot rather than the Walk's own.
+  net::Awaitable<RequestResult> doRequestWithin(Ref self, std::shared_ptr<WalkDeadline> deadline,
+                                                net::asio::cancellation_slot walkSlot,
+                                                Target target, Auth auth, Pdu pdu);
+
+  // Why a Walk will not start: Stopping, then its arguments -- the order doRequest keeps, here so
+  // that a Walk refuses them before its first request, and refuses a negative maxRepetitions that
+  // would otherwise read as GETNEXT.
+  [[nodiscard]] std::optional<net::ErrorCode> refuseWalk(const Target& target,
+                                                         const WalkOptions& options) const {
+    if (m_stopping) return make_error_code(Errc::ClientStopped);
+    if (!retriesInRange(target.retries) || !repetitionsInRange(options.maxRepetitions)) {
+      return make_error_code(Errc::ArgumentOutOfRange);
+    }
+    return std::nullopt;
+  }
+
+  // What a Walk ends with when one of its requests failed. A cancellation that cut the exchange
+  // short is an incomplete Walk, not a fault of the Target's -- a total cancel against a silent
+  // Target must not surface as a Timeout. So is the time limit dropping it: the Walk ran out of
+  // time, and the Target did nothing wrong.
+  static net::ErrorCode walkFailure(const net::ErrorCode& ec,
+                                    const net::asio::cancellation_state& state,
+                                    const WalkDeadline* deadline) {
+    if (const auto stop = cancellationEnding(state)) return *stop;
+    if (deadline != nullptr && deadline->passed && ec == net::asio::error::operation_aborted) {
+      return make_error_code(Errc::WalkIncomplete);
+    }
+    return ec;
+  }
+
+  // What one reply adds to a Walk: the Batch, and how the Walk goes on after it. `room` is how
+  // many more Varbinds the limit allows. Advances `current` past the Batch.
+  enum class WalkNext { More, Done, Cut, NonIncreasing };
+  struct WalkStep {
+    std::vector<Varbind> batch;
+    WalkNext next = WalkNext::More;
+  };
+  static WalkStep takeBatch(const Oid& base, Oid& current, std::vector<Varbind>& varbinds,
+                            std::size_t room);
 
   // Observe both cancellation types rather than throwing on either, once per operation.
   static net::Awaitable<void> observeBothCancellationTypes();
@@ -769,6 +850,13 @@ net::Awaitable<void> Client::Impl::observeBothCancellationTypes() {
 
 net::Awaitable<Client::RequestResult> Client::Impl::doRequest(Ref self, Target target, Auth auth,
                                                               Pdu pdu) {
+  // Stopping first: an operation initiated after it completes with ClientStopped, whatever else is
+  // wrong with it. Then the arguments, before anything is sent or discovered.
+  if (m_stopping) co_return RequestResult{make_error_code(Errc::ClientStopped), Response{}};
+  if (!retriesInRange(target.retries) ||
+      (pdu.type == PduType::GetBulk && !repetitionsInRange(pdu.maxRepetitions()))) {
+    co_return RequestResult{make_error_code(Errc::ArgumentOutOfRange), Response{}};
+  }
   if (const auto* community = std::get_if<Community>(&auth)) {
     co_return co_await doRequestV2c(self, std::move(target), *community, std::move(pdu));
   }
@@ -1146,36 +1234,102 @@ net::Awaitable<Client::RequestResult> Client::Impl::doRequestV3(Ref self, Target
   co_return RequestResult{make_error_code(Errc::UnexpectedReport), Response{}};
 }
 
+std::shared_ptr<Client::Impl::WalkDeadline> Client::Impl::armDeadline(
+    const net::Executor& ex, std::chrono::milliseconds limit) {
+  auto deadline = std::make_shared<WalkDeadline>(ex);
+  deadline->at = std::chrono::steady_clock::now() + limit;
+  deadline->timer.expires_at(deadline->at);
+  // Weak, so that the timer's own wait does not keep the timer alive: when the Walk ends, its frame
+  // lets go of the deadline, the timer's destructor cancels the wait, and nothing fires.
+  deadline->timer.async_wait([weak = std::weak_ptr<WalkDeadline>(deadline)](net::ErrorCode ec) {
+    const auto d = weak.lock();
+    if (ec || !d) return;
+    d->passed = true;
+    d->signal.emit(net::asio::cancellation_type::terminal);
+  });
+  return deadline;
+}
+
+// The request runs as an operation of its own, on the deadline's slot, so that the time limit can
+// emit terminal into it. The caller's signals reach that slot too, forwarded from the Walk's own
+// slot, which nothing else uses while this waits; the Walk's state still records them first, so a
+// Walk reads the caller's cancellation the same way with a time limit as without one.
+net::Awaitable<Client::RequestResult> Client::Impl::doRequestWithin(
+    Ref self, std::shared_ptr<WalkDeadline> deadline, net::asio::cancellation_slot walkSlot,
+    Target target, Auth auth, Pdu pdu) {
+  if (walkSlot.is_connected()) {
+    walkSlot.assign([deadline](net::asio::cancellation_type type) { deadline->signal.emit(type); });
+  }
+  auto result = co_await net::asio::co_spawn(
+      m_strand, doRequest(self, std::move(target), std::move(auth), std::move(pdu)),
+      net::asio::bind_cancellation_slot(deadline->signal.slot(), use_awaitable));
+  if (walkSlot.is_connected()) walkSlot.clear();
+  co_return result;
+}
+
+Client::Impl::WalkStep Client::Impl::takeBatch(const Oid& base, Oid& current,
+                                               std::vector<Varbind>& varbinds, std::size_t room) {
+  WalkStep step;
+  step.batch.reserve(std::min(varbinds.size(), room));
+  for (auto& vb : varbinds) {
+    // endOfMibView -- or either of the noSuch markers, from an Agent that should not be sending
+    // them here -- ends the Walk, as does leaving the Subtree.
+    if (isException(vb.val) || !base.isPrefixOf(vb.name)) {
+      step.next = WalkNext::Done;
+      break;
+    }
+    // ADR-0004: an Agent that repeats an OID would otherwise walk forever.
+    if (!(current < vb.name)) {
+      step.next = WalkNext::NonIncreasing;
+      break;
+    }
+    // Past the limit is cut only once it is known to be more of the Subtree: the end arriving with
+    // the last Varbind allowed still makes a whole Walk.
+    if (step.batch.size() == room) {
+      step.next = WalkNext::Cut;
+      break;
+    }
+    current = vb.name;
+    step.batch.push_back(std::move(vb));
+  }
+  return step;
+}
+
 net::Awaitable<Client::WalkResult> Client::Impl::doWalk(Ref self, Target target, Auth auth,
                                                         Oid base, WalkOptions options,
                                                         BatchHandler onBatch) {
   // A total cancellation is a request to stop cleanly at a Batch boundary rather than to drop
-  // everything, so it has to be observable here -- and observed, not thrown.
+  // everything, so it has to be observable here -- and observed, not thrown. The state is asked
+  // for at each use rather than held, because each request underneath re-seats it.
   co_await observeBothCancellationTypes();
-  // The two halves of ADR-0004's split, in one place so they cannot drift apart: terminal drops
-  // everything and says so with operation_aborted, total stops here and reports an incomplete
-  // Walk. Nothing else may turn a cancellation into an ordinary failure. The state is asked for
-  // at each call rather than held, because each request underneath re-seats it.
-  const auto stopNow = [](net::asio::cancellation_state state) -> std::optional<net::ErrorCode> {
-    const auto c = state.cancelled();
-    if ((c & net::asio::cancellation_type::terminal) != net::asio::cancellation_type::none) {
-      return net::ErrorCode(net::asio::error::operation_aborted);
-    }
-    if (c != net::asio::cancellation_type::none) return make_error_code(Errc::WalkIncomplete);
-    return std::nullopt;
-  };
+  if (const auto refused = refuseWalk(target, options)) co_return WalkResult{*refused};
+
+  // Either limit ends the Walk with WalkIncomplete, never as a whole one (ADR-0004). Both are
+  // checked before each request, after the caller's cancellation, so a Walk that has used up
+  // either sends nothing more.
+  const std::size_t varbindLimit =
+      options.maxVarbinds.value_or(std::numeric_limits<std::size_t>::max());
+  std::size_t delivered = 0;
+  const auto deadline =
+      options.timeLimit ? armDeadline(co_await net::asio::this_coro::executor, *options.timeLimit)
+                        : nullptr;
 
   Oid current = base;
   std::int32_t maxRepetitions = options.maxRepetitions;
 
   for (;;) {
-    if (const auto stop = stopNow(co_await net::asio::this_coro::cancellation_state))
-      co_return WalkResult{*stop};
+    const auto state = co_await net::asio::this_coro::cancellation_state;
+    if (const auto stop = cancellationEnding(state)) co_return WalkResult{*stop};
+    if (delivered >= varbindLimit || (deadline && deadline->reached())) {
+      co_return WalkResult{make_error_code(Errc::WalkIncomplete)};
+    }
 
     const Pdu req = maxRepetitions <= 0 ? makePdu(PduType::GetNext, toVarbinds({current}))
                                         : makeBulkPdu(toVarbinds({current}), 0, maxRepetitions);
 
-    auto [ec, resp] = co_await doRequest(self, target, auth, req);
+    auto [ec, resp] =
+        deadline ? co_await doRequestWithin(self, deadline, state.slot(), target, auth, req)
+                 : co_await doRequest(self, target, auth, req);
     // tooBig means the Response did not fit, not that the request was wrong: ask for less and try
     // again. Only a deliberately misbehaving Simulator reaches this path (ADR-0006).
     if (ec == ErrorStatus::TooBig && maxRepetitions > 1) {
@@ -1183,41 +1337,30 @@ net::Awaitable<Client::WalkResult> Client::Impl::doWalk(Ref self, Target target,
       continue;
     }
     if (ec) {
-      // A cancellation that cut the exchange short is an incomplete Walk, not a fault of the
-      // Target's -- a total cancel against a silent Target must not surface as a Timeout.
-      if (const auto stop = stopNow(co_await net::asio::this_coro::cancellation_state))
-        co_return WalkResult{*stop};
-      co_return WalkResult{ec};
+      co_return WalkResult{
+          walkFailure(ec, co_await net::asio::this_coro::cancellation_state, deadline.get())};
     }
     // A reply in hand as Stopping began is a Batch the caller never sees: the Batch handler is not
     // called once Stopping has begun, from whichever thread it began on (ADR-0009).
     if (m_stopping) co_return WalkResult{make_error_code(Errc::ClientStopped)};
     if (resp.varbinds.empty()) co_return WalkResult{make_error_code(Errc::MissingVarbind)};
 
-    std::vector<Varbind> batch;
-    batch.reserve(resp.varbinds.size());
-    bool done = false;
-    for (auto& vb : resp.varbinds) {
-      // endOfMibView -- or either of the noSuch markers, from an Agent that should not be sending
-      // them here -- ends the Walk, as does leaving the Subtree.
-      if (isException(vb.val) || !base.isPrefixOf(vb.name)) {
-        done = true;
-        break;
-      }
-      // ADR-0004: an Agent that repeats an OID would otherwise walk forever.
-      if (!(current < vb.name)) co_return WalkResult{make_error_code(Errc::NonIncreasingOid)};
-      current = vb.name;
-      batch.push_back(std::move(vb));
+    const WalkStep step = takeBatch(base, current, resp.varbinds, varbindLimit - delivered);
+    if (step.next == WalkNext::NonIncreasing) {
+      co_return WalkResult{make_error_code(Errc::NonIncreasingOid)};
     }
-
-    if (const auto ended = deliverBatch(onBatch, batch)) co_return WalkResult{*ended};
-    if (done) co_return WalkResult{net::ErrorCode{}};
+    if (const auto ended = deliverBatch(onBatch, step.batch)) co_return WalkResult{*ended};
+    if (step.next == WalkNext::Done) co_return WalkResult{net::ErrorCode{}};
+    if (step.next == WalkNext::Cut) co_return WalkResult{make_error_code(Errc::WalkIncomplete)};
+    delivered += step.batch.size();
   }
 }
 
 net::Awaitable<Client::CollectResult> Client::Impl::doWalkCollect(Ref self, Target target,
                                                                   Auth auth, Oid base,
                                                                   WalkOptions options) {
+  // ADR-0004's wrapper is the half that buffers, so it is the half with a limit by default.
+  if (!options.maxVarbinds) options.maxVarbinds = defaultCollectLimit;
   std::vector<Varbind> collected;
   auto [ec] = co_await doWalk(self, std::move(target), std::move(auth), std::move(base), options,
                               [&collected](std::span<const Varbind> batch) {

@@ -24,7 +24,7 @@ TEST(Error, ComparesAgainstTheEnumDirectly) {
 }
 
 TEST(Error, EveryCodeHasAMessage) {
-  for (int i = 0; i <= static_cast<int>(Errc::UnexpectedReport); ++i) {
+  for (int i = 0; i <= static_cast<int>(Errc::ArgumentOutOfRange); ++i) {
     const net::ErrorCode ec = make_error_code(static_cast<Errc>(i));
     const std::string message = ec.message();
     EXPECT_FALSE(message.empty()) << i;
@@ -83,6 +83,14 @@ TEST(ErrorClassification, SilenceIsWorthRetryingAndAWrongPasswordIsNot) {
   EXPECT_EQ(classify(make_error_code(Errc::AuthFailed)), ErrorClass::Configuration);
   EXPECT_EQ(classify(make_error_code(Errc::DecryptionFailed)), ErrorClass::Configuration);
   EXPECT_EQ(classify(make_error_code(Errc::UnknownUserName)), ErrorClass::Configuration);
+}
+
+TEST(ErrorClassification, AnArgumentPastItsBoundIsTheCallersToFix) {
+  // Not Fatal: the caller can change the argument. Not Retriable: the same call fails the same
+  // way every time.
+  EXPECT_EQ(classify(make_error_code(Errc::ArgumentOutOfRange)), ErrorClass::Configuration);
+  EXPECT_EQ(errorCategory().message(static_cast<int>(Errc::ArgumentOutOfRange)).rfind("unknown", 0),
+            std::string::npos);
 }
 
 TEST(ErrorClassification, MalformedRepliesAndOurOwnStopAreFatal) {

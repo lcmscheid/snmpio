@@ -555,6 +555,21 @@ TEST(ClientV3, TimesOutAgainstASilentTarget) {
   EXPECT_EQ(f.ec, make_error_code(Errc::Timeout));
 }
 
+TEST(ClientV3, RefusesAnArgumentPastItsCeilingBeforeDiscovering) {
+  // The bound is the same at either version, and is checked before the Engine Discovery a first
+  // v3 request would otherwise send.
+  Fixture f;
+  ScriptedV3Agent agent(f.io, credentials(), echoAnswer);
+  f.agent = &agent;
+
+  f.client.asyncGetBulk(targetFor(agent), credentials(), {sysDescr}, 0, maxRepetitionsCeiling + 1,
+                        f.requestToken());
+  f.run();
+
+  EXPECT_EQ(f.ec, Errc::ArgumentOutOfRange) << f.ec.message();
+  EXPECT_EQ(agent.requestsSeen(), 0) << "nothing is sent, not even a discovery probe";
+}
+
 TEST(ClientV3, SurfacesAnAgentErrorStatusInTheAgentCategory) {
   Fixture f;
   ScriptedV3Agent agent(f.io, credentials(), [](const Pdu&) {

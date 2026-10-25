@@ -112,7 +112,7 @@ TEST(ClientV3, NoAuthNoPrivNeedsOnlyTheFirstDiscoveryPhase) {
   EXPECT_EQ(agent.requestsSeen(), 2);
 }
 
-TEST(ClientV3, ASecondRequestSendsNoProbe) {
+TEST(ClientV3, ASecondRequestSkipsEngineDiscovery) {
   Fixture f;
   f.expectedCompletions = 2;
   ScriptedV3Agent agent(f.io, credentials(), echoAnswer);
@@ -553,6 +553,21 @@ TEST(ClientV3, TimesOutAgainstASilentTarget) {
 
   // Discovery is the thing that timed out, and it says so as any other exchange would.
   EXPECT_EQ(f.ec, make_error_code(Errc::Timeout));
+}
+
+TEST(ClientV3, RefusesAnArgumentPastItsCeilingBeforeDiscovering) {
+  // The bound is the same at either version, and is checked before the Engine Discovery a first
+  // v3 request would otherwise send.
+  Fixture f;
+  ScriptedV3Agent agent(f.io, credentials(), echoAnswer);
+  f.agent = &agent;
+
+  f.client.asyncGetBulk(targetFor(agent), credentials(), {sysDescr}, 0, maxRepetitionsCeiling + 1,
+                        f.requestToken());
+  f.run();
+
+  EXPECT_EQ(f.ec, Errc::ArgumentOutOfRange) << f.ec.message();
+  EXPECT_EQ(agent.requestsSeen(), 0) << "nothing is sent, Engine Discovery included";
 }
 
 TEST(ClientV3, SurfacesAnAgentErrorStatusInTheAgentCategory) {
@@ -1094,6 +1109,68 @@ TEST(ClientV3Walk, CollectsTheWholeSubtreeAcrossSeveralRounds) {
 
   EXPECT_FALSE(f.ec) << f.ec.message();
   EXPECT_EQ(f.collected.size(), 3U);
+}
+
+// Over v3 a request does work of its own before it sends -- Engine Discovery, key localisation --
+// so a Client stopped between a Walk's requests must refuse the next one before any of it.
+TEST(ClientV3Walk, AWalkStoppedBetweenItsRequestsSendsNothingMore) {
+  Fixture f;
+  std::uint32_t next = 1;
+  ScriptedV3Agent agent(f.io, credentials(), [&](const Pdu&) {
+    Pdu p;
+    p.type = PduType::Response;
+    p.varbinds = {Varbind{Oid{1, 3, 6, 1, 2, 1, 1, next, 0}, Counter32{next}}};
+    ++next;
+    return p;
+  });
+  f.agent = &agent;
+
+  int batches = 0;
+  f.client.asyncWalk(
+      targetFor(agent), credentials(), Oid{1, 3, 6, 1, 2, 1, 1}, WalkOptions{1},
+      [&](std::span<const Varbind>) {
+        ++batches;
+        f.client.stop();
+        return true;
+      },
+      [&](net::ErrorCode e) {
+        f.ec = e;
+        f.finish();
+      });
+  f.run();
+
+  EXPECT_EQ(f.ec, Errc::ClientStopped) << f.ec.message();
+  EXPECT_EQ(batches, 1);
+  EXPECT_EQ(agent.requestsSeen(), 3) << "two for Engine Discovery, one for the first Batch";
+}
+
+// A Walk's time limit is a cancellation the caller asked for in advance, so ADR-0008's rule for
+// cancellations holds: the Walk says it was cut short, not why the replies it never got to use were
+// refused. Discovery succeeds; every Response after it carries a bad digest and is dropped.
+TEST(ClientV3Walk, ATimeLimitEndsAWalkWhoseRepliesAreAllRefusedIncomplete) {
+  Fixture f;
+  ScriptedV3Agent agent(f.io, credentials(), echoAnswer);
+  f.agent = &agent;
+  agent.setResponder([&agent](const ScriptedV3Agent::Request& req) {
+    auto reply = agent.behaveLikeACompliantAgent(req);
+    if (reply && reply->scoped.pdu.type == PduType::Response) reply->corruptDigest = true;
+    return reply;
+  });
+
+  constexpr auto limit = std::chrono::milliseconds(200);
+  WalkOptions options{2};
+  options.timeLimit = limit;
+  const auto start = std::chrono::steady_clock::now();
+  f.client.asyncWalkCollect(test::longDeadlineTarget(agent), credentials(),
+                            Oid{1, 3, 6, 1, 2, 1, 1}, options, f.collectToken());
+  f.run();
+  const auto took = std::chrono::steady_clock::now() - start;
+
+  EXPECT_EQ(f.ec, Errc::WalkIncomplete) << f.ec.message();
+  EXPECT_TRUE(f.collected.empty());
+  EXPECT_GE(took, limit);
+  EXPECT_LT(took, test::atOnceLimit(test::longDeadline)) << "the exchange's deadline ended it";
+  EXPECT_EQ(agent.requestsSeen(), 3) << "two discovery exchanges, then the one refused attempt";
 }
 
 // ---------------------------------------------------------------------------

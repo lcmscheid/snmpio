@@ -94,6 +94,11 @@ class Client {
 
   [[nodiscard]] net::Executor getExecutor() const { return m_strand; }
 
+  // Every operation checks its arguments before it sends anything: Target::retries outside
+  // 0..retriesCeiling, a maxRepetitions outside 0..maxRepetitionsCeiling, a negative nonRepeaters
+  // or a negative WalkOptions::timeLimit completes it with Errc::ArgumentOutOfRange rather than
+  // being clamped.
+  //
   // Stopping: refuses new work, closes the sockets and fails every outstanding operation with
   // Errc::ClientStopped. Idempotent, safe from any thread, and harmless before the destructor,
   // which does the same, waiting the same way for a Batch handler running on another thread (see
@@ -121,7 +126,8 @@ class Client {
   }
 
   // GETBULK: the first nonRepeaters OIDs get one successor each, the rest get maxRepetitions of
-  // them. Completion: void(ErrorCode, Response).
+  // them. nonRepeaters must not be negative, and maxRepetitions must lie in
+  // 0..maxRepetitionsCeiling. Completion: void(ErrorCode, Response).
   template <typename Token>
   auto asyncGetBulk(Target target, Community community, std::vector<Oid> oids,
                     std::int32_t nonRepeaters, std::int32_t maxRepetitions, Token&& token) {
@@ -144,6 +150,9 @@ class Client {
   // Walk a Subtree, delivering each Batch to onBatch as it arrives (ADR-0004: streaming is the
   // core, collecting is the wrapper -- a Walk has no bounded size). Completion: void(ErrorCode).
   //
+  // WalkOptions can bound it, by Varbinds delivered and by time; here neither has a default, since
+  // onBatch already decides when to stop. Reaching either ends the Walk with Errc::WalkIncomplete.
+  //
   // Cancellation is split: a `total` signal finishes the in-flight Batch and completes with
   // Errc::WalkIncomplete; a `terminal` one drops everything immediately, total or no total.
   template <typename Token>
@@ -156,6 +165,10 @@ class Client {
 
   // The buffering convenience over asyncWalk. Completion: void(ErrorCode, std::vector<Varbind>).
   // An incomplete Walk still hands back what it collected, alongside Errc::WalkIncomplete.
+  //
+  // Unlike asyncWalk it is bounded by default: an unset WalkOptions::maxVarbinds collects at most
+  // defaultCollectLimit, since an Agent can answer with strictly increasing OIDs forever. Set it
+  // higher to collect more.
   template <typename Token>
   auto asyncWalkCollect(Target target, Community community, Oid base, WalkOptions options,
                         Token&& token) {
@@ -169,7 +182,7 @@ class Client {
   //
   // Engine Discovery, time synchronisation and Report routing happen underneath and never surface.
   // The first request against an unknown Engine simply costs extra round trips, and requests
-  // issued while that is in flight queue behind it rather than each probing separately.
+  // issued while that is in flight queue behind it rather than each discovering separately.
   //
   // At authPriv the Credentials name the privacy protocol as well; an authPriv level with none
   // named fails with Errc::UnsupportedPrivProtocol rather than being sent in the clear.

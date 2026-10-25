@@ -2,7 +2,9 @@
 #define SNMPIO_TARGET_HPP
 
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <utility>
 
@@ -11,6 +13,12 @@
 namespace snmpio {
 
 inline constexpr std::uint16_t defaultPort = 161;
+
+// The largest Target::retries an operation accepts. Past it, or below zero, the operation
+// completes with Errc::ArgumentOutOfRange rather than being clamped: eleven datagrams per request
+// is already more than any lossy link repays, and a larger number is a bug in the caller, not a
+// policy snmpio should quietly rewrite.
+inline constexpr int retriesCeiling = 10;
 
 // A transport endpoint we send requests to, and how patiently we do it.
 //
@@ -35,11 +43,46 @@ struct Community {
   explicit Community(std::string v) : value(std::move(v)) {}
 };
 
-// How a Walk traverses a Subtree.
+// The largest max-repetitions a GETBULK, or a Walk, accepts. Past it, or below zero, the operation
+// completes with Errc::ArgumentOutOfRange rather than being clamped. A thousand Varbinds already
+// overflows most Agents' message size, which tooBig then walks back down (see WalkOptions).
+inline constexpr std::int32_t maxRepetitionsCeiling = 1000;
+
+// The Varbind limit asyncWalkCollect applies when WalkOptions::maxVarbinds is left unset. Finite
+// because a collecting Walk buffers everything it is sent, and an Agent can send strictly
+// increasing OIDs forever; large enough that no real table reaches it by accident.
+inline constexpr std::size_t defaultCollectLimit = 100'000;
+
+// How a Walk traverses a Subtree, and when it gives up on one that will not end.
+//
+// Not an aggregate, on purpose: a braced WalkOptions{2} naming only maxRepetitions is what most
+// callers write, and as an aggregate it would trip -Wmissing-field-initializers -- under GCC and
+// Clang alike, designated or not -- for every field after it. The limits are set by assignment.
 struct WalkOptions {
-  // GETBULK's max-repetitions. Zero means walk with GETNEXT instead -- one OID per round trip,
-  // which is what a Target that mishandles GETBULK needs.
+  WalkOptions() = default;
+  constexpr explicit WalkOptions(std::int32_t repetitions) noexcept : maxRepetitions(repetitions) {}
+
+  // GETBULK's max-repetitions, at most maxRepetitionsCeiling. Zero means walk with GETNEXT instead
+  // -- one OID per round trip, which is what a Target that mishandles GETBULK needs.
   std::int32_t maxRepetitions = 10;
+  // The most Varbinds the Walk delivers. Unset means the operation's own default: no limit for
+  // asyncWalk, whose Batch handler already decides when to stop, and defaultCollectLimit for
+  // asyncWalkCollect. A Walk that reaches it without having seen the end of the Subtree ends with
+  // Errc::WalkIncomplete, even if the next request would have found nothing more: a Walk that was
+  // cut short must never look complete (ADR-0004). Zero is a limit like any other, not "none": the
+  // Walk sends nothing and ends WalkIncomplete.
+  std::optional<std::size_t> maxVarbinds;
+  // How long the whole Walk may take, from its start; unset means no limit. Reaching it ends the
+  // Walk's Outstanding Request in whichever wait it is -- awaiting a reply, or queued behind Engine
+  // Discovery -- and ends the Walk with Errc::WalkIncomplete, keeping every Batch already
+  // delivered. It is a cancellation the caller asked for in advance, so ADR-0008's rule for those
+  // holds: it reports the cancellation, not a reason the exchange's own deadline would have given,
+  // such as AuthFailed -- that deadline never came. A limit shorter than one exchange can therefore
+  // hide a wrong password behind WalkIncomplete. Zero is a limit like any other, as for
+  // maxVarbinds: the Walk sends nothing and ends WalkIncomplete. Below zero is refused with
+  // Errc::ArgumentOutOfRange. One too long for the steady clock to reach, such as
+  // milliseconds::max(), is no limit. Per-attempt patience is still Target::timeout's.
+  std::optional<std::chrono::milliseconds> timeLimit;
 };
 
 }  // namespace snmpio

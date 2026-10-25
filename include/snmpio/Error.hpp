@@ -78,6 +78,9 @@ enum class Errc {
   NotInTimeWindow,   // usmStatsNotInTimeWindows, still, after resynchronising
   DecryptionError,   // usmStatsDecryptionErrors
   UnexpectedReport,  // a Report whose usmStats counter we do not recognise
+
+  // The caller's own arguments.
+  ArgumentOutOfRange,  // an argument past its documented bound; Client.hpp lists them
 };
 
 // What a caller can do about a failure, across all three categories a completion can carry --
@@ -110,6 +113,8 @@ enum class Errc {
 //     Target with nothing listening, so it goes with the retriable half.
 //   * An ErrorCode from a fourth category is Unclassified rather than Fatal. Naming what we cannot
 //     interpret is honest; guessing would be a retry policy deciding on evidence it does not have.
+//   * ArgumentOutOfRange is Configuration: the caller passed a value past its documented bound,
+//     and the same call fails the same way until they change it.
 //   * Malformed replies -- the framing, primitive and OID decode faults -- are Fatal. They mean
 //     the Agent is producing something no correct Agent produces, and the next datagram will be
 //     just as unusable. Encode-side faults on the caller's own input (OidNotEncodable,

@@ -107,6 +107,8 @@ class SnmpioCategory final : public net::ErrorCategory {
         return "the Authoritative Engine could not decrypt the message";
       case Errc::UnexpectedReport:
         return "Report carried a usmStats counter this library does not recognise";
+      case Errc::ArgumentOutOfRange:
+        return "an argument is outside the range this library accepts";
     }
     return "unknown snmpio error " + std::to_string(ev);
   }
@@ -137,7 +139,8 @@ ErrorClass classifyErrc(Errc e) noexcept {
     case Errc::NotInTimeWindow:
       return ErrorClass::Retriable;
 
-    // Something the caller set is wrong: Credentials, an Oid, or the build's crypto.
+    // Something the caller set is wrong: Credentials, an Oid, an argument past its bound, or the
+    // build's crypto.
     case Errc::OidNotEncodable:
     case Errc::OidBadSyntax:
     case Errc::UnsupportedAuthProtocol:
@@ -149,6 +152,7 @@ ErrorClass classifyErrc(Errc e) noexcept {
     case Errc::DecryptionFailed:
     case Errc::UnknownUserName:
     case Errc::DecryptionError:
+    case Errc::ArgumentOutOfRange:
       return ErrorClass::Configuration;
 
     // Malformed replies, a Target that is not speaking SNMP as this library understands it, and

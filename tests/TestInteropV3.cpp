@@ -400,9 +400,9 @@ TEST_F(InteropV3, DiscoveryCostsExtraRoundTripsOnlyOnce) {
 
   ASSERT_FALSE(firstEc) << test::errorText(firstEc);
   ASSERT_FALSE(secondEc) << test::errorText(secondEc);
-  // Three on a healthy run -- the engineID probe, the boots/time probe, then the request -- but
-  // what the criterion asks is only that discovery is paid once, and a retransmitted datagram on
-  // a loaded runner would make an exact count red for a reason that is not this library's.
+  // Three on a healthy run -- discovering the engineID, then the boots/time, then the request --
+  // but what the criterion asks is only that discovery is paid once, and a retransmitted datagram
+  // on a loaded runner would make an exact count red for a reason that is not this library's.
   EXPECT_GT(first, second);
   EXPECT_EQ(second, 1);
 }

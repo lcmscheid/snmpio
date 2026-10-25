@@ -1,7 +1,11 @@
 #include <gtest/gtest.h>
 
 #include <chrono>
+#include <cstddef>
+#include <cstdint>
+#include <functional>
 #include <optional>
+#include <span>
 #include <utility>
 #include <vector>
 
@@ -501,6 +505,533 @@ TEST(ClientCancel, ATotalSignalAfterATerminalOneStillAbortsAWalk) {
 
   EXPECT_EQ(f.ec, net::asio::error::operation_aborted) << f.ec.message();
   EXPECT_TRUE(f.collected.empty()) << "a dropped Walk keeps nothing";
+}
+
+// ---------------------------------------------------------------------------
+// Walk limits
+// ---------------------------------------------------------------------------
+
+// The successor of an OID inside a Subtree that never ends: one arc longer, and once that would
+// pass the 128 sub-identifiers an OID may carry, the last arc one higher instead. Every answer is
+// inside the Subtree and strictly increasing, so neither of ADR-0004's checks ends the Walk.
+Oid longerOid(const Oid& from) {
+  if (from.size() < Oid::maxSubids) return from.child(1);
+  Oid::Container subids(from.begin(), from.end());
+  ++subids.back();
+  return Oid(std::move(subids));
+}
+
+// An Agent whose Subtree never ends: every GETNEXT, and every repetition of a GETBULK, is answered
+// with `next` of the name before it, so a Walk of it ends only at a limit (research §1.4.3).
+ScriptedAgent::Responder endlessAgent(std::function<Oid(const Oid&)> next) {
+  return [next = std::move(next)](const V2cMessage& msg) -> std::optional<Pdu> {
+    const auto count = msg.pdu.type == PduType::GetBulk ? msg.pdu.maxRepetitions() : 1;
+    std::vector<Varbind> out;
+    out.reserve(static_cast<std::size_t>(count));
+    Oid name = msg.pdu.varbinds.at(0).name;
+    for (std::int32_t i = 0; i < count; ++i) {
+      name = next(name);
+      out.emplace_back(name, Gauge32{1});
+    }
+    return respondWith(std::move(out));
+  };
+}
+
+// The ever-longer one, and a flat one -- base.1, base.2, ... -- whose names stay short enough that
+// a GETBULK's thousand repetitions still fit in one datagram.
+ScriptedAgent::Responder endlessAgent() {
+  return endlessAgent(longerOid);
+}
+
+ScriptedAgent::Responder endlessFlatAgent(const Oid& base) {
+  return endlessAgent([base](const Oid& from) {
+    return base.child(from.size() > base.size() ? from[base.size()] + 1 : 1);
+  });
+}
+
+// The names an endless Walk from systemGroup should have delivered, in order.
+std::vector<Oid> firstLongerOids(std::size_t n) {
+  std::vector<Oid> names;
+  names.reserve(n);
+  Oid name = systemGroup;
+  for (std::size_t i = 0; i < n; ++i) names.push_back(name = longerOid(name));
+  return names;
+}
+
+std::vector<Oid> namesOf(const std::vector<Varbind>& varbinds) {
+  std::vector<Oid> names;
+  names.reserve(varbinds.size());
+  for (const auto& vb : varbinds) names.push_back(vb.name);
+  return names;
+}
+
+TEST(ClientWalkLimits, AVarbindLimitEndsAnEndlessWalkWithWhatItGathered) {
+  Fixture f;
+  ScriptedAgent agent(f.io, endlessAgent());
+  f.agent = &agent;
+
+  WalkOptions options{0};
+  options.maxVarbinds = 50;
+  f.client.asyncWalkCollect(targetFor(agent), publicCommunity, systemGroup, options,
+                            f.collectToken());
+  f.run();
+
+  EXPECT_EQ(f.ec, Errc::WalkIncomplete) << f.ec.message();
+  EXPECT_EQ(namesOf(f.collected), firstLongerOids(50));
+  EXPECT_EQ(agent.requestsSeen(), 50) << "nothing is asked for once the limit is reached";
+}
+
+TEST(ClientWalkLimits, AVarbindLimitCutsTheBatchThatCrossesIt) {
+  Fixture f;
+  ScriptedAgent agent(f.io, endlessAgent());
+  f.agent = &agent;
+
+  std::vector<std::size_t> batches;
+  WalkOptions options{8};
+  options.maxVarbinds = 20;
+  f.client.asyncWalk(
+      targetFor(agent), publicCommunity, systemGroup, options,
+      [&batches](std::span<const Varbind> batch) {
+        batches.push_back(batch.size());
+        return true;
+      },
+      f.walkToken());
+  f.run();
+
+  EXPECT_EQ(f.ec, Errc::WalkIncomplete) << f.ec.message();
+  EXPECT_EQ(batches, (std::vector<std::size_t>{8, 8, 4}));
+}
+
+TEST(ClientWalkLimits, AWalkWhoseEndArrivesWithItsLastAllowedVarbindIsComplete) {
+  Fixture f;
+  ScriptedAgent agent(f.io, tableAgent(smallTable()));
+  f.agent = &agent;
+
+  // One GETBULK brings all five Varbinds and the endOfMibView after them, so the limit and the end
+  // of the Subtree arrive together, and the end is what the Walk saw.
+  WalkOptions options{10};
+  options.maxVarbinds = smallTable().size();
+  f.client.asyncWalkCollect(targetFor(agent), publicCommunity, systemGroup, options,
+                            f.collectToken());
+  f.run();
+
+  EXPECT_FALSE(f.ec) << f.ec.message();
+  EXPECT_EQ(f.collected, smallTable());
+}
+
+TEST(ClientWalkLimits, AWalkThatFillsItsLimitWithoutSeeingTheEndIsIncomplete) {
+  Fixture f;
+  ScriptedAgent agent(f.io, tableAgent(smallTable()));
+  f.agent = &agent;
+
+  // GETNEXT: the fifth Varbind comes alone, and finding out that nothing follows it would take a
+  // sixth request the limit does not allow. Incomplete is the honest answer; complete might be a
+  // lie.
+  WalkOptions options{0};
+  options.maxVarbinds = smallTable().size();
+  f.client.asyncWalkCollect(targetFor(agent), publicCommunity, systemGroup, options,
+                            f.collectToken());
+  f.run();
+
+  EXPECT_EQ(f.ec, Errc::WalkIncomplete) << f.ec.message();
+  EXPECT_EQ(f.collected, smallTable());
+}
+
+TEST(ClientWalkLimits, CollectingStopsAtItsDefaultLimit) {
+  Fixture f;
+  ScriptedAgent agent(f.io, endlessFlatAgent(systemGroup));
+  f.agent = &agent;
+
+  // No options given: asyncWalkCollect still has a limit, where asyncWalk has none.
+  f.client.asyncWalkCollect(targetFor(agent), publicCommunity, systemGroup, WalkOptions{},
+                            f.collectToken());
+  f.run();
+
+  EXPECT_EQ(f.ec, Errc::WalkIncomplete) << f.ec.message();
+  ASSERT_EQ(f.collected.size(), defaultCollectLimit);
+  EXPECT_EQ(f.collected.back().name,
+            systemGroup.child(static_cast<std::uint32_t>(defaultCollectLimit)));
+}
+
+TEST(ClientWalkLimits, ACollectingWalkMayRaiseItsLimit) {
+  Fixture f;
+  ScriptedAgent agent(f.io, endlessFlatAgent(systemGroup));
+  f.agent = &agent;
+
+  WalkOptions options{maxRepetitionsCeiling};
+  options.maxVarbinds = defaultCollectLimit + 500;
+  f.client.asyncWalkCollect(targetFor(agent), publicCommunity, systemGroup, options,
+                            f.collectToken());
+  f.run();
+
+  EXPECT_EQ(f.ec, Errc::WalkIncomplete) << f.ec.message();
+  EXPECT_EQ(f.collected.size(), defaultCollectLimit + 500);
+}
+
+TEST(ClientWalkLimits, AStreamingWalkHasNoDefaultLimit) {
+  Fixture f;
+  ScriptedAgent agent(f.io, endlessFlatAgent(systemGroup));
+  f.agent = &agent;
+
+  // Past the collecting default, and stopped only by its own handler.
+  constexpr std::size_t enough = defaultCollectLimit + (std::size_t{2} * maxRepetitionsCeiling);
+  std::size_t seen = 0;
+  f.client.asyncWalk(
+      targetFor(agent), publicCommunity, systemGroup, WalkOptions{maxRepetitionsCeiling},
+      [&seen](std::span<const Varbind> batch) {
+        seen += batch.size();
+        return seen < enough;
+      },
+      f.walkToken());
+  f.run();
+
+  EXPECT_EQ(f.ec, Errc::WalkIncomplete) << f.ec.message();
+  EXPECT_EQ(seen, enough);
+}
+
+TEST(ClientWalkLimits, ATimeLimitEndsAnEndlessWalkWithWhatItGathered) {
+  Fixture f;
+  ScriptedAgent agent(f.io, endlessAgent());
+  f.agent = &agent;
+
+  constexpr auto limit = std::chrono::milliseconds(200);
+  WalkOptions options{0};
+  options.timeLimit = limit;
+  const auto start = std::chrono::steady_clock::now();
+  f.client.asyncWalkCollect(targetFor(agent), publicCommunity, systemGroup, options,
+                            f.collectToken());
+  f.run();
+
+  EXPECT_EQ(f.ec, Errc::WalkIncomplete) << f.ec.message();
+  EXPECT_FALSE(f.collected.empty());
+  EXPECT_EQ(namesOf(f.collected), firstLongerOids(f.collected.size()));
+  EXPECT_GE(f.completedAt - start, limit);
+  EXPECT_LT(f.completedAt - start, limit + atOnceLimit(longDeadline));
+}
+
+TEST(ClientWalkLimits, ATimeLimitEndsTheOutstandingRequest) {
+  Fixture f;
+  // One Batch, then silence against a Target that would wait five seconds for the next. The Walk's
+  // own limit is what ends it, not the exchange's deadline.
+  auto table = tableAgent(smallTable());
+  int seen = 0;
+  ScriptedAgent agent(f.io, [&](const V2cMessage& msg) -> std::optional<Pdu> {
+    if (++seen > 1) return std::nullopt;
+    return table(msg);
+  });
+  f.agent = &agent;
+
+  constexpr auto limit = std::chrono::milliseconds(200);
+  WalkOptions options{2};
+  options.timeLimit = limit;
+  const auto start = std::chrono::steady_clock::now();
+  f.client.asyncWalkCollect(longDeadlineTarget(agent), publicCommunity, systemGroup, options,
+                            f.collectToken());
+  f.run();
+
+  EXPECT_EQ(f.ec, Errc::WalkIncomplete) << f.ec.message();
+  EXPECT_EQ(f.collected.size(), 2U) << "the Batch that did arrive is kept";
+  EXPECT_GE(f.completedAt - start, limit);
+  EXPECT_LT(f.completedAt - start, atOnceLimit(longDeadline));
+}
+
+TEST(ClientWalkLimits, AWalkInsideItsTimeLimitIsUntouchedByIt) {
+  Fixture f;
+  ScriptedAgent agent(f.io, tableAgent(smallTable()));
+  f.agent = &agent;
+
+  // run() returns once the Client and the Agent are closed, so a deadline timer the Walk left
+  // armed would hold it for the whole limit.
+  WalkOptions options{2};
+  options.timeLimit = longDeadline;
+  const auto start = std::chrono::steady_clock::now();
+  f.client.asyncWalkCollect(targetFor(agent), publicCommunity, systemGroup, options,
+                            f.collectToken());
+  f.run();
+
+  EXPECT_FALSE(f.ec) << f.ec.message();
+  EXPECT_EQ(f.collected, smallTable());
+  EXPECT_LT(std::chrono::steady_clock::now() - start, atOnceLimit(longDeadline));
+}
+
+TEST(ClientWalkLimits, ATimeLimitTooLongToReachIsNoLimit) {
+  Fixture f;
+  ScriptedAgent agent(f.io, tableAgent(smallTable()));
+  f.agent = &agent;
+
+  // The largest limit a caller can write is a natural way to say "none", and adding it to the
+  // clock's now() would overflow the clock's nanoseconds.
+  WalkOptions options{2};
+  options.timeLimit = std::chrono::milliseconds::max();
+  f.client.asyncWalkCollect(targetFor(agent), publicCommunity, systemGroup, options,
+                            f.collectToken());
+  f.run();
+
+  EXPECT_FALSE(f.ec) << f.ec.message();
+  EXPECT_EQ(f.collected, smallTable());
+}
+
+TEST(ClientWalkLimits, AZeroTimeLimitSendsNothing) {
+  Fixture f;
+  ScriptedAgent agent(f.io, tableAgent(smallTable()));
+  f.agent = &agent;
+
+  // A limit like any other, as a zero maxVarbinds is: already reached, so nothing is asked for.
+  WalkOptions options{2};
+  options.timeLimit = std::chrono::milliseconds::zero();
+  f.client.asyncWalkCollect(targetFor(agent), publicCommunity, systemGroup, options,
+                            f.collectToken());
+  f.run();
+
+  EXPECT_EQ(f.ec, Errc::WalkIncomplete) << f.ec.message();
+  EXPECT_TRUE(f.collected.empty());
+  EXPECT_EQ(agent.requestsSeen(), 0);
+}
+
+// Stopping from a Batch handler, on the strand, between one of a Walk's requests and the next: the
+// Walk's arguments were judged before its first request, so each later one asks about Stopping
+// again before doing anything. With a time limit the next request also begins in a coroutine of its
+// own, after a hop.
+TEST(ClientWalkLimits, AWalkStoppedBetweenItsRequestsSendsNothingMore) {
+  for (const bool timeLimited : {false, true}) {
+    SCOPED_TRACE(timeLimited ? "time-limited" : "unlimited");
+    Fixture f;
+    ScriptedAgent agent(f.io, tableAgent(smallTable()));
+    f.agent = &agent;
+
+    WalkOptions options{2};
+    if (timeLimited) options.timeLimit = longDeadline;
+    int batches = 0;
+    f.client.asyncWalk(
+        targetFor(agent), publicCommunity, systemGroup, options,
+        [&](std::span<const Varbind>) {
+          ++batches;
+          f.client.stop();
+          return true;
+        },
+        f.walkToken());
+    f.run();
+
+    EXPECT_EQ(f.ec, Errc::ClientStopped) << f.ec.message();
+    EXPECT_EQ(batches, 1);
+    EXPECT_EQ(agent.requestsSeen(), 1);
+  }
+}
+
+// A time-limited Walk runs each request on a slot of its own, so these two hold the caller's
+// signals to reaching the exchange underneath, and to meaning what they meant without the limit.
+TEST(ClientWalkLimits, ACallersTerminalSignalStillDropsATimeLimitedWalkAtOnce) {
+  Fixture f;
+  net::asio::cancellation_signal signal;
+  auto table = tableAgent(smallTable());
+  int seen = 0;
+  ScriptedAgent agent(f.io, [&](const V2cMessage& msg) -> std::optional<Pdu> {
+    if (++seen > 1) {
+      signal.emit(net::asio::cancellation_type::terminal);
+      return std::nullopt;
+    }
+    return table(msg);
+  });
+  f.agent = &agent;
+
+  WalkOptions options{2};
+  options.timeLimit = longDeadline;
+  const auto start = std::chrono::steady_clock::now();
+  f.client.asyncWalkCollect(longDeadlineTarget(agent), publicCommunity, systemGroup, options,
+                            net::asio::bind_cancellation_slot(signal.slot(), f.collectToken()));
+  f.run();
+
+  EXPECT_EQ(f.ec, net::asio::error::operation_aborted) << f.ec.message();
+  EXPECT_TRUE(f.collected.empty()) << "a dropped Walk keeps nothing";
+  EXPECT_LT(f.completedAt - start, atOnceLimit(longDeadline));
+}
+
+TEST(ClientWalkLimits, ACallersTotalSignalStillEndsATimeLimitedWalkIncomplete) {
+  Fixture f;
+  net::asio::cancellation_signal signal;
+  auto table = tableAgent(smallTable());
+  int seen = 0;
+  ScriptedAgent agent(f.io, [&](const V2cMessage& msg) -> std::optional<Pdu> {
+    if (++seen > 1) {
+      signal.emit(net::asio::cancellation_type::total);
+      return std::nullopt;
+    }
+    return table(msg);
+  });
+  f.agent = &agent;
+
+  WalkOptions options{2};
+  options.timeLimit = longDeadline;
+  f.client.asyncWalkCollect(targetFor(agent), publicCommunity, systemGroup, options,
+                            net::asio::bind_cancellation_slot(signal.slot(), f.collectToken()));
+  f.run();
+
+  EXPECT_EQ(f.ec, Errc::WalkIncomplete) << f.ec.message();
+  EXPECT_EQ(f.collected.size(), 2U) << "the batch that did arrive is kept";
+  EXPECT_EQ(agent.requestsSeen(), 2) << "total retransmits nothing";
+}
+
+// ---------------------------------------------------------------------------
+// Argument bounds
+// ---------------------------------------------------------------------------
+
+auto answerAnything() {
+  return [](const V2cMessage& msg) { return respondWith(msg.pdu.varbinds); };
+}
+
+TEST(ClientArguments, RetriesPastTheCeilingAreRefusedBeforeAnythingIsSent) {
+  for (const int retries : {retriesCeiling + 1, -1}) {
+    Fixture f;
+    ScriptedAgent agent(f.io, answerAnything());
+    f.agent = &agent;
+
+    f.client.asyncGet(targetFor(agent, retries), publicCommunity, {sysDescr}, f.requestToken());
+    f.run();
+
+    EXPECT_EQ(f.ec, Errc::ArgumentOutOfRange) << retries << ": " << f.ec.message();
+    EXPECT_EQ(agent.requestsSeen(), 0) << retries;
+  }
+}
+
+TEST(ClientArguments, RetriesAtTheCeilingAreAccepted) {
+  Fixture f;
+  ScriptedAgent agent(f.io, answerAnything());
+  f.agent = &agent;
+
+  f.client.asyncGet(targetFor(agent, retriesCeiling), publicCommunity, {sysDescr},
+                    f.requestToken());
+  f.run();
+
+  EXPECT_FALSE(f.ec) << f.ec.message();
+}
+
+TEST(ClientArguments, MaxRepetitionsPastTheCeilingAreRefusedBeforeAnythingIsSent) {
+  for (const std::int32_t maxRepetitions : {maxRepetitionsCeiling + 1, -1}) {
+    Fixture f;
+    ScriptedAgent agent(f.io, answerAnything());
+    f.agent = &agent;
+
+    f.client.asyncGetBulk(targetFor(agent), publicCommunity, {sysDescr}, 0, maxRepetitions,
+                          f.requestToken());
+    f.run();
+
+    EXPECT_EQ(f.ec, Errc::ArgumentOutOfRange) << maxRepetitions << ": " << f.ec.message();
+    EXPECT_EQ(agent.requestsSeen(), 0) << maxRepetitions;
+  }
+}
+
+TEST(ClientArguments, MaxRepetitionsAtTheCeilingAreAccepted) {
+  Fixture f;
+  ScriptedAgent agent(f.io, answerAnything());
+  f.agent = &agent;
+
+  f.client.asyncGetBulk(targetFor(agent), publicCommunity, {sysDescr}, 0, maxRepetitionsCeiling,
+                        f.requestToken());
+  f.run();
+
+  EXPECT_FALSE(f.ec) << f.ec.message();
+}
+
+TEST(ClientArguments, AWalkPastEitherCeilingIsRefusedBeforeAnythingIsSent) {
+  struct Case {
+    int retries;
+    std::int32_t maxRepetitions;
+  };
+  for (const auto& c :
+       {Case{retriesCeiling + 1, 10}, Case{1, maxRepetitionsCeiling + 1}, Case{1, -1}}) {
+    Fixture f;
+    ScriptedAgent agent(f.io, tableAgent(smallTable()));
+    f.agent = &agent;
+
+    f.client.asyncWalkCollect(targetFor(agent, c.retries), publicCommunity, systemGroup,
+                              WalkOptions{c.maxRepetitions}, f.collectToken());
+    f.run();
+
+    EXPECT_EQ(f.ec, Errc::ArgumentOutOfRange)
+        << c.retries << "/" << c.maxRepetitions << ": " << f.ec.message();
+    EXPECT_EQ(agent.requestsSeen(), 0);
+  }
+}
+
+TEST(ClientArguments, AWalkAtBothCeilingsIsAccepted) {
+  Fixture f;
+  ScriptedAgent agent(f.io, tableAgent(smallTable()));
+  f.agent = &agent;
+
+  f.client.asyncWalkCollect(targetFor(agent, retriesCeiling), publicCommunity, systemGroup,
+                            WalkOptions{maxRepetitionsCeiling}, f.collectToken());
+  f.run();
+
+  EXPECT_FALSE(f.ec) << f.ec.message();
+  EXPECT_EQ(f.collected, smallTable());
+}
+
+TEST(ClientArguments, ANegativeNonRepeatersIsRefusedBeforeAnythingIsSent) {
+  // Outside the PDU's own range, non-repeaters INTEGER (0..max-bindings) in RFC 3416 section 3.
+  Fixture f;
+  ScriptedAgent agent(f.io, answerAnything());
+  f.agent = &agent;
+
+  f.client.asyncGetBulk(targetFor(agent), publicCommunity, {sysDescr}, -1, 10, f.requestToken());
+  f.run();
+
+  EXPECT_EQ(f.ec, Errc::ArgumentOutOfRange) << f.ec.message();
+  EXPECT_EQ(agent.requestsSeen(), 0);
+}
+
+TEST(ClientArguments, NonRepeatersPastTheOidsGivenAreAccepted) {
+  // No ceiling: RFC 3416 4.2.3 reads a nonRepeaters past the OIDs given as all of them, and no
+  // value of it makes an Agent send more.
+  Fixture f;
+  ScriptedAgent agent(f.io, answerAnything());
+  f.agent = &agent;
+
+  f.client.asyncGetBulk(targetFor(agent), publicCommunity, {sysDescr}, 5, 10, f.requestToken());
+  f.run();
+
+  EXPECT_FALSE(f.ec) << f.ec.message();
+}
+
+TEST(ClientArguments, ANegativeTimeLimitIsRefusedBeforeAnythingIsSent) {
+  Fixture f;
+  ScriptedAgent agent(f.io, tableAgent(smallTable()));
+  f.agent = &agent;
+
+  WalkOptions options{2};
+  options.timeLimit = std::chrono::milliseconds(-1);
+  f.client.asyncWalkCollect(targetFor(agent), publicCommunity, systemGroup, options,
+                            f.collectToken());
+  f.run();
+
+  EXPECT_EQ(f.ec, Errc::ArgumentOutOfRange) << f.ec.message();
+  EXPECT_EQ(agent.requestsSeen(), 0);
+}
+
+TEST(ClientArguments, AStoppedClientSaysSoAheadOfABadArgument) {
+  Fixture f;
+  ScriptedAgent agent(f.io, answerAnything());
+  f.agent = &agent;
+
+  f.client.stop();
+  f.client.asyncGet(targetFor(agent, retriesCeiling + 1), publicCommunity, {sysDescr},
+                    f.requestToken());
+  f.run();
+
+  EXPECT_EQ(f.ec, Errc::ClientStopped) << f.ec.message();
+}
+
+TEST(ClientArguments, AStoppedClientSaysSoAheadOfABadArgumentToAWalk) {
+  Fixture f;
+  ScriptedAgent agent(f.io, answerAnything());
+  f.agent = &agent;
+
+  f.client.stop();
+  f.client.asyncWalkCollect(targetFor(agent), publicCommunity, systemGroup,
+                            WalkOptions{maxRepetitionsCeiling + 1}, f.collectToken());
+  f.run();
+
+  EXPECT_EQ(f.ec, Errc::ClientStopped) << f.ec.message();
+  EXPECT_TRUE(f.collected.empty());
 }
 
 }  // namespace

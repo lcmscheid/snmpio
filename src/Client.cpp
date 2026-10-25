@@ -1,6 +1,8 @@
 #include <snmpio/Client.hpp>
 #include <snmpio/detail/CacheView.hpp>
 
+#include "Secret.hpp"
+
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -112,21 +114,6 @@ std::int32_t randomRequestId() {
   return dist(rd);
 }
 
-// A Client's own random key for passwordDigest, so that two Clients' digests of one password differ
-// and none can be looked up in a table built before the Client existed.
-Octets randomDigestKey() {
-  std::random_device rd;
-  Octets key;
-  constexpr std::size_t keyOctets = 32;
-  while (key.size() < keyOctets) {
-    const auto word = rd();
-    for (unsigned shift = 0; shift < 32 && key.size() < keyOctets; shift += 8) {
-      key.push_back(static_cast<std::byte>((word >> shift) & 0xFFU));
-    }
-  }
-  return key;
-}
-
 // The completion of an Engine Discovery, which no operation awaits. It does not throw by design, so
 // an exception here is bad_alloc or a programming error, and it leaves run() the way spawn lets one
 // out of an operation. `detached` would swallow it, and leave every request that discovery was
@@ -187,19 +174,14 @@ bool requestInRange(const Target& target, const Pdu& pdu) noexcept {
   return pdu.nonRepeaters() >= 0 && withinCeiling(pdu.maxRepetitions(), maxRepetitionsCeiling);
 }
 
-// The Credentials' Master Keys, where they carry any: each the width of the authentication
-// protocol's hash -- the privacy one too, since USM derives it under that hash -- and each in place
-// of its password, not beside it. A Community has nothing to check.
-bool secretInRange(AuthProtocol p, const std::optional<Octets>& masterKey,
-                   const std::string& password) noexcept {
-  return !masterKey || (masterKey->size() == keySize(p) && password.empty());
-}
-
+// The Credentials' Master Keys, where they carry any (detail::Secret::inRange). Both are checked
+// whatever the Security Level, a privacy key at authNoPriv included: a Master Key that could never
+// be right is a mistake in the Credentials, refused here rather than when the level is raised. A
+// Community has nothing to check.
 bool credentialsInRange(const std::variant<Community, Credentials>& auth) noexcept {
   const auto* creds = std::get_if<Credentials>(&auth);
   return creds == nullptr ||
-         (secretInRange(creds->authProtocol, creds->authMasterKey, creds->authPassword) &&
-          secretInRange(creds->authProtocol, creds->privMasterKey, creds->privPassword));
+         (detail::Secret::auth(*creds).inRange() && detail::Secret::priv(*creds).inRange());
 }
 
 // A Walk's: its Target's retries, and the WalkOptions. A negative maxRepetitions would otherwise
@@ -241,8 +223,7 @@ class Client::Impl {
  public:
   using Ref = std::shared_ptr<Impl>;
 
-  explicit Impl(net::Strand strand)
-      : m_strand(std::move(strand)), m_digestKey(randomDigestKey()), m_nextId(randomRequestId()) {}
+  explicit Impl(net::Strand strand) : m_strand(std::move(strand)), m_nextId(randomRequestId()) {}
 
   // detail::CacheView's, and only safe where it says.
   [[nodiscard]] detail::CacheCounts cacheCounts() const noexcept {
@@ -411,8 +392,7 @@ class Client::Impl {
   // The Master Key for one secret: the one the Credentials carry, or the one this Client derived
   // from the password -- once, the first time it met it, since the derivation is a megabyte hash
   // and deliberately expensive (CONTEXT.md).
-  const Octets* masterKey(AuthProtocol p, const std::optional<Octets>& supplied,
-                          const std::string& password, net::ErrorCode& ec);
+  const Octets* masterKey(const detail::Secret& secret, net::ErrorCode& ec);
   // Localized per Engine from the Master Key, and cached: a short hash for the authentication key,
   // but a second megabyte for a Reeder privacy key, whose extension runs password-to-key again.
   const Octets* localizedKey(const Credentials& creds, const Octets& engineId, net::ErrorCode& ec);
@@ -518,11 +498,14 @@ class Client::Impl {
   std::map<Octets, EngineState> m_engines;
   std::map<net::UdpEndpoint, Octets> m_engineAt;
   std::map<net::UdpEndpoint, std::shared_ptr<Discovery>> m_discovering;
-  // Master Keys this Client derived, per (hash, password) -- the password as an HMAC under
-  // m_digestKey rather than in plaintext, so that no password outlives the Credentials that brought
-  // it (threat model S4). Master Keys the caller supplied are not copied here; they are already as
-  // cheap to reach as a cache could make them.
+  // Master Keys this Client derived, per (hash, password) -- the password as a passwordDigest
+  // under m_digestKey rather than in plaintext, so that no password outlives the Credentials that
+  // brought it (threat model S4). Master Keys the caller supplied are not copied here; they are
+  // already as cheap to reach as a cache could make them.
   std::map<std::pair<AuthProtocol, Octets>, Octets> m_masterKeys;
+  // The Client's own random key for passwordDigest, so that two Clients' digests of one password
+  // differ and none can be looked up in a table built before the Client existed. Drawn the first
+  // time a password needs it, so a Client handed only Master Keys never draws one.
   Octets m_digestKey;
   std::size_t m_masterKeyDerivations = 0;  // for detail::CacheView, and nothing else
   // (engineID, hash, Master Key, privacy protocol) -- ADR-0003's (master key, engineID), whether
@@ -987,20 +970,22 @@ net::Awaitable<Client::RequestResult> Client::Impl::doRequestV2c(Ref self, Targe
   co_return toResult(pending->response);
 }
 
-const Octets* Client::Impl::masterKey(AuthProtocol p, const std::optional<Octets>& supplied,
-                                      const std::string& password, net::ErrorCode& ec) {
+const Octets* Client::Impl::masterKey(const detail::Secret& secret, net::ErrorCode& ec) {
   ec = {};
-  if (supplied) return &*supplied;
+  if (const Octets* supplied = secret.suppliedMasterKey()) return supplied;
+  if (m_digestKey.empty()) {
+    m_digestKey = detail::randomDigestKey(ec);
+    if (ec) return nullptr;
+  }
   // A keyed digest, not a bare hash: a bare one could be checked against a table of guesses built
   // for any Client. It is still far cheaper to guess against than the megabyte-hashed Master Key
   // beside it, which is why it is keyed per Client and not kept anywhere else.
-  auto digest = authDigest(AuthProtocol::Sha256, m_digestKey,
-                           std::as_bytes(std::span(password.data(), password.size())), ec);
+  auto digest = detail::passwordDigest(m_digestKey, secret.password(), ec);
   if (ec) return nullptr;
-  auto cacheKey = std::make_pair(p, std::move(digest));
+  auto cacheKey = std::make_pair(secret.authProtocol(), std::move(digest));
   const auto it = m_masterKeys.find(cacheKey);
   if (it != m_masterKeys.end()) return &it->second;
-  auto derived = passwordToKey(p, password, ec);
+  auto derived = passwordToKey(secret.authProtocol(), secret.password(), ec);
   if (ec) return nullptr;
   ++m_masterKeyDerivations;
   return &m_masterKeys.emplace(std::move(cacheKey), std::move(derived)).first->second;
@@ -1008,7 +993,7 @@ const Octets* Client::Impl::masterKey(AuthProtocol p, const std::optional<Octets
 
 const Octets* Client::Impl::localizedKey(const Credentials& creds, const Octets& engineId,
                                          net::ErrorCode& ec) {
-  const Octets* master = masterKey(creds.authProtocol, creds.authMasterKey, creds.authPassword, ec);
+  const Octets* master = masterKey(detail::Secret::auth(creds), ec);
   if (master == nullptr) return nullptr;
   // The user name is deliberately not part of the key: what the derivation consumes is the Master
   // Key, the protocol and the engineID, so two users sharing a password share a key.
@@ -1022,7 +1007,7 @@ const Octets* Client::Impl::localizedKey(const Credentials& creds, const Octets&
 
 const Octets* Client::Impl::localizedPrivacyKey(const Credentials& creds, const Octets& engineId,
                                                 net::ErrorCode& ec) {
-  const Octets* master = masterKey(creds.authProtocol, creds.privMasterKey, creds.privPassword, ec);
+  const Octets* master = masterKey(detail::Secret::priv(creds), ec);
   if (master == nullptr) return nullptr;
   auto cacheKey = std::make_tuple(engineId, creds.authProtocol, *master, creds.privProtocol);
   const auto it = m_keys.find(cacheKey);

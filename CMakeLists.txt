@@ -257,7 +257,10 @@ install(TARGETS snmpio snmpio_warnings snmpio_sanitizers
   LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
   RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 
-install(DIRECTORY include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+# detail/CacheView.hpp is the tests' window onto a Client's caches, not API: Client.hpp only
+# forward-declares it, so an installed snmpio is whole without it.
+install(DIRECTORY include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+  PATTERN "CacheView.hpp" EXCLUDE)
 
 install(EXPORT snmpioTargets
   FILE snmpioTargets.cmake

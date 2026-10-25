@@ -81,7 +81,9 @@ Checks: >
 #       Suggests #elifdef, which is C++23. This library is C++20.
 
 WarningsAsErrors: '*'
-HeaderFilterRegex: 'include/snmpio/.*\.hpp$'
+# The library's own headers: the public ones, and the internal ones in src/ (Secret.hpp), which are
+# as much this codebase as the .cpp files that include them.
+HeaderFilterRegex: '(include/snmpio|src)/.*\.hpp$'
 
 CheckOptions:
   # Dispatch over ~12 wire tags scores high on cognitive complexity without being hard to read.

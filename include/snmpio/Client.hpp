@@ -102,7 +102,8 @@ class Client {
   // 0..retriesCeiling, a maxRepetitions outside 0..maxRepetitionsCeiling, a negative nonRepeaters
   // or a negative WalkOptions::timeLimit completes it with Errc::ArgumentOutOfRange rather than
   // being clamped. So does a Master Key in the Credentials that is not keySize(authProtocol)
-  // Octets, or that is given beside its password rather than in place of it.
+  // Octets, or that is given beside its password rather than in place of it, whatever the Security
+  // Level -- a privacy Master Key at authNoPriv, which nothing would use, included.
   //
   // Stopping: refuses new work, closes the sockets and fails every outstanding operation with
   // Errc::ClientStopped. Idempotent, safe from any thread, and harmless before the destructor,

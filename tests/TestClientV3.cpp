@@ -14,6 +14,7 @@
 #include <snmpio/detail/CacheView.hpp>
 
 #include "Deadlines.hpp"
+#include "MasterKeys.hpp"
 #include "ScriptedV3Agent.hpp"
 
 namespace snmpio {
@@ -22,6 +23,7 @@ namespace {
 using test::atOnceLimit;
 using test::ScriptedV3Agent;
 using test::targetFor;
+using test::withMasterKeys;
 
 const Oid sysDescr{1, 3, 6, 1, 2, 1, 1, 1, 0};
 const Oid sysUpTime{1, 3, 6, 1, 2, 1, 1, 3, 0};
@@ -1284,22 +1286,6 @@ TEST(ClientV3, SurfacesADecryptionErrorReport) {
 // Master Keys
 // ---------------------------------------------------------------------------
 
-// What an integrator hands every Client: the Credentials with each password replaced by the Master
-// Key derived from it, once, on a thread of their own. The Agent keeps the passwords, so it derives
-// its keys independently of these.
-Credentials withMasterKeys(Credentials creds) {
-  net::ErrorCode ec;
-  creds.authMasterKey = passwordToKey(creds.authProtocol, creds.authPassword, ec);
-  EXPECT_FALSE(ec) << ec.message();
-  creds.authPassword.clear();
-  if (creds.privProtocol != PrivProtocol::None) {
-    creds.privMasterKey = passwordToKey(creds.authProtocol, creds.privPassword, ec);
-    EXPECT_FALSE(ec) << ec.message();
-    creds.privPassword.clear();
-  }
-  return creds;
-}
-
 Octets engineIdNumbered(std::uint8_t n) {
   return {std::byte{0x80}, std::byte{0x00}, std::byte{0x1f}, std::byte{0x88},
           std::byte{0x02}, std::byte{0x00}, std::byte{0x00}, std::byte{n}};
@@ -1427,6 +1413,23 @@ TEST(ClientV3MasterKey, AMasterKeyBesideItsPasswordIsRefused) {
     EXPECT_EQ(f.ec, Errc::ArgumentOutOfRange) << (privacy ? "privacy" : "authentication");
     EXPECT_EQ(agent.requestsSeen(), 0);
   }
+}
+
+// A privacy Master Key at authNoPriv is never used, but one that could never be right is still a
+// mistake in the Credentials, and is refused rather than waiting for the level to be raised.
+TEST(ClientV3MasterKey, AnUnusedPrivacyMasterKeyIsStillChecked) {
+  Fixture f;
+  ScriptedV3Agent agent(f.io, credentials(AuthProtocol::Sha256), echoAnswer);
+  f.agent = &agent;
+
+  auto creds = withMasterKeys(credentials(AuthProtocol::Sha256));
+  ASSERT_EQ(creds.level, SecurityLevel::AuthNoPriv);
+  creds.privMasterKey = Octets(3, std::byte{0});
+  f.client.asyncGet(targetFor(agent), creds, {sysDescr}, f.requestToken());
+  f.run();
+
+  EXPECT_EQ(f.ec, Errc::ArgumentOutOfRange);
+  EXPECT_EQ(agent.requestsSeen(), 0);
 }
 
 // One Client polling several Engines with one user: the password costs one Master Key per secret,

@@ -33,10 +33,10 @@ Stage 6 has begun. Its sanitizer builds, the stateful Client fuzzer and the
 
 ## Using it
 
-The first two snippets below are condensed from [`examples/`](examples/), which is a separate CMake project
-that `find_package()`s an installed snmpio — so building it is what proves the install rules work,
-and CI builds it on every push: the examples and the package cannot drift apart. There is one
-example per operation; the [table below](#the-examples) says what each shows.
+The first two snippets below are condensed from [`examples/`](examples/), which is a separate
+CMake project that `find_package()`s an installed snmpio — so building it is what proves the
+install rules work, and CI builds it on every push: the examples and the package cannot drift
+apart. There is one example per operation; the [table below](#the-examples) says what each shows.
 
 A v2c GET, in the callback form:
 
@@ -217,7 +217,7 @@ Why this shape and not the other two:
   Where several Targets front one Engine, poll them through one Client. Where one password serves
   many Targets, each Client pays the derivation once, on its strand, unless the Credentials carry
   the Master Key [derived once beforehand](#using-it), when none of them does. ADR-0003's
-  amendment of 2026-10-24 records this trade.
+  amendments of 2026-10-24 and 2026-10-25 record this trade.
 - **Completion handlers run on the caller's executor** — the one bound to the token, or the
   Client's strand when none is. They can run after the Client is gone, so a handler must not reach
   back into a destroyed Client, or into an owner that went with it.
@@ -227,13 +227,15 @@ Why this shape and not the other two:
 
 The soak, `Soak.ShapedLikeTheDeployment` in [`tests/TestSoak.cpp`](tests/TestSoak.cpp), runs this
 shape with eight Clients on an `io_context` run by four threads, half of them v2c and half v3, and
-callers on a second `io_context`. The v3 Clients are handed Master Keys derived before it starts,
-as above. Four more threads initiate, cancel, stop and destroy Clients at
-moments its seed decides, against Agents that answer at once, late, never, twice, or after malformed
-datagrams. Every completion is checked to happen exactly once, on the caller's executor, with a
-code that what was done to the request allows, and, for either version, within half an attempt's
-deadline of a terminal cancellation and inside its first attempt when answered. It runs for two seconds in every test run, under
-ASan and TSan in CI, and carries the `stress` label:
+callers on a second `io_context`. Three of the v3 Clients are handed Master Keys derived before it
+starts, as above; the fourth is handed the passwords, so that a Client's own derivation is soaked
+too. Four more threads initiate, cancel, stop and destroy Clients at moments its seed decides,
+against Agents that answer at once, late, never, twice, or after malformed datagrams. Every
+completion is checked to happen exactly once, on the caller's executor, with a code that what was
+done to the request allows, and, for either version, within half an attempt's deadline of a
+terminal cancellation and inside its first attempt when answered. The Client handed passwords is
+spared those two bounds until #80 moves its derivation off the strand. It runs for two seconds in
+every test run, under ASan and TSan in CI, and carries the `stress` label:
 
 ```sh
 ctest --preset default -L stress                         # the soak alone

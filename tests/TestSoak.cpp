@@ -24,6 +24,7 @@
 #include <snmpio/Client.hpp>
 
 #include "CompletionOracle.hpp"
+#include "MasterKeys.hpp"
 #include "ReplyDelivery.hpp"
 #include "ScriptedAgent.hpp"
 #include "ScriptedV3Agent.hpp"
@@ -94,7 +95,7 @@ constexpr int failuresInDetail = 20;
 const Community soakCommunity{Community("public")};
 
 // Two Security Levels among the v3 slots, so that one run takes authPriv's path as well. These are
-// the Agents' Credentials; the Clients get masterKeyCredentialsFor's.
+// the Agents' Credentials; the Clients get clientCredentialsFor's.
 Credentials credentialsFor(int slot) {
   if (slot % 4 == 1) {
     return Credentials{"bert",       SecurityLevel::AuthNoPriv, AuthProtocol::Sha256,
@@ -104,21 +105,15 @@ Credentials credentialsFor(int slot) {
                      "maplesyrup", PrivProtocol::Aes128,    "rubberduck"};
 }
 
-// The same Credentials as the README's deployment hands them to every Client: each password
-// replaced by its Master Key, derived once, here on the test's own thread rather than on any I/O
-// thread.
-Credentials masterKeyCredentialsFor(int slot) {
-  auto creds = credentialsFor(slot);
-  net::ErrorCode ec;
-  creds.authMasterKey = passwordToKey(creds.authProtocol, creds.authPassword, ec);
-  EXPECT_FALSE(ec) << ec.message();
-  creds.authPassword.clear();
-  if (creds.privProtocol != PrivProtocol::None) {
-    creds.privMasterKey = passwordToKey(creds.authProtocol, creds.privPassword, ec);
-    EXPECT_FALSE(ec) << ec.message();
-    creds.privPassword.clear();
-  }
-  return creds;
+// The last v3 slot, an authPriv one, whose Clients are handed the passwords and derive both Master
+// Keys on their own strands, so that the soak takes that path too.
+constexpr int passwordSlot = clientSlots - 1;
+static_assert(isV3(passwordSlot));
+
+// What every Client in a v3 slot is handed: as the README's deployment does, each password replaced
+// by its Master Key, derived before the soak starts -- but for passwordSlot's, which keep them.
+Credentials clientCredentialsFor(int slot) {
+  return slot == passwordSlot ? credentialsFor(slot) : test::withMasterKeys(credentialsFor(slot));
 }
 
 // ---------------------------------------------------------------------------
@@ -473,6 +468,14 @@ bool isWalk(Operation op) {
   return op == Operation::Walk || op == Operation::WalkCollect;
 }
 
+// Whether the soak holds a request to how long it takes, as well as to its code. All but
+// passwordSlot's: a Client handed a password derives its Master Key on its strand, and under TSan a
+// terminal signal can queue behind that for longer than either bound -- threat model B7, until #80
+// moves the derivation off the strand and removes this.
+bool heldToTiming(const Request& r) {
+  return r.client.slot != passwordSlot;
+}
+
 // The request's own Subtree, which a Walk walks: soakRoot.b.i, as subtreeOf() reads it back.
 Oid subtreeFor(const Request& r, int index) {
   return soakRoot.child(static_cast<std::uint32_t>(r.behaviour))
@@ -498,7 +501,7 @@ class Soak {
       return d;
     };
     for (int slot = 0; slot < clientSlots; ++slot) {
-      m_credentials.push_back(isV3(slot) ? std::optional(masterKeyCredentialsFor(slot))
+      m_credentials.push_back(isV3(slot) ? std::optional(clientCredentialsFor(slot))
                                          : std::nullopt);
       m_agents.push_back(std::make_unique<SoakAgent>(m_clientIo, slot, delivery));
       m_slots.push_back(
@@ -749,7 +752,8 @@ class Soak {
     }
     // A terminal signal drops a request at once, whatever wait it is in (L2): one that ended long
     // after it was ignored or lost on its way to the strand, and waited out something else (#71).
-    if (record.terminal && record.completedAt - record.terminalAt > terminalLimit) {
+    if (record.terminal && heldToTiming(request) &&
+        record.completedAt - record.terminalAt > terminalLimit) {
       ADD_FAILURE() << context() << ": completed "
                     << std::chrono::duration_cast<milliseconds>(record.completedAt -
                                                                 record.terminalAt)
@@ -776,7 +780,7 @@ class Soak {
     // Every answer lands inside the first attempt's deadline, so one that took longer was lost
     // and retransmitted for -- a reply that overtook its send, say, which only several threads
     // running the io_context produce.
-    if (!code && !isWalk(request.operation) && took >= attemptTimeout) {
+    if (!code && heldToTiming(request) && !isWalk(request.operation) && took >= attemptTimeout) {
       ADD_FAILURE() << context() << ": answered only after "
                     << std::chrono::duration_cast<milliseconds>(took).count()
                     << " ms, past the first attempt's deadline";

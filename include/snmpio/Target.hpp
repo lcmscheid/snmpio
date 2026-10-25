@@ -74,8 +74,10 @@ struct WalkOptions {
   std::optional<std::size_t> maxVarbinds;
   // How long the whole Walk may take, from its start; unset means no limit. Reaching it drops the
   // exchange in flight and ends the Walk with Errc::WalkIncomplete, keeping every Batch already
-  // delivered -- including over a reason ADR-0008 would otherwise report at the exchange's own
-  // deadline, such as AuthFailed: that deadline never came, and the limit the caller set did.
+  // delivered. It is a cancellation the caller asked for in advance, so ADR-0008's rule for those
+  // holds: it reports the cancellation, not a reason the exchange's own deadline would have given,
+  // such as AuthFailed -- that deadline never came. A limit shorter than one exchange can therefore
+  // hide a wrong password behind WalkIncomplete.
   // Per-attempt patience is still Target::timeout's.
   std::optional<std::chrono::milliseconds> timeLimit;
 };

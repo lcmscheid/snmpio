@@ -915,5 +915,19 @@ TEST(ClientArguments, AStoppedClientSaysSoAheadOfABadArgument) {
   EXPECT_EQ(f.ec, Errc::ClientStopped) << f.ec.message();
 }
 
+TEST(ClientArguments, AStoppedClientSaysSoAheadOfABadArgumentToAWalk) {
+  Fixture f;
+  ScriptedAgent agent(f.io, answerAnything());
+  f.agent = &agent;
+
+  f.client.stop();
+  f.client.asyncWalkCollect(targetFor(agent), publicCommunity, systemGroup,
+                            WalkOptions{maxRepetitionsCeiling + 1}, f.collectToken());
+  f.run();
+
+  EXPECT_EQ(f.ec, Errc::ClientStopped) << f.ec.message();
+  EXPECT_TRUE(f.collected.empty());
+}
+
 }  // namespace
 }  // namespace snmpio

@@ -1111,6 +1111,35 @@ TEST(ClientV3Walk, CollectsTheWholeSubtreeAcrossSeveralRounds) {
   EXPECT_EQ(f.collected.size(), 3U);
 }
 
+// A Walk's time limit is a cancellation the caller asked for in advance, so ADR-0008's rule for
+// cancellations holds: the Walk says it was cut short, not why the replies it never got to use were
+// refused. Discovery succeeds; every Response after it carries a bad digest and is dropped.
+TEST(ClientV3Walk, ATimeLimitEndsAWalkWhoseRepliesAreAllRefusedIncomplete) {
+  Fixture f;
+  ScriptedV3Agent agent(f.io, credentials(), echoAnswer);
+  f.agent = &agent;
+  agent.setResponder([&agent](const ScriptedV3Agent::Request& req) {
+    auto reply = agent.behaveLikeACompliantAgent(req);
+    if (reply && reply->scoped.pdu.type == PduType::Response) reply->corruptDigest = true;
+    return reply;
+  });
+
+  constexpr auto limit = std::chrono::milliseconds(200);
+  WalkOptions options{2};
+  options.timeLimit = limit;
+  const auto start = std::chrono::steady_clock::now();
+  f.client.asyncWalkCollect(test::longDeadlineTarget(agent), credentials(),
+                            Oid{1, 3, 6, 1, 2, 1, 1}, options, f.collectToken());
+  f.run();
+  const auto took = std::chrono::steady_clock::now() - start;
+
+  EXPECT_EQ(f.ec, Errc::WalkIncomplete) << f.ec.message();
+  EXPECT_TRUE(f.collected.empty());
+  EXPECT_GE(took, limit);
+  EXPECT_LT(took, test::atOnceLimit(test::longDeadline)) << "the exchange's deadline ended it";
+  EXPECT_EQ(agent.requestsSeen(), 3) << "two discovery exchanges, then the one refused attempt";
+}
+
 // ---------------------------------------------------------------------------
 // Privacy
 // ---------------------------------------------------------------------------

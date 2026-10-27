@@ -2,7 +2,9 @@
 // Extension. Each batch is printed as it arrives and nothing is buffered -- the core form of a
 // Walk (ADR-0004), where walk-collect.cpp shows the convenience over it.
 //
-//   ./example-walk 127.0.0.1 16161 privsha1aes256c snmpio-interop 1.3.6.1.2.1.1 [limit]
+//   ./example-walk 127.0.0.1 16161 privsha1aes256c 1.3.6.1.2.1.1 [limit]
+//
+// with SNMPIO_AUTH_PASSWORD and SNMPIO_PRIV_PASSWORD set in the environment.
 //
 // With a limit, the Walk is cancelled once that many rows have been printed, and ends in
 // Errc::WalkIncomplete -- a Walk stopped early never reports itself as a whole one.
@@ -64,9 +66,18 @@ net::Awaitable<void> run(snmpio::Client& client, snmpio::Target target,
   client.stop();
 }
 
+// Passwords come from the environment, never the command line, where every user on the host can
+// read them in ps or /proc and the shell keeps them in its history. Read once, before the
+// io_context runs a thread that could race the environment.
+std::string passwordFrom(const char* variable) {
+  const char* value = std::getenv(variable);
+  return value != nullptr ? value : "";
+}
+
 int main(int argc, char** argv) {
-  if (argc != 6 && argc != 7) {
-    std::cerr << "usage: " << argv[0] << " <address> <port> <user> <password> <base-oid> [limit]\n";
+  if (argc != 5 && argc != 6) {
+    std::cerr << "usage: SNMPIO_AUTH_PASSWORD=... SNMPIO_PRIV_PASSWORD=... " << argv[0]
+              << " <address> <port> <user> <base-oid> [limit]\n";
     return 2;
   }
 
@@ -76,23 +87,24 @@ int main(int argc, char** argv) {
 
   // AES-256 needs more key material than SHA-1 produces, and the two Key Extensions make it in
   // mutually incompatible ways. Aes256C is Reeder's, Aes256 Blumenthal's: the Agent's user
-  // decides which, and nothing on the wire says. Usm.hpp lists the rest.
+  // decides which, and nothing on the wire says. Usm.hpp lists the rest. Each secret has its own
+  // password, from the environment.
   snmpio::Credentials credentials;
   credentials.userName = argv[3];
   credentials.level = snmpio::SecurityLevel::AuthPriv;
   credentials.authProtocol = snmpio::AuthProtocol::Sha1;
-  credentials.authPassword = argv[4];
+  credentials.authPassword = passwordFrom("SNMPIO_AUTH_PASSWORD");
   credentials.privProtocol = snmpio::PrivProtocol::Aes256C;
-  credentials.privPassword = argv[4];
+  credentials.privPassword = passwordFrom("SNMPIO_PRIV_PASSWORD");
 
-  const auto base = snmpio::Oid::parse(argv[5]);
+  const auto base = snmpio::Oid::parse(argv[4]);
   if (!base) {
-    std::cerr << "bad base OID: " << argv[5] << "\n";
+    std::cerr << "bad base OID: " << argv[4] << "\n";
     return 2;
   }
   std::optional<std::size_t> limit;
-  if (argc == 7) {
-    const std::string_view arg = argv[6];
+  if (argc == 6) {
+    const std::string_view arg = argv[5];
     std::size_t n = 0;
     const auto [end, err] = std::from_chars(arg.data(), arg.data() + arg.size(), n);
     if (err != std::errc{} || end != arg.data() + arg.size() || n == 0) {

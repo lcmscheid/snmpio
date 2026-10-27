@@ -18,6 +18,7 @@
 #include <snmpio/Usm.hpp>
 #include <snmpio/V3Message.hpp>
 #include <snmpio/Value.hpp>
+#include <snmpio/detail/HeldCredentials.hpp>
 #include <snmpio/detail/Net.hpp>
 
 namespace snmpio {
@@ -103,7 +104,9 @@ class Client {
   // or a negative WalkOptions::timeLimit completes it with Errc::ArgumentOutOfRange rather than
   // being clamped. So does a Master Key in the Credentials that is not keySize(authProtocol)
   // Octets, or that is given beside its password rather than in place of it, whatever the Security
-  // Level -- a privacy Master Key at authNoPriv, which nothing would use, included.
+  // Level -- a privacy Master Key at authNoPriv, which nothing would use, included. A password
+  // shorter than minimumPasswordLength completes it with Errc::PasswordTooShort instead, where the
+  // Security Level uses that password and wherever one is given at all (Usm.hpp).
   //
   // Stopping: refuses new work, closes the sockets and fails every outstanding operation with
   // Errc::ClientStopped. Idempotent, safe from any thread, and harmless before the destructor,
@@ -204,7 +207,7 @@ class Client {
   template <typename Token>
   auto asyncGet(Target target, Credentials credentials, std::vector<Oid> oids, Token&& token) {
     return spawn<void(net::ErrorCode, Response)>(
-        doRequest(std::move(target), Auth{std::move(credentials)},
+        doRequest(std::move(target), Auth{detail::HeldCredentials(std::move(credentials))},
                   makePdu(PduType::Get, toVarbinds(std::move(oids)))),
         std::forward<Token>(token));
   }
@@ -212,7 +215,7 @@ class Client {
   template <typename Token>
   auto asyncGetNext(Target target, Credentials credentials, std::vector<Oid> oids, Token&& token) {
     return spawn<void(net::ErrorCode, Response)>(
-        doRequest(std::move(target), Auth{std::move(credentials)},
+        doRequest(std::move(target), Auth{detail::HeldCredentials(std::move(credentials))},
                   makePdu(PduType::GetNext, toVarbinds(std::move(oids)))),
         std::forward<Token>(token));
   }
@@ -221,7 +224,7 @@ class Client {
   auto asyncGetBulk(Target target, Credentials credentials, std::vector<Oid> oids,
                     std::int32_t nonRepeaters, std::int32_t maxRepetitions, Token&& token) {
     return spawn<void(net::ErrorCode, Response)>(
-        doRequest(std::move(target), Auth{std::move(credentials)},
+        doRequest(std::move(target), Auth{detail::HeldCredentials(std::move(credentials))},
                   makeBulkPdu(toVarbinds(std::move(oids)), nonRepeaters, maxRepetitions)),
         std::forward<Token>(token));
   }
@@ -230,7 +233,7 @@ class Client {
   auto asyncSet(Target target, Credentials credentials, std::vector<Varbind> varbinds,
                 Token&& token) {
     return spawn<void(net::ErrorCode, Response)>(
-        doRequest(std::move(target), Auth{std::move(credentials)},
+        doRequest(std::move(target), Auth{detail::HeldCredentials(std::move(credentials))},
                   makePdu(PduType::Set, std::move(varbinds))),
         std::forward<Token>(token));
   }
@@ -238,24 +241,27 @@ class Client {
   template <typename Token>
   auto asyncWalk(Target target, Credentials credentials, Oid base, WalkOptions options,
                  BatchHandler onBatch, Token&& token) {
-    return spawn<void(net::ErrorCode)>(doWalk(std::move(target), Auth{std::move(credentials)},
-                                              std::move(base), options, std::move(onBatch)),
-                                       std::forward<Token>(token));
+    return spawn<void(net::ErrorCode)>(
+        doWalk(std::move(target), Auth{detail::HeldCredentials(std::move(credentials))},
+               std::move(base), options, std::move(onBatch)),
+        std::forward<Token>(token));
   }
 
   template <typename Token>
   auto asyncWalkCollect(Target target, Credentials credentials, Oid base, WalkOptions options,
                         Token&& token) {
     return spawn<void(net::ErrorCode, std::vector<Varbind>)>(
-        doWalkCollect(std::move(target), Auth{std::move(credentials)}, std::move(base), options),
+        doWalkCollect(std::move(target), Auth{detail::HeldCredentials(std::move(credentials))},
+                      std::move(base), options),
         std::forward<Token>(token));
   }
 
  private:
   // Which Credentials a request travels under. A variant rather than two parallel stacks: from the
   // retransmission loop down the two protocols are identical, and the only places that care are
-  // where the datagram is built and where a reply is matched to it.
-  using Auth = std::variant<Community, Credentials>;
+  // where the datagram is built and where a reply is matched to it. The Credentials are held, so
+  // that each copy a coroutine frame keeps is wiped with it (threat model S5).
+  using Auth = std::variant<Community, detail::HeldCredentials>;
 
   // Named because a coroutine's co_return cannot deduce a braced tuple.
   using RequestResult = std::tuple<net::ErrorCode, Response>;

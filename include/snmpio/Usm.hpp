@@ -74,6 +74,11 @@ enum class SecurityLevel : std::uint8_t {
 // section 8.1.1.1), which is why it is not the 8 the cipher itself uses.
 [[nodiscard]] std::size_t privKeySize(PrivProtocol p) noexcept;
 
+// RFC 3414 section 11.2: the shortest password USM accepts. A shorter one -- an empty one
+// included -- is refused with Errc::PasswordTooShort, by passwordToKey and by a Client before it
+// sends anything. A Master Key supplied in its place is not a password, and is not held to it.
+inline constexpr std::size_t minimumPasswordLength = 8;
+
 // The user, the level they authenticate at, and the secrets behind it.
 //
 // Independent of Target by construction (CONTEXT.md): the same Credentials may be used against
@@ -105,7 +110,11 @@ struct Credentials {
 // the Master Key. The megabyte is the point -- it is what makes a dictionary attack against the
 // Master Key expensive -- so this is not a function to call on a hot path, nor on an I/O thread:
 // call it once per password, where blocking for a few milliseconds is harmless, and hand the
-// result to every Client in Credentials::authMasterKey or privMasterKey.
+// result to every Client in Credentials::authMasterKey or privMasterKey. A password shorter than
+// minimumPasswordLength is refused with Errc::PasswordTooShort.
+//
+// This and the derivations below copy their result out into Octets, which are the caller's: snmpio
+// wipes its own copies of keys (threat model S5), and the caller's are theirs to wipe.
 [[nodiscard]] Octets passwordToKey(AuthProtocol p, std::string_view password, net::ErrorCode& ec);
 
 // RFC 3414 section 2.6: hash(masterKey || engineId || masterKey). Binds a Master Key to one

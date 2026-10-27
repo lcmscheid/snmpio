@@ -1,9 +1,10 @@
 // SNMPv3 authNoPriv GETBULK, in the coroutine form: authenticated under SHA-512, not encrypted.
 //
-//   ./example-getbulk 127.0.0.1 16161 authsha512 snmpio-interop
+//   SNMPIO_AUTH_PASSWORD=... ./example-getbulk 127.0.0.1 16161 authsha512
 #include <cstdint>
 #include <cstdlib>
 #include <iostream>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -46,9 +47,17 @@ net::Awaitable<void> run(snmpio::Client& client, snmpio::Target target,
   }
 }
 
+// Passwords come from the environment, never the command line, where every user on the host can
+// read them in ps or /proc and the shell keeps them in its history. Read once, before the
+// io_context runs a thread that could race the environment.
+std::string passwordFrom(const char* variable) {
+  const char* value = std::getenv(variable);
+  return value != nullptr ? value : "";
+}
+
 int main(int argc, char** argv) {
-  if (argc != 5) {
-    std::cerr << "usage: " << argv[0] << " <address> <port> <user> <password>\n";
+  if (argc != 4) {
+    std::cerr << "usage: SNMPIO_AUTH_PASSWORD=... " << argv[0] << " <address> <port> <user>\n";
     return 2;
   }
 
@@ -57,12 +66,13 @@ int main(int argc, char** argv) {
                      static_cast<std::uint16_t>(std::atoi(argv[2]))};
 
   // authNoPriv: the message is signed but travels in the clear, so there is no privacy protocol
-  // or password to name. Usm.hpp lists the other authentication protocols.
+  // or password to name. Usm.hpp lists the other authentication protocols. The password must be at
+  // least 8 characters (RFC 3414 section 11.2), or the request fails with Errc::PasswordTooShort.
   snmpio::Credentials credentials;
   credentials.userName = argv[3];
   credentials.level = snmpio::SecurityLevel::AuthNoPriv;
   credentials.authProtocol = snmpio::AuthProtocol::Sha512;
-  credentials.authPassword = argv[4];
+  credentials.authPassword = passwordFrom("SNMPIO_AUTH_PASSWORD");
 
   net::IoContext io;
   snmpio::Client client(io.get_executor());

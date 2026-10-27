@@ -7,6 +7,7 @@
 #include <string_view>
 
 #include <snmpio/Usm.hpp>
+#include <snmpio/detail/SecretOctets.hpp>
 
 // Internal to the library, and not installed: what Client.cpp and Usm.cpp share about the
 // Credentials' two secrets.
@@ -42,6 +43,15 @@ class Secret {
     return key == nullptr || (key->size() == keySize(m_authProtocol) && m_password.empty());
   }
 
+  // RFC 3414 section 11.2's 8 characters, for a secret given as a password. Checked where the
+  // Security Level uses it -- where empty is too short as well -- and wherever one is given at all,
+  // as inRange checks a Master Key the level does not use. A supplied Master Key has no password.
+  [[nodiscard]] bool passwordLongEnough(bool used) const noexcept {
+    if (suppliedMasterKey() != nullptr) return true;
+    if (m_password.empty()) return !used;
+    return m_password.size() >= minimumPasswordLength;
+  }
+
  private:
   Secret(AuthProtocol authProtocol, const std::optional<Octets>& masterKey,
          std::string_view password) noexcept
@@ -52,14 +62,25 @@ class Secret {
   std::string_view m_password;
 };
 
+// Usm.hpp's derivations, as snmpio keeps their results: in storage that wipes itself (threat model
+// S5). The public functions are these, copied out into Octets for the caller to keep.
+[[nodiscard]] SecretOctets passwordToKey(AuthProtocol p, std::string_view password,
+                                         net::ErrorCode& ec);
+[[nodiscard]] SecretOctets localizeKey(AuthProtocol p, std::span<const std::byte> masterKey,
+                                       std::span<const std::byte> engineId, net::ErrorCode& ec);
+[[nodiscard]] SecretOctets localizedPrivKey(AuthProtocol auth, PrivProtocol priv,
+                                            std::span<const std::byte> masterKey,
+                                            std::span<const std::byte> engineId,
+                                            net::ErrorCode& ec);
+
 // Key material for passwordDigest from OpenSSL's CSPRNG (ADR-0001). CryptoFailure if it has none
 // to give.
-[[nodiscard]] Octets randomDigestKey(net::ErrorCode& ec);
+[[nodiscard]] SecretOctets randomDigestKey(net::ErrorCode& ec);
 
 // HMAC-SHA-256 of a password under a key, at the hash's full 32 Octets: what a cache may hold in
 // place of the password itself (threat model S4).
-[[nodiscard]] Octets passwordDigest(std::span<const std::byte> key, std::string_view password,
-                                    net::ErrorCode& ec);
+[[nodiscard]] SecretOctets passwordDigest(std::span<const std::byte> key, std::string_view password,
+                                          net::ErrorCode& ec);
 
 }  // namespace snmpio::detail
 

@@ -67,9 +67,9 @@ snmpio::Credentials credentials;
 credentials.userName = "privsha1aes";
 credentials.level = snmpio::SecurityLevel::AuthPriv;
 credentials.authProtocol = snmpio::AuthProtocol::Sha1;
-credentials.authPassword = password;
+credentials.authPassword = authPassword;  // one per key, each at least 8 characters
 credentials.privProtocol = snmpio::PrivProtocol::Aes128;
-credentials.privPassword = password;
+credentials.privPassword = privPassword;
 
 net::ErrorCode ec;
 auto varbinds = co_await client.asyncWalkCollect(
@@ -144,6 +144,12 @@ is the API, not an argument parser; [`Usm.hpp`](include/snmpio/Usm.hpp) lists th
 | [`walk`](examples/walk.cpp) | `asyncWalk` | v3 authPriv, SHA-1 / AES-256 (Reeder) | coroutine | streaming; a row limit as a `total` cancellation, ending in `WalkIncomplete` |
 | [`walk-collect`](examples/walk-collect.cpp) | `asyncWalkCollect` | v3 authPriv, SHA-1 / AES-128 | coroutine | the buffering convenience over `walk` |
 
+The authenticated examples read their passwords from the environment, never from the command
+line, where any user on the host can read them: `SNMPIO_AUTH_PASSWORD` for the authentication key
+and `SNMPIO_PRIV_PASSWORD` for the privacy key. Each must be at least 8 characters
+(`minimumPasswordLength`, RFC 3414 section 11.2). In deployment the two are different; the interop
+`snmpd` gives every user one password for both keys, so against it the two variables are set alike.
+
 To build them and run each against the `snmpd` the [interop script](#interop-tests) starts, whose
 users are named after what they carry and whose password is `snmpio-interop`:
 
@@ -152,12 +158,13 @@ cmake --install build/default --prefix /tmp/prefix
 cmake -S examples -B build/examples -DCMAKE_PREFIX_PATH=/tmp/prefix
 cmake --build build/examples
 cd build/examples
+export SNMPIO_AUTH_PASSWORD=snmpio-interop SNMPIO_PRIV_PASSWORD=snmpio-interop
 ./example-get 127.0.0.1 16161 public
 ./example-getnext 127.0.0.1 16161 noauth 1.3.6.1.2.1.1.1 1.3.6.1.2.1.1.3 1.3.6.1.2.1.1.5
-./example-getbulk 127.0.0.1 16161 authsha512 snmpio-interop
-./example-set 127.0.0.1 16161 writer-privsha256aes snmpio-interop ops@example.net
-./example-walk 127.0.0.1 16161 privsha1aes256c snmpio-interop 1.3.6.1.2.1.1
-./example-walk-collect 127.0.0.1 16161 privsha1aes snmpio-interop 1.3.6.1.2.1.1
+./example-getbulk 127.0.0.1 16161 authsha512
+./example-set 127.0.0.1 16161 writer-privsha256aes ops@example.net
+./example-walk 127.0.0.1 16161 privsha1aes256c 1.3.6.1.2.1.1
+./example-walk-collect 127.0.0.1 16161 privsha1aes 1.3.6.1.2.1.1
 ```
 
 Two variations show the failure paths. `set` as `privsha256aes` — the same protocols, a user that
@@ -298,6 +305,11 @@ sends nothing and completes with `Errc::ArgumentOutOfRange`, which classifies as
 So does a negative GETBULK `nonRepeaters` or `WalkOptions::timeLimit`. The value is refused rather
 than clamped. A request that quietly sent something other than what was asked for would hide a bug
 in the caller.
+
+A password shorter than 8 characters (`minimumPasswordLength`, from RFC 3414 section 11.2) is
+refused the same way, before anything is sent, with `Errc::PasswordTooShort`, which is also
+`Configuration`. That covers an empty password where the Security Level needs one. `passwordToKey`
+refuses it too. Credentials that carry Master Keys in place of passwords have no password to check.
 
 The borderline calls are documented next to the enumeration in
 [`include/snmpio/Error.hpp`](include/snmpio/Error.hpp), with the reasoning. Three worth knowing

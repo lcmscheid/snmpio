@@ -259,7 +259,8 @@ constexpr std::size_t aesIvSize = 16;
 
 // RFC 3414 section 8.1.1.1 for DES, RFC 3826 section 3.1.2.1 for AES: the IV either side derives
 // from what the message carries, so this is the same function on both. DES's is the key's pre-IV
-// under a salt the message carries, and as secret as the key it is cut from.
+// under a salt the message carries, and as secret as the key it is cut from. AES's is not secret --
+// boots, time and salt all travel in the clear -- but one return type for both costs only a wipe.
 SecretOctets makeIv(PrivProtocol p, std::span<const std::byte> privKey, std::int32_t boots,
                     std::int32_t time, std::span<const std::byte> privParams) {
   if (p == PrivProtocol::Des) {
@@ -479,7 +480,9 @@ SecretOctets detail::localizedKeyFor(const detail::Secret& secret,
 namespace {
 
 // The Localized Key for one secret of Credentials, from the Master Key they carry or the one its
-// password derives to, uncached.
+// password derives to, uncached. Client::Impl::masterKey and localizedKey take the same two steps
+// with a cache in between; they share localizedKeyFor, but not this, because the cache is the
+// difference (Usm.hpp says why it is the Client's and not this file's).
 SecretOctets localizedFromCredentials(const detail::Secret& secret,
                                       std::span<const std::byte> engineId, net::ErrorCode& ec) {
   if (const SecretOctets* supplied = secret.suppliedMasterKey()) {

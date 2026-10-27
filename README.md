@@ -67,7 +67,7 @@ snmpio::Credentials credentials;
 credentials.userName = "privsha1aes";
 credentials.level = snmpio::SecurityLevel::AuthPriv;
 credentials.authProtocol = snmpio::AuthProtocol::Sha1;
-credentials.authPassword = authPassword;  // one per key, each at least 8 characters
+credentials.authPassword = authPassword;  // one per key, each minimumPasswordLength or more
 credentials.privProtocol = snmpio::PrivProtocol::Aes128;
 credentials.privPassword = privPassword;
 
@@ -99,6 +99,13 @@ if (ec) return;
 // Every Client, on any thread, now gets the Credentials and never the passwords.
 for (auto& [name, client] : clients) client->asyncGet(targetOf(name), credentials, oids, token);
 ```
+
+The secrets in `Credentials` wipe themselves (threat model S5). The passwords are
+`snmpio::Password`, which converts implicitly from a `std::string` or a string literal and is read
+back through `view()`. The Master Keys are `snmpio::SecretOctets`, a `std::vector<std::byte>` whose
+allocator overwrites each buffer before freeing it, and `passwordToKey` and the `localize*` functions
+return the same type. A Credentials that is destroyed or moved from leaves none of its secrets
+behind, whether it is your copy or one inside a Client.
 
 What is left on the strand per Engine is localising the key, one short hash, except under the
 Reeder Key Extension (`Aes192C`, `Aes256C`), whose extension runs the megabyte hash again over the
@@ -146,8 +153,8 @@ is the API, not an argument parser; [`Usm.hpp`](include/snmpio/Usm.hpp) lists th
 
 The authenticated examples read their passwords from the environment, never from the command
 line, where any user on the host can read them: `SNMPIO_AUTH_PASSWORD` for the authentication key
-and `SNMPIO_PRIV_PASSWORD` for the privacy key. Each must be at least 8 characters
-(`minimumPasswordLength`, RFC 3414 section 11.2). In deployment the two are different; the interop
+and `SNMPIO_PRIV_PASSWORD` for the privacy key. Each must be at least `minimumPasswordLength`
+characters (RFC 3414 section 11.2's 8). In deployment the two are different; the interop
 `snmpd` gives every user one password for both keys, so against it the two variables are set alike.
 
 To build them and run each against the `snmpd` the [interop script](#interop-tests) starts, whose
@@ -306,7 +313,7 @@ So does a negative GETBULK `nonRepeaters` or `WalkOptions::timeLimit`. The value
 than clamped. A request that quietly sent something other than what was asked for would hide a bug
 in the caller.
 
-A password shorter than 8 characters (`minimumPasswordLength`, from RFC 3414 section 11.2) is
+A password shorter than `minimumPasswordLength` characters (RFC 3414 section 11.2's 8) is
 refused the same way, before anything is sent, with `Errc::PasswordTooShort`, which is also
 `Configuration`. That covers an empty password where the Security Level needs one. `passwordToKey`
 refuses it too. Credentials that carry Master Keys in place of passwords have no password to check.

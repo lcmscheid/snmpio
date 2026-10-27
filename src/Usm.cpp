@@ -2,7 +2,7 @@
 
 #include "Secret.hpp"
 
-#include <snmpio/detail/SecretOctets.hpp>
+#include <snmpio/SecretOctets.hpp>
 
 #include <algorithm>
 #include <array>
@@ -22,12 +22,12 @@ namespace {
 
 // RFC 3414 appendix A.2.1: the password is repeated into exactly one megabyte, which is then
 // hashed once. The RFC's listing feeds it 64 Octets at a time; the digest is of the whole
-// megabyte, so the chunk size is otherwise free, and 16,384 calls into EVP cost about 3.6 times
-// what the hash itself does (research note section 5.4). Each chunk here is a whole number of
-// passwords, so every one begins where the password does and they all share one buffer. Written
-// from the RFC, not ported from anyone -- hence no NOTICE entry (ADR-0007).
+// megabyte, so how much goes in per call is otherwise free, and 16,384 calls into EVP cost about
+// 3.6 times what the hash itself does (research note section 5.4). Each call here is fed the same
+// buffer of the password repeated a whole number of times, so every one begins where the password
+// does. Written from the RFC, not ported from anyone -- hence no NOTICE entry (ADR-0007).
 constexpr std::size_t expandedPasswordSize = 1048576;
-constexpr std::size_t targetChunkSize = 16384;
+constexpr std::size_t targetRepeatedSize = 16384;
 
 const EVP_MD* digestFor(AuthProtocol p) noexcept {
   switch (p) {
@@ -74,28 +74,50 @@ bool begin(const DigestContext& ctx, const EVP_MD* md, net::ErrorCode& ec) {
   return true;
 }
 
+// A stack array of key material for OpenSSL to write into, wiped however its scope is left -- an
+// error return included -- as SecretOctets is wherever it goes.
+template <std::size_t N>
+class WipedStackArray {
+ public:
+  WipedStackArray() noexcept = default;
+  ~WipedStackArray() { detail::cleanse(m_bytes.data(), m_bytes.size()); }
+
+  WipedStackArray(const WipedStackArray&) = delete;
+  WipedStackArray& operator=(const WipedStackArray&) = delete;
+  WipedStackArray(WipedStackArray&&) = delete;
+  WipedStackArray& operator=(WipedStackArray&&) = delete;
+
+  [[nodiscard]] unsigned char* data() noexcept { return m_bytes.data(); }
+  [[nodiscard]] constexpr std::size_t size() const noexcept { return N; }
+  // The first n bytes, copied out into storage that wipes itself in turn.
+  [[nodiscard]] SecretOctets first(std::size_t n) const {
+    const auto* begin = reinterpret_cast<const std::byte*>(m_bytes.data());
+    return {begin, begin + n};
+  }
+
+ private:
+  std::array<unsigned char, N> m_bytes{};
+};
+
 // Every digest finished here is key material -- a Master Key, a Localized Key, or a Key Extension
-// round -- so the stack array it lands in is wiped once it is copied out.
-detail::SecretOctets finish(const DigestContext& ctx, net::ErrorCode& ec) {
-  std::array<unsigned char, EVP_MAX_MD_SIZE> out{};
+// round -- so the stack array it lands in is wiped.
+SecretOctets finish(const DigestContext& ctx, net::ErrorCode& ec) {
+  WipedStackArray<EVP_MAX_MD_SIZE> out;
   unsigned int len = 0;
   if (EVP_DigestFinal_ex(ctx.get(), out.data(), &len) != 1) {
     ec = make_error_code(Errc::CryptoFailure);
     return {};
   }
   ec = {};
-  const auto* first = reinterpret_cast<const std::byte*>(out.data());
-  detail::SecretOctets digest(first, first + len);
-  OPENSSL_cleanse(out.data(), out.size());
-  return digest;
+  return out.first(len);
 }
 
 // An HMAC under md at the hash's full width; callers truncate where the protocol says to. Held as
 // a secret, and its stack array wiped, because one caller's is: passwordDigest's stands in for a
 // password.
-detail::SecretOctets hmacOf(const EVP_MD* md, std::span<const std::byte> key,
-                            std::span<const std::byte> message, net::ErrorCode& ec) {
-  std::array<unsigned char, EVP_MAX_MD_SIZE> mac{};
+SecretOctets hmacOf(const EVP_MD* md, std::span<const std::byte> key,
+                    std::span<const std::byte> message, net::ErrorCode& ec) {
+  WipedStackArray<EVP_MAX_MD_SIZE> mac;
   unsigned int len = 0;
   if (HMAC(md, key.data(), static_cast<int>(key.size()),
            reinterpret_cast<const unsigned char*>(message.data()), message.size(), mac.data(),
@@ -104,20 +126,12 @@ detail::SecretOctets hmacOf(const EVP_MD* md, std::span<const std::byte> key,
     return {};
   }
   ec = {};
-  const auto* first = reinterpret_cast<const std::byte*>(mac.data());
-  detail::SecretOctets out(first, first + len);
-  OPENSSL_cleanse(mac.data(), mac.size());
-  return out;
-}
-
-// What a public function hands its caller: the caller's to keep, and to wipe or not.
-Octets toOctets(const detail::SecretOctets& secret) {
-  return {secret.begin(), secret.end()};
+  return mac.first(len);
 }
 
 // The protocol's own hash over one buffer. Blumenthal's extension is the only caller: every other
 // hash in USM is either an HMAC or the three-part localization.
-detail::SecretOctets hashOf(AuthProtocol p, std::span<const std::byte> in, net::ErrorCode& ec) {
+SecretOctets hashOf(AuthProtocol p, std::span<const std::byte> in, net::ErrorCode& ec) {
   const auto* md = digestFor(p);
   if (md == nullptr) {
     ec = make_error_code(Errc::UnsupportedAuthProtocol);
@@ -246,16 +260,16 @@ constexpr std::size_t aesIvSize = 16;
 // RFC 3414 section 8.1.1.1 for DES, RFC 3826 section 3.1.2.1 for AES: the IV either side derives
 // from what the message carries, so this is the same function on both. DES's is the key's pre-IV
 // under a salt the message carries, and as secret as the key it is cut from.
-detail::SecretOctets makeIv(PrivProtocol p, std::span<const std::byte> privKey, std::int32_t boots,
-                            std::int32_t time, std::span<const std::byte> privParams) {
+SecretOctets makeIv(PrivProtocol p, std::span<const std::byte> privKey, std::int32_t boots,
+                    std::int32_t time, std::span<const std::byte> privParams) {
   if (p == PrivProtocol::Des) {
-    detail::SecretOctets iv(desBlockSize);
+    SecretOctets iv(desBlockSize);
     for (std::size_t i = 0; i < desBlockSize; ++i) {
       iv[i] = privKey[desKeySize + i] ^ privParams[i];
     }
     return iv;
   }
-  detail::SecretOctets iv(aesIvSize);
+  SecretOctets iv(aesIvSize);
   putBigEndian32(iv, static_cast<std::uint32_t>(boots));
   putBigEndian32(std::span(iv).subspan(4), static_cast<std::uint32_t>(time));
   std::ranges::copy(privParams, iv.begin() + 8);
@@ -353,8 +367,7 @@ std::size_t authParamsSize(AuthProtocol p) noexcept {
   return 0;
 }
 
-detail::SecretOctets detail::passwordToKey(AuthProtocol p, std::string_view password,
-                                           net::ErrorCode& ec) {
+SecretOctets passwordToKey(AuthProtocol p, std::string_view password, net::ErrorCode& ec) {
   const auto* md = digestFor(p);
   if (md == nullptr) {
     ec = make_error_code(Errc::UnsupportedAuthProtocol);
@@ -367,21 +380,21 @@ detail::SecretOctets detail::passwordToKey(AuthProtocol p, std::string_view pass
     return {};
   }
 
-  // A password longer than the target is one password per chunk. Reserved whole, so the buffer
-  // full of the password is one allocation, which the allocator wipes on its way out.
-  const std::size_t chunkSize =
-      std::max<std::size_t>(1, targetChunkSize / password.size()) * password.size();
+  // A password longer than the target is repeated once. Reserved whole, so the buffer full of the
+  // password is one allocation, which the allocator wipes on its way out.
+  const std::size_t repeatedSize =
+      std::max<std::size_t>(1, targetRepeatedSize / password.size()) * password.size();
   const auto passwordBytes = std::as_bytes(std::span(password));
-  SecretOctets chunk;
-  chunk.reserve(chunkSize);
-  while (chunk.size() < chunkSize)
-    chunk.insert(chunk.end(), passwordBytes.begin(), passwordBytes.end());
+  SecretOctets repeated;
+  repeated.reserve(repeatedSize);
+  while (repeated.size() < repeatedSize)
+    repeated.insert(repeated.end(), passwordBytes.begin(), passwordBytes.end());
 
   const DigestContext ctx;
   bool hashed = begin(ctx, md, ec);
-  for (std::size_t done = 0; hashed && done < expandedPasswordSize; done += chunkSize) {
-    hashed = EVP_DigestUpdate(ctx.get(), chunk.data(),
-                              std::min(chunkSize, expandedPasswordSize - done)) == 1;
+  for (std::size_t done = 0; hashed && done < expandedPasswordSize; done += repeatedSize) {
+    hashed = EVP_DigestUpdate(ctx.get(), repeated.data(),
+                              std::min(repeatedSize, expandedPasswordSize - done)) == 1;
   }
   if (!hashed) {
     if (!ec) ec = make_error_code(Errc::CryptoFailure);
@@ -390,12 +403,8 @@ detail::SecretOctets detail::passwordToKey(AuthProtocol p, std::string_view pass
   return finish(ctx, ec);
 }
 
-Octets passwordToKey(AuthProtocol p, std::string_view password, net::ErrorCode& ec) {
-  return toOctets(detail::passwordToKey(p, password, ec));
-}
-
-detail::SecretOctets detail::localizeKey(AuthProtocol p, std::span<const std::byte> masterKey,
-                                         std::span<const std::byte> engineId, net::ErrorCode& ec) {
+SecretOctets localizeKey(AuthProtocol p, std::span<const std::byte> masterKey,
+                         std::span<const std::byte> engineId, net::ErrorCode& ec) {
   const auto* md = digestFor(p);
   if (md == nullptr) {
     ec = make_error_code(Errc::UnsupportedAuthProtocol);
@@ -417,15 +426,9 @@ detail::SecretOctets detail::localizeKey(AuthProtocol p, std::span<const std::by
   return finish(ctx, ec);
 }
 
-Octets localizeKey(AuthProtocol p, std::span<const std::byte> masterKey,
-                   std::span<const std::byte> engineId, net::ErrorCode& ec) {
-  return toOctets(detail::localizeKey(p, masterKey, engineId, ec));
-}
-
-detail::SecretOctets detail::localizedPrivKey(AuthProtocol auth, PrivProtocol priv,
-                                              std::span<const std::byte> masterKey,
-                                              std::span<const std::byte> engineId,
-                                              net::ErrorCode& ec) {
+SecretOctets localizedPrivKey(AuthProtocol auth, PrivProtocol priv,
+                              std::span<const std::byte> masterKey,
+                              std::span<const std::byte> engineId, net::ErrorCode& ec) {
   const auto want = privKeySize(priv);
   if (want == 0) {
     ec = make_error_code(Errc::UnsupportedPrivProtocol);
@@ -433,7 +436,7 @@ detail::SecretOctets detail::localizedPrivKey(AuthProtocol auth, PrivProtocol pr
   }
   // The privacy key is derived under the *authentication* protocol's hash -- USM has no second
   // hash to name (RFC 3414 section 2.6).
-  auto key = detail::localizeKey(auth, masterKey, engineId, ec);
+  auto key = localizeKey(auth, masterKey, engineId, ec);
   if (ec) return {};
 
   const bool reeder = priv == PrivProtocol::Aes192C || priv == PrivProtocol::Aes256C;
@@ -445,9 +448,9 @@ detail::SecretOctets detail::localizedPrivKey(AuthProtocol auth, PrivProtocol pr
       // draft-reeder-snmpv3-usm-3desede: the key so far is fed back in as a *password*, so each
       // round costs another megabyte expansion. Nothing here caches; Client does.
       const std::string_view asPassword(reinterpret_cast<const char*>(key.data()), key.size());
-      const auto next = detail::passwordToKey(auth, asPassword, ec);
+      const auto next = passwordToKey(auth, asPassword, ec);
       if (ec) return {};
-      more = detail::localizeKey(auth, next, engineId, ec);
+      more = localizeKey(auth, next, engineId, ec);
     } else {
       // draft-blumenthal-aes-usm-04 section 3.1.2.1: Kul = Kul || H(Kul), until it is long enough.
       more = hashOf(auth, key, ec);
@@ -464,65 +467,64 @@ detail::SecretOctets detail::localizedPrivKey(AuthProtocol auth, PrivProtocol pr
   return key;
 }
 
-Octets localizedPrivKey(AuthProtocol auth, PrivProtocol priv, std::span<const std::byte> masterKey,
-                        std::span<const std::byte> engineId, net::ErrorCode& ec) {
-  return toOctets(detail::localizedPrivKey(auth, priv, masterKey, engineId, ec));
+SecretOctets detail::localizedKeyFor(const detail::Secret& secret,
+                                     std::span<const std::byte> masterKey,
+                                     std::span<const std::byte> engineId, net::ErrorCode& ec) {
+  if (secret.privProtocol() == PrivProtocol::None) {
+    return localizeKey(secret.authProtocol(), masterKey, engineId, ec);
+  }
+  return localizedPrivKey(secret.authProtocol(), secret.privProtocol(), masterKey, engineId, ec);
 }
 
 namespace {
 
-// The Master Key the Credentials carry for one secret, or the one its password derives to.
-detail::SecretOctets masterKeyOf(const detail::Secret& secret, net::ErrorCode& ec) {
-  if (const Octets* supplied = secret.suppliedMasterKey()) {
-    ec = {};
-    return {supplied->begin(), supplied->end()};
+// The Localized Key for one secret of Credentials, from the Master Key they carry or the one its
+// password derives to, uncached.
+SecretOctets localizedFromCredentials(const detail::Secret& secret,
+                                      std::span<const std::byte> engineId, net::ErrorCode& ec) {
+  if (const SecretOctets* supplied = secret.suppliedMasterKey()) {
+    return detail::localizedKeyFor(secret, *supplied, engineId, ec);
   }
-  return detail::passwordToKey(secret.authProtocol(), secret.password(), ec);
+  const auto master = passwordToKey(secret.authProtocol(), secret.password(), ec);
+  if (ec) return {};
+  return detail::localizedKeyFor(secret, master, engineId, ec);
 }
 
 }  // namespace
 
-Octets localizedAuthKey(const Credentials& creds, std::span<const std::byte> engineId,
-                        net::ErrorCode& ec) {
-  const auto master = masterKeyOf(detail::Secret::auth(creds), ec);
-  if (ec) return {};
-  return toOctets(detail::localizeKey(creds.authProtocol, master, engineId, ec));
+SecretOctets localizedAuthKey(const Credentials& creds, std::span<const std::byte> engineId,
+                              net::ErrorCode& ec) {
+  return localizedFromCredentials(detail::Secret::auth(creds), engineId, ec);
 }
 
-Octets localizedPrivKey(const Credentials& creds, std::span<const std::byte> engineId,
-                        net::ErrorCode& ec) {
+SecretOctets localizedPrivKey(const Credentials& creds, std::span<const std::byte> engineId,
+                              net::ErrorCode& ec) {
   // The span overload asks this too, but only after the Master Key it is handed: asked here
   // first, no privacy protocol fails at once rather than after a megabyte hash of the password.
   if (privKeySize(creds.privProtocol) == 0) {
     ec = make_error_code(Errc::UnsupportedPrivProtocol);
     return {};
   }
-  const auto master = masterKeyOf(detail::Secret::priv(creds), ec);
-  if (ec) return {};
-  return toOctets(
-      detail::localizedPrivKey(creds.authProtocol, creds.privProtocol, master, engineId, ec));
+  return localizedFromCredentials(detail::Secret::priv(creds), engineId, ec);
 }
 
 void detail::cleanse(void* p, std::size_t n) noexcept {
   OPENSSL_cleanse(p, n);
 }
 
-detail::SecretOctets detail::randomDigestKey(net::ErrorCode& ec) {
+SecretOctets detail::randomDigestKey(net::ErrorCode& ec) {
   constexpr std::size_t keyOctets = 32;  // SHA-256's block is 64; its output width is plenty
-  std::array<unsigned char, keyOctets> key{};
+  WipedStackArray<keyOctets> key;
   if (RAND_bytes(key.data(), static_cast<int>(key.size())) != 1) {
     ec = make_error_code(Errc::CryptoFailure);
     return {};
   }
   ec = {};
-  const auto* first = reinterpret_cast<const std::byte*>(key.data());
-  SecretOctets out(first, first + key.size());
-  OPENSSL_cleanse(key.data(), key.size());
-  return out;
+  return key.first(key.size());
 }
 
-detail::SecretOctets detail::passwordDigest(std::span<const std::byte> key,
-                                            std::string_view password, net::ErrorCode& ec) {
+SecretOctets detail::passwordDigest(std::span<const std::byte> key, std::string_view password,
+                                    net::ErrorCode& ec) {
   return hmacOf(EVP_sha256(), key, std::as_bytes(std::span(password)), ec);
 }
 

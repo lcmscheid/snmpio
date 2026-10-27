@@ -6,9 +6,10 @@
 // with SNMPIO_AUTH_PASSWORD and SNMPIO_PRIV_PASSWORD set in the environment.
 #include <cstdlib>
 #include <iostream>
-#include <string>
 
 #include <snmpio/Client.hpp>
+
+#include "Environment.hpp"
 
 namespace net = snmpio::net;
 
@@ -30,14 +31,6 @@ net::Awaitable<void> run(snmpio::Client& client, snmpio::Target target,
   // The Client's receive loop is outstanding work, so io.run() returns only once stop() has
   // closed it -- not once this coroutine has.
   client.stop();
-}
-
-// Passwords come from the environment, never the command line, where every user on the host can
-// read them in ps or /proc and the shell keeps them in its history. Read once, before the
-// io_context runs a thread that could race the environment.
-std::string passwordFrom(const char* variable) {
-  const char* value = std::getenv(variable);
-  return value != nullptr ? value : "";
 }
 
 int main(int argc, char** argv) {

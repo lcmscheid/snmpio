@@ -63,7 +63,7 @@ enum class Errc {
   LegacyProviderUnavailable,  // DES needs OpenSSL's legacy provider, and it would not load
   UnsupportedSecurityModel,   // msgSecurityModel names something other than USM
   BadMessageFlags,            // msgFlags was not one Octet, or claimed privacy without auth
-  PasswordTooShort,           // a password under the 8 characters RFC 3414 section 11.2 requires
+  PasswordTooShort,           // a password under minimumPasswordLength (RFC 3414 section 11.2)
   CryptoFailure,              // OpenSSL refused an operation that should not have been refusable
   AuthFailed,                 // the message's digest is not the one its key produces
   DecryptionFailed,           // an encryptedPDU this key does not open, or does not open into a
@@ -116,7 +116,8 @@ enum class Errc {
 //   * ArgumentOutOfRange is Configuration: the caller passed a value past its documented bound,
 //     and the same call fails the same way until they change it. So is PasswordTooShort, for the
 //     same reason. It took EmptyPassword's place rather than standing beside it: an empty password
-//     is one of the lengths it refuses, and two codes for one rule would be two to check for.
+//     is one of the lengths it refuses, and two codes for one rule would be two to check for
+//     (ADR-0011).
 //   * Malformed replies -- the framing, primitive and OID decode faults -- are Fatal. They mean
 //     the Agent is producing something no correct Agent produces, and the next datagram will be
 //     just as unusable. Encode-side faults on the caller's own input (OidNotEncodable,

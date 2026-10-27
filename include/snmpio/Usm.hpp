@@ -9,6 +9,8 @@
 #include <string_view>
 
 #include <snmpio/Error.hpp>
+#include <snmpio/Password.hpp>
+#include <snmpio/SecretOctets.hpp>
 #include <snmpio/Value.hpp>
 
 namespace snmpio {
@@ -90,20 +92,24 @@ inline constexpr std::size_t minimumPasswordLength = 8;
 // must be keySize(authProtocol) Octets -- the privacy one too, since USM derives it under the
 // authentication protocol's hash -- and stands *instead of* its password, which is then left
 // empty. A Client refuses either mistake with Errc::ArgumentOutOfRange before it sends anything.
+//
+// Every secret here wipes itself (threat model S5): the passwords are Passwords and the Master Keys
+// SecretOctets, so a Credentials destroyed or moved from leaves none of them behind, in the
+// caller's copy or in any copy snmpio makes.
 struct Credentials {
   std::string userName;
   SecurityLevel level = SecurityLevel::NoAuthNoPriv;
   AuthProtocol authProtocol = AuthProtocol::None;
-  std::string authPassword;
+  Password authPassword;
   PrivProtocol privProtocol = PrivProtocol::None;
   // USM derives the privacy key with the *authentication* protocol's hash, so there is no second
   // protocol to name here -- only a second secret.
-  std::string privPassword;
+  Password privPassword;
   // Last, so that a braced initialiser naming the six fields above still means what it did; and
   // initialised, redundantly, because that is what keeps GCC's and Clang's
   // -Wmissing-field-initializers quiet about such an initialiser leaving these two out.
-  std::optional<Octets> authMasterKey = std::nullopt;
-  std::optional<Octets> privMasterKey = std::nullopt;
+  std::optional<SecretOctets> authMasterKey = std::nullopt;
+  std::optional<SecretOctets> privMasterKey = std::nullopt;
 };
 
 // RFC 3414 appendix A.2: the password repeated to exactly one megabyte and hashed once, giving
@@ -113,15 +119,16 @@ struct Credentials {
 // result to every Client in Credentials::authMasterKey or privMasterKey. A password shorter than
 // minimumPasswordLength is refused with Errc::PasswordTooShort.
 //
-// This and the derivations below copy their result out into Octets, which are the caller's: snmpio
-// wipes its own copies of keys (threat model S5), and the caller's are theirs to wipe.
-[[nodiscard]] Octets passwordToKey(AuthProtocol p, std::string_view password, net::ErrorCode& ec);
+// This and the derivations below return SecretOctets, so that a key wipes itself in the caller's
+// keeping as it does in snmpio's (threat model S5).
+[[nodiscard]] SecretOctets passwordToKey(AuthProtocol p, std::string_view password,
+                                         net::ErrorCode& ec);
 
 // RFC 3414 section 2.6: hash(masterKey || engineId || masterKey). Binds a Master Key to one
 // Authoritative Engine, so a key lifted from one Engine is useless against another. One short
 // hash: this is the authentication key's whole per-Engine cost once the Master Key is known.
-[[nodiscard]] Octets localizeKey(AuthProtocol p, std::span<const std::byte> masterKey,
-                                 std::span<const std::byte> engineId, net::ErrorCode& ec);
+[[nodiscard]] SecretOctets localizeKey(AuthProtocol p, std::span<const std::byte> masterKey,
+                                       std::span<const std::byte> engineId, net::ErrorCode& ec);
 
 // The privacy key for one Engine, from the privacy secret's Master Key: localizeKey under the
 // authentication protocol's hash, extended if the privacy protocol needs more key material than
@@ -130,18 +137,21 @@ struct Credentials {
 // The extension is the whole of the Blumenthal/Reeder difference. Blumenthal appends the hash of
 // the key so far; Reeder appends the key so far run back through password-to-key and localized
 // again -- a megabyte per Engine whatever the caller supplied, which is why its caller caches it.
-[[nodiscard]] Octets localizedPrivKey(AuthProtocol auth, PrivProtocol priv,
-                                      std::span<const std::byte> masterKey,
-                                      std::span<const std::byte> engineId, net::ErrorCode& ec);
+[[nodiscard]] SecretOctets localizedPrivKey(AuthProtocol auth, PrivProtocol priv,
+                                            std::span<const std::byte> masterKey,
+                                            std::span<const std::byte> engineId,
+                                            net::ErrorCode& ec);
 
 // The same two keys from Credentials: the Master Key they carry, or else the one their password
 // derives to, localized to one Engine. Each derivation from a password is the megabyte hash, and
 // is deliberately not cached here, because a cache without an owner is a leak; the Client caches
 // per Master Key and engineID.
-[[nodiscard]] Octets localizedAuthKey(const Credentials& creds, std::span<const std::byte> engineId,
-                                      net::ErrorCode& ec);
-[[nodiscard]] Octets localizedPrivKey(const Credentials& creds, std::span<const std::byte> engineId,
-                                      net::ErrorCode& ec);
+[[nodiscard]] SecretOctets localizedAuthKey(const Credentials& creds,
+                                            std::span<const std::byte> engineId,
+                                            net::ErrorCode& ec);
+[[nodiscard]] SecretOctets localizedPrivKey(const Credentials& creds,
+                                            std::span<const std::byte> engineId,
+                                            net::ErrorCode& ec);
 
 // Encrypts a ScopedPDU and writes the msgPrivacyParameters it chose into `privParams`. The salt is
 // this library's to pick -- RFC 3826 section 3.1.2.1 asks only that it never repeat for one key --

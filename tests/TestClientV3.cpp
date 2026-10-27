@@ -1344,18 +1344,18 @@ TEST(ClientV3MasterKey, AWrongLengthMasterKeyIsRefused) {
   const auto sha1Key = passwordToKey(AuthProtocol::Sha1, "maplesyrup", ec);
   ASSERT_FALSE(ec) << ec.message();
   const auto good = withMasterKeys(privCredentials(PrivProtocol::Aes128));
-  const auto shortened = [](Octets key) {
+  const auto shortened = [](SecretOctets key) {
     key.pop_back();
     return key;
   };
-  const auto lengthened = [](Octets key) {
+  const auto lengthened = [](SecretOctets key) {
     key.push_back(std::byte{0});
     return key;
   };
 
   std::vector<Credentials> cases;
   for (const auto& key :
-       {shortened(*good.authMasterKey), lengthened(*good.authMasterKey), Octets{}, sha1Key}) {
+       {shortened(*good.authMasterKey), lengthened(*good.authMasterKey), SecretOctets{}, sha1Key}) {
     auto authWrong = good;
     authWrong.authMasterKey = key;
     cases.push_back(authWrong);
@@ -1425,7 +1425,7 @@ TEST(ClientV3MasterKey, AnUnusedPrivacyMasterKeyIsStillChecked) {
 
   auto creds = withMasterKeys(credentials(AuthProtocol::Sha256));
   ASSERT_EQ(creds.level, SecurityLevel::AuthNoPriv);
-  creds.privMasterKey = Octets(3, std::byte{0});
+  creds.privMasterKey = SecretOctets(3, std::byte{0});
   f.client.asyncGet(targetFor(agent), creds, {sysDescr}, f.requestToken());
   f.run();
 
@@ -1566,19 +1566,82 @@ TEST(ClientV3Password, AnUnusedShortPrivacyPasswordIsStillChecked) {
   EXPECT_EQ(agent.requestsSeen(), 0);
 }
 
-TEST(ClientV3Password, AWalkWithAShortPasswordIsRefused) {
-  Fixture f;
-  ScriptedV3Agent agent(f.io, credentials(), echoAnswer);
-  f.agent = &agent;
+// Both Walk styles check the Credentials as a request does, before any Batch is asked for: the
+// streaming one and the collecting one, for either secret.
+TEST(ClientV3Password, AWalkWithASevenCharacterPasswordIsRefused) {
+  for (const bool collect : {false, true}) {
+    for (const bool privacy : {false, true}) {
+      Fixture f;
+      ScriptedV3Agent agent(f.io, privCredentials(PrivProtocol::Aes128), echoAnswer);
+      f.agent = &agent;
 
-  auto creds = credentials();
-  creds.authPassword = "seven77";
-  f.client.asyncWalkCollect(targetFor(agent), creds, Oid{1, 3, 6, 1, 2, 1, 1}, WalkOptions{},
-                            f.collectToken());
-  f.run();
+      auto creds = privCredentials(PrivProtocol::Aes128);
+      (privacy ? creds.privPassword : creds.authPassword) = "seven77";
+      int batches = 0;
+      if (collect) {
+        f.client.asyncWalkCollect(targetFor(agent), creds, Oid{1, 3, 6, 1, 2, 1, 1}, WalkOptions{},
+                                  f.collectToken());
+      } else {
+        f.client.asyncWalk(
+            targetFor(agent), creds, Oid{1, 3, 6, 1, 2, 1, 1}, WalkOptions{},
+            [&](std::span<const Varbind>) {
+              ++batches;
+              return true;
+            },
+            [&](net::ErrorCode e) {
+              f.ec = e;
+              f.finish();
+            });
+      }
+      f.run();
 
-  EXPECT_EQ(f.ec, Errc::PasswordTooShort) << f.ec.message();
-  EXPECT_EQ(agent.requestsSeen(), 0);
+      const auto* what = privacy ? "privacy" : "authentication";
+      const auto* how = collect ? "asyncWalkCollect" : "asyncWalk";
+      EXPECT_EQ(f.ec, Errc::PasswordTooShort) << how << ", " << what << ": " << f.ec.message();
+      EXPECT_EQ(batches, 0) << how << ", " << what;
+      EXPECT_EQ(agent.requestsSeen(), 0) << how << ", " << what << ": nothing is sent";
+    }
+  }
+}
+
+TEST(ClientV3Password, AWalkWithEightCharacterPasswordsIsAccepted) {
+  const Credentials creds{"bert",     SecurityLevel::AuthPriv, AuthProtocol::Sha256,
+                          "authpass", PrivProtocol::Aes128,    "privpass"};
+  for (const bool collect : {false, true}) {
+    Fixture f;
+    std::uint32_t next = 1;
+    ScriptedV3Agent agent(f.io, creds, [&](const Pdu&) {
+      Pdu p;
+      p.type = PduType::Response;
+      p.varbinds = {next > 3 ? Varbind{Oid{1, 3, 6, 1, 2, 1, 2, 1, 0}, Counter32{7}}  // past it
+                             : Varbind{Oid{1, 3, 6, 1, 2, 1, 1, next, 0}, Counter32{next}}};
+      ++next;
+      return p;
+    });
+    f.agent = &agent;
+
+    std::size_t walked = 0;
+    if (collect) {
+      f.client.asyncWalkCollect(targetFor(agent), creds, Oid{1, 3, 6, 1, 2, 1, 1}, WalkOptions{1},
+                                f.collectToken());
+    } else {
+      f.client.asyncWalk(
+          targetFor(agent), creds, Oid{1, 3, 6, 1, 2, 1, 1}, WalkOptions{1},
+          [&](std::span<const Varbind> batch) {
+            walked += batch.size();
+            return true;
+          },
+          [&](net::ErrorCode e) {
+            f.ec = e;
+            f.finish();
+          });
+    }
+    f.run();
+
+    const auto* how = collect ? "asyncWalkCollect" : "asyncWalk";
+    EXPECT_FALSE(f.ec) << how << ": " << f.ec.message();
+    EXPECT_EQ(collect ? f.collected.size() : walked, 3U) << how;
+  }
 }
 
 // A level that names no protocol for a secret is refused for the missing protocol, which is the

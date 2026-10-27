@@ -20,6 +20,8 @@
 
 #include <snmpio/Client.hpp>
 
+#include "Environment.hpp"
+
 namespace net = snmpio::net;
 
 net::Awaitable<void> run(snmpio::Client& client, snmpio::Target target,
@@ -64,14 +66,6 @@ net::Awaitable<void> run(snmpio::Client& client, snmpio::Target target,
   if (!ec && withheld) ec = snmpio::make_error_code(snmpio::Errc::WalkIncomplete);
   if (ec) std::cerr << "walk ended after " << rows << " rows: " << ec.message() << "\n";
   client.stop();
-}
-
-// Passwords come from the environment, never the command line, where every user on the host can
-// read them in ps or /proc and the shell keeps them in its history. Read once, before the
-// io_context runs a thread that could race the environment.
-std::string passwordFrom(const char* variable) {
-  const char* value = std::getenv(variable);
-  return value != nullptr ? value : "";
 }
 
 int main(int argc, char** argv) {

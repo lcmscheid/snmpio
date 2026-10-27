@@ -426,7 +426,7 @@ TEST_F(InteropV3, SurfacesAWrongPasswordAsAReport) {
   // refuse the request before ever checking the digest; the conventional path keeps the
   // authNoPriv user it has always used.
   Credentials wrong = m_named ? singlePairCredentials() : credentials(sha256Row, noPrivRow);
-  wrong.authPassword += "-and-then-some";
+  wrong.authPassword = std::string(wrong.authPassword.view()) + "-and-then-some";
   const auto wrongResult = get(m_target, wrong);
   EXPECT_EQ(wrongResult.ec, make_error_code(Errc::AuthFailed))
       << "got " << test::errorText(wrongResult.ec);

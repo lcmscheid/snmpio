@@ -4,11 +4,12 @@
 #include <cstdint>
 #include <cstdlib>
 #include <iostream>
-#include <string>
 #include <utility>
 #include <vector>
 
 #include <snmpio/Client.hpp>
+
+#include "Environment.hpp"
 
 namespace net = snmpio::net;
 
@@ -47,14 +48,6 @@ net::Awaitable<void> run(snmpio::Client& client, snmpio::Target target,
   }
 }
 
-// Passwords come from the environment, never the command line, where every user on the host can
-// read them in ps or /proc and the shell keeps them in its history. Read once, before the
-// io_context runs a thread that could race the environment.
-std::string passwordFrom(const char* variable) {
-  const char* value = std::getenv(variable);
-  return value != nullptr ? value : "";
-}
-
 int main(int argc, char** argv) {
   if (argc != 4) {
     std::cerr << "usage: SNMPIO_AUTH_PASSWORD=... " << argv[0] << " <address> <port> <user>\n";
@@ -67,7 +60,8 @@ int main(int argc, char** argv) {
 
   // authNoPriv: the message is signed but travels in the clear, so there is no privacy protocol
   // or password to name. Usm.hpp lists the other authentication protocols. The password must be at
-  // least 8 characters (RFC 3414 section 11.2), or the request fails with Errc::PasswordTooShort.
+  // least snmpio::minimumPasswordLength characters, or the request fails with
+  // Errc::PasswordTooShort.
   snmpio::Credentials credentials;
   credentials.userName = argv[3];
   credentials.level = snmpio::SecurityLevel::AuthNoPriv;

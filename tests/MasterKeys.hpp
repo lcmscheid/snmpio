@@ -12,11 +12,11 @@ namespace snmpio::test {
 // on any I/O thread. An Agent given the original Credentials derives its keys independently.
 inline Credentials withMasterKeys(Credentials creds) {
   net::ErrorCode ec;
-  creds.authMasterKey = passwordToKey(creds.authProtocol, creds.authPassword, ec);
+  creds.authMasterKey = passwordToKey(creds.authProtocol, creds.authPassword.view(), ec);
   EXPECT_FALSE(ec) << ec.message();
   creds.authPassword.clear();
   if (creds.privProtocol != PrivProtocol::None) {
-    creds.privMasterKey = passwordToKey(creds.authProtocol, creds.privPassword, ec);
+    creds.privMasterKey = passwordToKey(creds.authProtocol, creds.privPassword.view(), ec);
     EXPECT_FALSE(ec) << ec.message();
     creds.privPassword.clear();
   }

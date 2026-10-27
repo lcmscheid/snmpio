@@ -13,13 +13,7 @@
 
 #include <snmpio/Client.hpp>
 
-// Passwords come from the environment, never the command line, where every user on the host can
-// read them in ps or /proc and the shell keeps them in its history. Read once, before the
-// io_context runs a thread that could race the environment.
-std::string passwordFrom(const char* variable) {
-  const char* value = std::getenv(variable);
-  return value != nullptr ? value : "";
-}
+#include "Environment.hpp"
 
 int main(int argc, char** argv) {
   if (argc != 5) {
@@ -38,7 +32,7 @@ int main(int argc, char** argv) {
 
   // Usm.hpp lists the other authentication and privacy protocols. Two passwords, one per key, as
   // USM intends: a privacy password shared with authentication is lost with it. Each must be at
-  // least 8 characters (RFC 3414 section 11.2), or the SET fails with Errc::PasswordTooShort.
+  // least snmpio::minimumPasswordLength characters, or the SET fails with Errc::PasswordTooShort.
   snmpio::Credentials credentials;
   credentials.userName = argv[3];
   credentials.level = snmpio::SecurityLevel::AuthPriv;

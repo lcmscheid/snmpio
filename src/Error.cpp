@@ -4,6 +4,7 @@
 #include <system_error>
 
 #include <snmpio/Pdu.hpp>
+#include <snmpio/Usm.hpp>
 
 namespace snmpio {
 namespace {
@@ -90,7 +91,8 @@ class SnmpioCategory final : public net::ErrorCategory {
       case Errc::BadMessageFlags:
         return "message flags are not a single Octet, or claim privacy without authentication";
       case Errc::PasswordTooShort:
-        return "password is shorter than the 8 characters RFC 3414 requires";
+        return "password is shorter than the " + std::to_string(minimumPasswordLength) +
+               " characters RFC 3414 requires";
       case Errc::CryptoFailure:
         return "cryptographic operation failed";
       case Errc::AuthFailed:

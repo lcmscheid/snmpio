@@ -75,19 +75,19 @@ TEST(PasswordToKey, MatchesTheKnownVectors) {
   }
 }
 
-// The expansion is hashed in chunks of about 16 KiB, each a whole number of passwords, so what
-// each chunk starts with depends on where the one before it ended. These lengths are the ones a
-// chunking mistake shows up at: the shortest RFC 3414 allows, two lengths that divide nothing,
-// either side of RFC 3414's 64-Octet line, a password that fits a chunk only once and one that fits
-// it exactly, one longer than a chunk, which is a chunk of its own, and one longer than the whole
-// megabyte, of which only the first megabyte is hashed. Computed with Python's hashlib over the
-// megabyte built whole.
+// The expansion is hashed about 16 KiB at a time, from one buffer of the password repeated a whole
+// number of times, so where each update starts depends on where the one before it ended. These
+// lengths are the ones a mistake in that shows up at: the shortest RFC 3414 allows, two lengths
+// that divide nothing, either side of RFC 3414's 64-Octet line, a password that fits the buffer
+// only once and one that fits it exactly, one longer than the target, which is the buffer on its
+// own, and one longer than the whole megabyte, of which only the first megabyte is hashed. Computed
+// with Python's hashlib over the megabyte built whole.
 TEST(PasswordToKey, MatchesAWholeMegabyteHashAtAwkwardLengths) {
   struct Row {
     std::string password;
     std::string_view master;
   };
-  // A period of 16 divides the chunk and the megabyte, so the rows added for the chunk's and the
+  // A period of 16 divides the buffer and the megabyte, so the rows added for the buffer's and the
   // megabyte's edges use 17; the 5000-character row keeps the 16 it was pinned with.
   const auto patterned = [](std::size_t length, std::string_view period) {
     std::string out;
@@ -308,8 +308,8 @@ TEST(LocalizedKeys, ReadAMasterKeyTheCredentialsCarry) {
     auto creds = privCreds(v.auth, v.priv);
     const auto viaPasswords = localizedAuthKey(creds, privEngineId(), ec);
     ASSERT_FALSE(ec) << ec.message();
-    creds.authMasterKey = passwordToKey(v.auth, creds.authPassword, ec);
-    creds.privMasterKey = passwordToKey(v.auth, creds.privPassword, ec);
+    creds.authMasterKey = passwordToKey(v.auth, creds.authPassword.view(), ec);
+    creds.privMasterKey = passwordToKey(v.auth, creds.privPassword.view(), ec);
     creds.authPassword.clear();
     creds.privPassword.clear();
 

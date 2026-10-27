@@ -1,14 +1,14 @@
-#ifndef SNMPIO_DETAIL_SECRETOCTETS_HPP
-#define SNMPIO_DETAIL_SECRETOCTETS_HPP
+#ifndef SNMPIO_SECRETOCTETS_HPP
+#define SNMPIO_SECRETOCTETS_HPP
 
 #include <cstddef>
 #include <memory>
 #include <type_traits>
 #include <vector>
 
-// Not part of the API: what snmpio keeps its own copies of keys in. Installed only because
-// Client.hpp's private members name it.
-namespace snmpio::detail {
+namespace snmpio {
+
+namespace detail {
 
 // OPENSSL_cleanse (ADR-0001), declared here so that no installed header includes OpenSSL's: zeros
 // that dead-store elimination cannot remove, as a memset before a free may be.
@@ -29,6 +29,14 @@ class CleansingAllocator {
   // check has to give way to them -- as it does for make_error_code.
   // NOLINTBEGIN(readability-identifier-naming)
   using value_type = T;
+  // Whatever Upstream says, rather than what allocator_traits would infer from this class being
+  // empty: [[no_unique_address]] makes it so on GCC and Clang, but not on MSVC.
+  using is_always_equal = UpstreamTraits::is_always_equal;
+  using propagate_on_container_copy_assignment =
+      UpstreamTraits::propagate_on_container_copy_assignment;
+  using propagate_on_container_move_assignment =
+      UpstreamTraits::propagate_on_container_move_assignment;
+  using propagate_on_container_swap = UpstreamTraits::propagate_on_container_swap;
 
   // Spelled out rather than left to allocator_traits, which would rebind T and keep
   // Upstream<T> -- an upstream of the wrong value type.
@@ -54,20 +62,26 @@ class CleansingAllocator {
 
   [[nodiscard]] const Upstream& upstream() const noexcept { return m_upstream; }
 
-  friend bool operator==(const CleansingAllocator& a, const CleansingAllocator& b) noexcept {
-    return a.m_upstream == b.m_upstream;
-  }
-
  private:
   [[no_unique_address]] Upstream m_upstream;
 };
 
-// Octets that wipe themselves when snmpio is done with them: every Master Key and Localized Key
-// snmpio keeps, and the buffers key derivation works in. Deliberately not Octets -- the two do not
-// convert implicitly, so a key cannot slip into unwiped storage by assignment. Both are contiguous
-// bytes, so a std::span reads either.
-using SecretOctets = std::vector<std::byte, CleansingAllocator<std::byte>>;
+// Across value types, as std::allocator's and pmr::polymorphic_allocator's are: the allocator
+// requirements ask that a == b hold for an allocator and its rebound copy.
+template <typename T, typename UpstreamT, typename U, typename UpstreamU>
+[[nodiscard]] bool operator==(const CleansingAllocator<T, UpstreamT>& a,
+                              const CleansingAllocator<U, UpstreamU>& b) noexcept {
+  return a.upstream() == b.upstream();
+}
 
-}  // namespace snmpio::detail
+}  // namespace detail
 
-#endif  // SNMPIO_DETAIL_SECRETOCTETS_HPP
+// Octets that wipe themselves when they are done with: every Master Key and Localized Key, in
+// snmpio's keeping and in the caller's -- Credentials carry them in this, and the key derivations
+// return it. Deliberately not Octets: the two do not convert implicitly, so a key cannot slip into
+// unwiped storage by assignment. Both are contiguous bytes, so a std::span reads either.
+using SecretOctets = std::vector<std::byte, detail::CleansingAllocator<std::byte>>;
+
+}  // namespace snmpio
+
+#endif  // SNMPIO_SECRETOCTETS_HPP

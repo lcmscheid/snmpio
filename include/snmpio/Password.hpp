@@ -24,10 +24,17 @@ void wipeBuffer(Buffer& buffer) noexcept {
 
 }  // namespace detail
 
+// RFC 3414 section 11.2: the shortest password USM accepts. A shorter one -- an empty one
+// included -- is refused with Errc::PasswordTooShort, by passwordToKey and by a Client before it
+// sends anything. A Master Key supplied in its place is not a password, and is not held to it.
+inline constexpr std::size_t minimumPasswordLength = 8;
+
 // A USM password that wipes itself when it is done with: destroyed, cleared, assigned over, or
-// moved from. Not SecretOctets, because a password is text and a short one lives inside the string
-// object rather than in anything an allocator hands out -- and a move copies that one, leaving the
-// characters in the source. So the wiping is this class's own, over the string's whole capacity.
+// moved from. The string counterpart of SecretOctets: OpenSSL's OPENSSL_clear_free and libsodium's
+// sodium_memzero are the same idea for a raw buffer, cleansing before the memory is let go. Not
+// SecretOctets, because a password is text and a short one lives inside the string object rather
+// than in anything an allocator hands out -- and a move copies that one, leaving the characters in
+// the source. So the wiping is this class's own, over the string's whole capacity.
 //
 // Implicit from std::string and from a string literal, so that a Credentials initialiser names a
 // password as it always could. Read it through view(); nothing converts it back to a std::string

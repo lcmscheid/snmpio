@@ -24,8 +24,9 @@
 # sysContact.0 is left unset below on purpose: net-snmp makes an object read-only when its
 # configuration sets it.
 #
-# The password arrives in the environment rather than in this file: one value configures the Agent
-# and drives the suite, so the two cannot drift.
+# The passwords arrive in the environment rather than in this file: one value configures the Agent
+# and drives the suite, so the two cannot drift. Each user's privacy key gets
+# SNMPIO_INTEROP_V3_PRIV_PASSWORD, or the authentication password when that is unset.
 #
 # The Communities answer 127.0.0.1 alone unless `source` says otherwise, in net-snmp's spelling --
 # `default` is any. tests/interop/start-agent.sh says `default`, and why; an `snmpd` run from this
@@ -33,6 +34,7 @@
 set -eu
 
 : "${SNMPIO_INTEROP_V3_PASSWORD:?set it to the password every interop user gets (8+ characters)}"
+privPassword=${SNMPIO_INTEROP_V3_PRIV_PASSWORD:-$SNMPIO_INTEROP_V3_PASSWORD}
 communitySource=${1:-127.0.0.1}
 sysContact=.1.3.6.1.2.1.1.4
 
@@ -44,7 +46,7 @@ sysDescr snmpio interop Agent
 createUser noauth
 rouser noauth noauth
 
-createUser netops-legacy SHA-256 "$SNMPIO_INTEROP_V3_PASSWORD" AES "$SNMPIO_INTEROP_V3_PASSWORD"
+createUser netops-legacy SHA-256 "$SNMPIO_INTEROP_V3_PASSWORD" AES "$privPassword"
 rouser netops-legacy priv
 
 rwcommunity snmpio-writer $communitySource $sysContact
@@ -52,7 +54,7 @@ createUser writer-noauth
 rwuser writer-noauth noauth $sysContact
 createUser writer-authsha256 SHA-256 "$SNMPIO_INTEROP_V3_PASSWORD"
 rwuser writer-authsha256 auth $sysContact
-createUser writer-privsha256aes SHA-256 "$SNMPIO_INTEROP_V3_PASSWORD" AES "$SNMPIO_INTEROP_V3_PASSWORD"
+createUser writer-privsha256aes SHA-256 "$SNMPIO_INTEROP_V3_PASSWORD" AES "$privPassword"
 rwuser writer-privsha256aes priv $sysContact
 CONF
 
@@ -64,9 +66,9 @@ for pair in MD5:md5 SHA:sha1 SHA-224:sha224 SHA-256:sha256 SHA-384:sha384 SHA-51
   cat <<CONF
 createUser auth$ours $netsnmp "$SNMPIO_INTEROP_V3_PASSWORD"
 rouser auth$ours auth
-createUser priv${ours}des $netsnmp "$SNMPIO_INTEROP_V3_PASSWORD" DES "$SNMPIO_INTEROP_V3_PASSWORD"
+createUser priv${ours}des $netsnmp "$SNMPIO_INTEROP_V3_PASSWORD" DES "$privPassword"
 rouser priv${ours}des priv
-createUser priv${ours}aes $netsnmp "$SNMPIO_INTEROP_V3_PASSWORD" AES "$SNMPIO_INTEROP_V3_PASSWORD"
+createUser priv${ours}aes $netsnmp "$SNMPIO_INTEROP_V3_PASSWORD" AES "$privPassword"
 rouser priv${ours}aes priv
 CONF
 done
@@ -78,7 +80,7 @@ done
 for netsnmp in AES192 AES256 AES192C AES256C; do
   ours=$(printf %s "$netsnmp" | tr '[:upper:]' '[:lower:]')
   cat <<CONF
-createUser privsha1${ours} SHA "$SNMPIO_INTEROP_V3_PASSWORD" $netsnmp "$SNMPIO_INTEROP_V3_PASSWORD"
+createUser privsha1${ours} SHA "$SNMPIO_INTEROP_V3_PASSWORD" $netsnmp "$privPassword"
 rouser privsha1${ours} priv
 CONF
 done

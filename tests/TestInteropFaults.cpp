@@ -61,19 +61,19 @@ class InteropFaults : public ::testing::Test {
     ASSERT_NE(m_controlPort, 0) << "SNMPIO_INTEROP_FAULTS is not a port";
 
     m_target = *target;
-    m_password = envVar("SNMPIO_INTEROP_V3_PASSWORD").value_or("");
+    m_passwords = test::interopPasswords();
   }
 
   // The engine faults are v3's alone, and the two Walk cases below are v2c -- so the password
   // gates only the tests that spend it. Written out at each call site because GTEST_SKIP in a
   // helper skips the helper and lets the test carry on.
   [[nodiscard]] Credentials credentials() const {
-    return credentialsFor(sha256Row, aes128Row, m_password);
+    return credentialsFor(sha256Row, aes128Row, m_passwords);
   }
 
   Target m_target;
   std::uint16_t m_controlPort = 0;
-  std::string m_password;
+  test::InteropPasswords m_passwords;
 };
 
 // GETs in sequence on one Client, with `between[i]` run after the i-th has completed. The engine
@@ -113,7 +113,7 @@ std::vector<net::ErrorCode> getSequence(const Target& target, const Credentials&
 // That a Client which simply re-discovered before every request would also pass this is not a hole
 // here: InteropV3.DiscoveryCostsExtraRoundTripsOnlyOnce is where that is ruled out, off the wire.
 TEST_F(InteropFaults, RecoversFromAnEngineRestart) {
-  if (m_password.empty()) GTEST_SKIP() << "needs SNMPIO_INTEROP_V3_PASSWORD";
+  if (m_passwords.auth.empty()) GTEST_SKIP() << "needs SNMPIO_INTEROP_V3_PASSWORD";
   SimulatorFaults faults(m_target.endpoint, m_controlPort);
   bool bumped = false;
   const auto results =
@@ -139,7 +139,7 @@ TEST_F(InteropFaults, RecoversFromAnEngineRestart) {
 // authoritative-side check (RFC 3414 section 3.2 step 7a) sends one. An Agent that runs the check
 // answers with a signed notInTimeWindows Report instead, and that is the case below.
 TEST_F(InteropFaults, RefusesABootsRegression) {
-  if (m_password.empty()) GTEST_SKIP() << "needs SNMPIO_INTEROP_V3_PASSWORD";
+  if (m_passwords.auth.empty()) GTEST_SKIP() << "needs SNMPIO_INTEROP_V3_PASSWORD";
   if (!envVar("SNMPIO_INTEROP_NO_TIME_WINDOW_CHECK")) {
     GTEST_SKIP() << "needs SNMPIO_INTEROP_NO_TIME_WINDOW_CHECK: an Agent that runs the check sends "
                     "the Report RediscoversAnEngineWhoseBootsWentBackwards covers";
@@ -175,7 +175,7 @@ TEST_F(InteropFaults, RefusesABootsRegression) {
 // The Scripted Agent pins the counts (ClientV3.RediscoversAnEngineWhoseBootsWentBackwards); this
 // is the same path read by an implementation that is not ours.
 TEST_F(InteropFaults, RediscoversAnEngineWhoseBootsWentBackwards) {
-  if (m_password.empty()) GTEST_SKIP() << "needs SNMPIO_INTEROP_V3_PASSWORD";
+  if (m_passwords.auth.empty()) GTEST_SKIP() << "needs SNMPIO_INTEROP_V3_PASSWORD";
   if (envVar("SNMPIO_INTEROP_NO_TIME_WINDOW_CHECK")) {
     GTEST_SKIP() << "an Agent with SNMPIO_INTEROP_NO_TIME_WINDOW_CHECK sends no Report to recover "
                     "from; RefusesABootsRegression covers it";
@@ -200,7 +200,7 @@ TEST_F(InteropFaults, RediscoversAnEngineWhoseBootsWentBackwards) {
 // an Engine whose clock jumps without restarting is the ordinary case of the two, since it needs
 // nothing more than NTP stepping it.
 TEST_F(InteropFaults, RefusesATimeRegressionWithinOneBoot) {
-  if (m_password.empty()) GTEST_SKIP() << "needs SNMPIO_INTEROP_V3_PASSWORD";
+  if (m_passwords.auth.empty()) GTEST_SKIP() << "needs SNMPIO_INTEROP_V3_PASSWORD";
   SimulatorFaults faults(m_target.endpoint, m_controlPort);
   bool shifted = false;
   bool cleared = false;
@@ -237,7 +237,7 @@ TEST_F(InteropFaults, RefusesATimeRegressionWithinOneBoot) {
 // Gated on its own capability: not every Simulator build offers the fault, and an Agent that does
 // not must skip rather than fail for not being asked.
 TEST_F(InteropFaults, RediscoversAnEngineThatChangesItsIdentity) {
-  if (m_password.empty()) GTEST_SKIP() << "needs SNMPIO_INTEROP_V3_PASSWORD";
+  if (m_passwords.auth.empty()) GTEST_SKIP() << "needs SNMPIO_INTEROP_V3_PASSWORD";
   if (!envVar("SNMPIO_INTEROP_FAULTS_ENGINE_ID")) {
     GTEST_SKIP() << "needs SNMPIO_INTEROP_FAULTS_ENGINE_ID and an Agent offering engineIDChange";
   }

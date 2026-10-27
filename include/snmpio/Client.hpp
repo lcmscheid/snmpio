@@ -105,7 +105,7 @@ class Client {
   // Octets, or that is given beside its password rather than in place of it, whatever the Security
   // Level -- a privacy Master Key at authNoPriv, which nothing would use, included. A password
   // shorter than minimumPasswordLength completes it with Errc::PasswordTooShort instead, where the
-  // Security Level uses that password and wherever one is given at all (Usm.hpp).
+  // Security Level uses that password and wherever one is given at all (Password.hpp).
   //
   // Stopping: refuses new work, closes the sockets and fails every outstanding operation with
   // Errc::ClientStopped. Idempotent, safe from any thread, and harmless before the destructor,

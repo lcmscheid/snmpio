@@ -21,6 +21,9 @@ void cleanse(void* p, std::size_t n) noexcept;
 // rather than read memory after it is freed.
 template <typename T, typename Upstream = std::allocator<T>>
 class CleansingAllocator {
+  // Bytes overwritten in place are only a wipe for a type that is nothing but its bytes. Every
+  // rebind is held to it too, so a container that rebinds to a node type with a destructor will
+  // not compile with this allocator -- std::vector, the one container it is for, never rebinds.
   static_assert(std::is_trivially_copyable_v<T>, "a cleanse overwrites the bytes in place");
   using UpstreamTraits = std::allocator_traits<Upstream>;
 
@@ -48,7 +51,7 @@ class CleansingAllocator {
 
   CleansingAllocator() noexcept(noexcept(Upstream())) = default;
   explicit CleansingAllocator(const Upstream& upstream) noexcept : m_upstream(upstream) {}
-  // Implicit, as the allocator requirements ask of a rebinding copy.
+  // Implicit, as std::allocator's and pmr::polymorphic_allocator's converting constructors are.
   template <typename U, typename UpstreamU>
   // NOLINTNEXTLINE(cppcoreguidelines-explicit-constructor,misc-explicit-constructor)
   CleansingAllocator(const CleansingAllocator<U, UpstreamU>& other) noexcept

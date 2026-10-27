@@ -3,8 +3,8 @@
 #include <string>
 #include <system_error>
 
+#include <snmpio/Password.hpp>
 #include <snmpio/Pdu.hpp>
-#include <snmpio/Usm.hpp>
 
 namespace snmpio {
 namespace {

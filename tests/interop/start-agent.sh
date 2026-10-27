@@ -20,9 +20,10 @@
 # Agent, empty where the Agent lacks it, because empty reads as unset (tests/InteropTarget.hpp):
 # so applying the output after a run against another Agent leaves nothing of that one behind.
 #
-# The password comes from SNMPIO_INTEROP_V3_PASSWORD when it is set. It is not a secret: it
-# authorizes a loopback Agent this script starts. One value configures the Agent and drives the
-# suite, so the two cannot drift.
+# The passwords come from SNMPIO_INTEROP_V3_PASSWORD and SNMPIO_INTEROP_V3_PRIV_PASSWORD when they
+# are set. They are not secrets: they authorize a loopback Agent this script starts. One value
+# configures the Agent and drives the suite, so the two cannot drift. The two differ by default,
+# as USM intends the authentication and privacy passwords to.
 #
 # One Agent at a time, in a container called `snmpio-interop`, replaced by the next run.
 # `docker logs snmpio-interop` is its log, and `docker rm -f snmpio-interop` stops it.
@@ -39,6 +40,7 @@ here=$(cd "$(dirname "$0")" && pwd)
 container=snmpio-interop
 port=16161
 password=${SNMPIO_INTEROP_V3_PASSWORD:-snmpio-interop}
+privPassword=${SNMPIO_INTEROP_V3_PRIV_PASSWORD:-snmpio-interop-priv}
 # The Simulator's control UI listens on 8080 inside its image; faultsPort is where it is published.
 simulatorUiPort=8080
 faultsPort=8080
@@ -170,7 +172,10 @@ mkdir -p "$configDir"
 
 docker rm -f "$container" >/dev/null 2>&1 || true
 fetch >&2
-(export SNMPIO_INTEROP_V3_PASSWORD="$password"; configure)
+(
+  export SNMPIO_INTEROP_V3_PASSWORD="$password" SNMPIO_INTEROP_V3_PRIV_PASSWORD="$privPassword"
+  configure
+)
 # The Simulator's image carries its own example configuration; ours is mounted over it so the
 # suite's `auth<hash>` / `priv<hash><cipher>` convention holds against every Agent here and there
 # is no second table saying the same thing, and so it serves the Subtree the Walk tests need.
@@ -199,6 +204,7 @@ cat <<ENV
 SNMPIO_INTEROP_TARGET=127.0.0.1
 SNMPIO_INTEROP_PORT=$port
 SNMPIO_INTEROP_V3_PASSWORD=$password
+SNMPIO_INTEROP_V3_PRIV_PASSWORD=$privPassword
 SNMPIO_INTEROP_V3_USM_REPORTS=$usmReports
 SNMPIO_INTEROP_V3_KEY_EXTENSIONS=$keyExtensions
 SNMPIO_INTEROP_FAULTS=$faults

@@ -1668,6 +1668,26 @@ TEST(ClientV3Password, AMissingProtocolIsReportedAheadOfItsMissingPassword) {
   }
 }
 
+// Only an empty password defers to the missing protocol. A short one is a password given, and
+// refused as one, whatever protocol it was given for.
+TEST(ClientV3Password, AShortPasswordForAMissingProtocolIsStillTooShort) {
+  const std::array<Credentials, 2> cases = {{
+      Credentials{"bert", SecurityLevel::AuthNoPriv, AuthProtocol::None, "short",
+                  PrivProtocol::None, ""},
+      Credentials{"bert", SecurityLevel::AuthPriv, AuthProtocol::Sha256, "maplesyrup",
+                  PrivProtocol::None, "short"},
+  }};
+  for (const auto& creds : cases) {
+    Fixture f;
+    ScriptedV3Agent agent(f.io, credentials(), echoAnswer);
+    f.agent = &agent;
+    f.client.asyncGet(targetFor(agent), creds, {sysDescr}, f.requestToken());
+    f.run();
+    EXPECT_EQ(f.ec, Errc::PasswordTooShort) << f.ec.message();
+    EXPECT_EQ(agent.requestsSeen(), 0);
+  }
+}
+
 // A stopped Client says so ahead of anything wrong with the Credentials, as it does ahead of an
 // argument out of range.
 TEST(ClientV3Password, AStoppedClientSaysSoAheadOfAShortPassword) {

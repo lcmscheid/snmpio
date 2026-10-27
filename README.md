@@ -152,20 +152,21 @@ is the API, not an argument parser; [`Usm.hpp`](include/snmpio/Usm.hpp) lists th
 | [`walk-collect`](examples/walk-collect.cpp) | `asyncWalkCollect` | v3 authPriv, SHA-1 / AES-128 | coroutine | the buffering convenience over `walk` |
 
 The authenticated examples read their passwords from the environment, never from the command
-line, where any user on the host can read them: `SNMPIO_AUTH_PASSWORD` for the authentication key
+line, where any user on the machine can read them: `SNMPIO_AUTH_PASSWORD` for the authentication key
 and `SNMPIO_PRIV_PASSWORD` for the privacy key. Each must be at least `minimumPasswordLength`
-characters (RFC 3414 section 11.2's 8). In deployment the two are different; the interop
-`snmpd` gives every user one password for both keys, so against it the two variables are set alike.
+characters (RFC 3414 section 11.2's 8). The two are different, as USM intends: a privacy password
+shared with authentication is lost with it.
 
 To build them and run each against the `snmpd` the [interop script](#interop-tests) starts, whose
-users are named after what they carry and whose password is `snmpio-interop`:
+users are named after what they carry, with `snmpio-interop` as the authentication password and
+`snmpio-interop-priv` as the privacy one:
 
 ```sh
 cmake --install build/default --prefix /tmp/prefix
 cmake -S examples -B build/examples -DCMAKE_PREFIX_PATH=/tmp/prefix
 cmake --build build/examples
 cd build/examples
-export SNMPIO_AUTH_PASSWORD=snmpio-interop SNMPIO_PRIV_PASSWORD=snmpio-interop
+export SNMPIO_AUTH_PASSWORD=snmpio-interop SNMPIO_PRIV_PASSWORD=snmpio-interop-priv
 ./example-get 127.0.0.1 16161 public
 ./example-getnext 127.0.0.1 16161 noauth 1.3.6.1.2.1.1.1 1.3.6.1.2.1.1.3 1.3.6.1.2.1.1.5
 ./example-getbulk 127.0.0.1 16161 authsha512
@@ -480,6 +481,7 @@ the script did not start:
 SNMPIO_INTEROP_TARGET=127.0.0.1
 SNMPIO_INTEROP_PORT=16161                  # omit for 161
 SNMPIO_INTEROP_V3_PASSWORD=snmpio-interop  # 8+ characters; omit to skip the v3 half
+SNMPIO_INTEROP_V3_PRIV_PASSWORD=snmpio-interop-priv  # the privacy key's; omit to reuse the above
 SNMPIO_INTEROP_V3_USM_REPORTS=1            # the capability flags, below; empty is unset
 SNMPIO_INTEROP_V3_KEY_EXTENSIONS=1
 SNMPIO_INTEROP_FAULTS=                     # the Simulators' control UI port
@@ -494,13 +496,14 @@ SNMPIO_INTEROP_WRITER_AUTHPRIV=writer-privsha256aes
 ```
 
 `SNMPIO_INTEROP_TARGET` is the address the Agent answers at and `SNMPIO_INTEROP_PORT` the port,
-which defaults to 161. `SNMPIO_INTEROP_V3_PASSWORD` is the password every v3 interop user carries, and
-gates the v3 tests: the Agent has to be running the configuration
+which defaults to 161. `SNMPIO_INTEROP_V3_PASSWORD` is the authentication password every v3 interop
+user carries, and `SNMPIO_INTEROP_V3_PRIV_PASSWORD` the privacy one, which falls back to the first
+when unset. The first gates the v3 tests: the Agent has to be running the configuration
 [`tests/interop/snmpd-conf.sh`](tests/interop/snmpd-conf.sh) or
 [`tests/interop/fault-agent-auth.sh`](tests/interop/fault-agent-auth.sh) prints, and a switch on
 the bench is not, so an unset variable skips rather than fails. One value configures the Agent and
-drives the suite, which is why it is not written down twice: the script takes it from
-`SNMPIO_INTEROP_V3_PASSWORD` if that is set, and uses `snmpio-interop` if not.
+drives the suite, which is why it is not written down twice: the script takes each from its
+variable if that is set, and uses `snmpio-interop` and `snmpio-interop-priv` if not.
 
 ### Two ways in
 
@@ -518,7 +521,8 @@ export SNMPIO_INTEROP_COMMUNITY=bench-ro           # the v2c Community; omit for
 export SNMPIO_INTEROP_V3_USER=netops-legacy        # what the user is actually called
 export SNMPIO_INTEROP_V3_AUTH=sha256               # none, md5, sha1, sha224, sha256, sha384, sha512
 export SNMPIO_INTEROP_V3_PRIV=aes                  # none, des, aes, aes192, aes256, aes192c, aes256c
-export SNMPIO_INTEROP_V3_PASSWORD=bench-secret-123 # both secrets; omit only at noAuthNoPriv
+export SNMPIO_INTEROP_V3_PASSWORD=bench-secret-123 # omit only at noAuthNoPriv
+export SNMPIO_INTEROP_V3_PRIV_PASSWORD=bench-priv-456 # omit if the user has one for both
 ctest --preset default -R Interop --output-on-failure
 ```
 

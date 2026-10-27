@@ -5,7 +5,7 @@
 
 #include <snmpio/Password.hpp>
 
-// Passwords come from the environment, never the command line, where every user on the host can
+// Passwords come from the environment, never the command line, where every user on the machine can
 // read them in ps or /proc and the shell keeps them in its history. Read once, before the
 // io_context runs a thread that could race the environment. Unset is empty, which a Client refuses
 // with Errc::PasswordTooShort wherever the Security Level needs the password.

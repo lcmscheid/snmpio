@@ -76,11 +76,6 @@ enum class SecurityLevel : std::uint8_t {
 // section 8.1.1.1), which is why it is not the 8 the cipher itself uses.
 [[nodiscard]] std::size_t privKeySize(PrivProtocol p) noexcept;
 
-// RFC 3414 section 11.2: the shortest password USM accepts. A shorter one -- an empty one
-// included -- is refused with Errc::PasswordTooShort, by passwordToKey and by a Client before it
-// sends anything. A Master Key supplied in its place is not a password, and is not held to it.
-inline constexpr std::size_t minimumPasswordLength = 8;
-
 // The user, the level they authenticate at, and the secrets behind it.
 //
 // Independent of Target by construction (CONTEXT.md): the same Credentials may be used against

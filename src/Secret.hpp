@@ -57,8 +57,9 @@ class Secret {
   // RFC 3414 section 11.2's minimumPasswordLength, for a secret given as a password. Checked where
   // the Security Level uses it -- where empty is too short as well -- and wherever one is given at
   // all, as inRange checks a Master Key the level does not use. A level that needs a protocol the
-  // Credentials do not name needs no password for it: protocolMissing is the mistake to report. A
-  // supplied Master Key has no password.
+  // Credentials do not name does not use the password, so an empty one passes here and
+  // protocolMissing is the mistake reported later; a short one given anyway is refused here, as
+  // any short password given is. A supplied Master Key has no password.
   [[nodiscard]] bool passwordLongEnough() const noexcept {
     if (suppliedMasterKey() != nullptr) return true;
     if (m_password->empty()) return !(m_levelNeedsIt && m_protocolNamed);

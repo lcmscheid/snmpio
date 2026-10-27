@@ -36,7 +36,7 @@ would make an unwiped copy.
 
 **A source break, pre-1.0.** Code that names `Errc::EmptyPassword` no longer compiles. Code that
 treats `authPassword` as a `std::string` (`+=`, passing it as a `string_view`) now goes through
-`view()`. Code that stores a derived key in `Octets` now gets `SecretOctets`, which does not convert
+`view()`. Code that keeps a Master Key or Localized Key in `Octets` now gets `SecretOctets`, which does not convert
 implicitly. Each break is at compile time, none at run time, and each is the point: a silent
 conversion would be exactly where a secret escapes into storage that does not wipe.
 

@@ -174,9 +174,9 @@ bool requestInRange(const Target& target, const Pdu& pdu) noexcept {
   return pdu.nonRepeaters() >= 0 && withinCeiling(pdu.maxRepetitions(), maxRepetitionsCeiling);
 }
 
-// What is wrong with the Credentials, if anything (detail::credentialsFault). A Community has
-// nothing to check.
-std::optional<Errc> credentialsFault(const std::variant<Community, Credentials>& auth) noexcept {
+// What is wrong with the Credentials a request travels under, if anything
+// (detail::credentialsFault). A Community has nothing to check.
+std::optional<Errc> authFault(const std::variant<Community, Credentials>& auth) noexcept {
   const auto* creds = std::get_if<Credentials>(&auth);
   return creds == nullptr ? std::nullopt : detail::credentialsFault(*creds);
 }
@@ -401,6 +401,14 @@ class Client::Impl {
   // password-to-key again.
   const SecretOctets* localizedKey(const detail::Secret& secret, const Octets& engineId,
                                    net::ErrorCode& ec);
+  // The keys a message at the Credentials' Security Level goes out with: the authentication key
+  // wherever it authenticates, the privacy key wherever it encrypts, nullptr for either it does
+  // not use. Both point into the cache, which never evicts (threat model B2).
+  struct LocalizedKeys {
+    const SecretOctets* auth = nullptr;
+    const SecretOctets* priv = nullptr;
+  };
+  LocalizedKeys localizedKeys(const Credentials& creds, const Octets& engineId, net::ErrorCode& ec);
 
   // What a Report means for the request that provoked it: an ErrorCode to fail with, or nothing
   // when it named something we can act on and ask again about. `cancelled` is the request's
@@ -435,14 +443,14 @@ class Client::Impl {
 
   // Why an operation will not start, in the order every operation keeps: Stopping first, so that
   // one initiated after it completes with ClientStopped whatever else is wrong with it; then the
-  // arguments (requestInRange or walkInRange); then the Credentials (credentialsFault) -- all
-  // before anything is sent or discovered. Both checks are the caller's to make, since what is in
-  // range depends on the operation.
+  // arguments (requestInRange or walkInRange); then the Credentials (authFault) -- all before
+  // anything is sent or discovered. Both checks are the caller's to make, since what is in range
+  // depends on the operation.
   [[nodiscard]] std::optional<net::ErrorCode> refusal(bool argumentsInRange,
-                                                      std::optional<Errc> credentialsFault) const {
+                                                      std::optional<Errc> authProblem) const {
     if (m_stopping) return make_error_code(Errc::ClientStopped);
     if (!argumentsInRange) return make_error_code(Errc::ArgumentOutOfRange);
-    if (credentialsFault) return make_error_code(*credentialsFault);
+    if (authProblem) return make_error_code(*authProblem);
     return std::nullopt;
   }
 
@@ -936,7 +944,7 @@ net::Awaitable<void> Client::Impl::observeBothCancellationTypes() {
 
 net::Awaitable<Client::RequestResult> Client::Impl::doRequest(Ref self, Target target, Auth auth,
                                                               Pdu pdu) {
-  if (const auto refused = refusal(requestInRange(target, pdu), credentialsFault(auth))) {
+  if (const auto refused = refusal(requestInRange(target, pdu), authFault(auth))) {
     co_return RequestResult{*refused, Response{}};
   }
   co_return co_await doExchange(self, std::move(target), std::move(auth), std::move(pdu));
@@ -1013,6 +1021,22 @@ const SecretOctets* Client::Impl::localizedKey(const detail::Secret& secret, con
   auto derived = detail::localizedKeyFor(secret, master, engineId, ec);
   if (ec) return nullptr;
   return &m_keys.emplace(std::move(cacheKey), std::move(derived)).first->second;
+}
+
+Client::Impl::LocalizedKeys Client::Impl::localizedKeys(const Credentials& creds,
+                                                        const Octets& engineId,
+                                                        net::ErrorCode& ec) {
+  ec = {};
+  LocalizedKeys keys;
+  if (isAuthenticated(creds.level)) {
+    keys.auth = localizedKey(detail::Secret::auth(creds), engineId, ec);
+    if (ec) return {};
+  }
+  if (isEncrypted(creds.level)) {
+    keys.priv = localizedKey(detail::Secret::priv(creds), engineId, ec);
+    if (ec) return {};
+  }
+  return keys;
 }
 
 net::Awaitable<net::ErrorCode> Client::Impl::ensureEngine(Ref self, Target target,
@@ -1120,13 +1144,8 @@ net::Awaitable<net::ErrorCode> Client::Impl::discoverEngine(
   // pair we already synchronised stands and only the identity phase had to run again.
   if (engine.timeSynced) co_return net::ErrorCode{};
 
-  const SecretOctets* key = localizedKey(detail::Secret::auth(creds), engineId, ec);
+  const auto [key, privKey] = localizedKeys(creds, engineId, ec);
   if (ec) co_return ec;
-  const SecretOctets* privKey = nullptr;
-  if (isEncrypted(creds.level)) {
-    privKey = localizedKey(detail::Secret::priv(creds), engineId, ec);
-    if (ec) co_return ec;
-  }
 
   const std::int32_t syncId = nextId();
   V3Header syncHeader;
@@ -1272,16 +1291,8 @@ net::Awaitable<Client::RequestResult> Client::Impl::doRequestV3(Ref self, Target
     const auto projected =
         std::min<std::int64_t>(static_cast<std::int64_t>(engine->time) + elapsed, timeCeiling);
 
-    const SecretOctets* key = nullptr;
-    if (isAuthenticated(creds.level)) {
-      key = localizedKey(detail::Secret::auth(creds), engine->engineId, ec);
-      if (ec) co_return RequestResult{ec, Response{}};
-    }
-    const SecretOctets* privKey = nullptr;
-    if (isEncrypted(creds.level)) {
-      privKey = localizedKey(detail::Secret::priv(creds), engine->engineId, ec);
-      if (ec) co_return RequestResult{ec, Response{}};
-    }
+    const auto [key, privKey] = localizedKeys(creds, engine->engineId, ec);
+    if (ec) co_return RequestResult{ec, Response{}};
 
     const std::int32_t id = nextId();
     pdu.requestId = id;
@@ -1408,7 +1419,7 @@ net::Awaitable<Client::WalkResult> Client::Impl::doWalk(Ref self, Target target,
   // everything, so it has to be observable here -- and observed, not thrown. The state is asked
   // for at each use rather than held, because each request underneath re-seats it.
   co_await observeBothCancellationTypes();
-  if (const auto refused = refusal(walkInRange(target, options), credentialsFault(auth))) {
+  if (const auto refused = refusal(walkInRange(target, options), authFault(auth))) {
     co_return WalkResult{*refused};
   }
 

@@ -8,6 +8,8 @@ namespace snmpio {
 
 Password::Password(const std::string& value) : m_value(value) {}
 
+// noexcept although wipeBuffer resizes: it grows the string only to its own capacity, which never
+// allocates, so it cannot throw.
 Password::Password(std::string&& value) noexcept : m_value(std::move(value)) {
   detail::wipeBuffer(value);  // NOLINT(bugprone-use-after-move): what the move left behind
 }
@@ -22,8 +24,10 @@ Password::Password(Password&& other) noexcept : m_value(std::move(other.m_value)
   detail::wipeBuffer(other.m_value);
 }
 
+// Through a temporary, which a self-assignment survives too: the copy is made before anything
+// is wiped.
 Password& Password::operator=(const Password& other) {
-  if (this != &other) *this = Password(other);
+  *this = Password(other);
   return *this;
 }
 

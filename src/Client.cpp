@@ -313,20 +313,35 @@ class Client::Impl {
     bool finished = false;
     // Whether it runs the time-sync phase: it does when the request that started it authenticates.
     bool synchronises = false;
-    // Left by a request that authenticates and queued behind a discovery that does not. Its
-    // identity phase records only an unsigned pair, so runDiscovery goes on to synchronise with
-    // these before it wakes anyone. How that went is owedSyncEc, and it is only the business of
-    // the requests that authenticate: the rest needed only the engineID, and have ec.
-    std::optional<Credentials> owedSync;
-    net::ErrorCode owedSyncEc;
-
-    // How it went for a request at this level.
-    [[nodiscard]] net::ErrorCode outcomeFor(SecurityLevel level) const {
-      return isAuthenticated(level) && !synchronises ? owedSyncEc : ec;
-    }
     // What the discovery threw, if it did: each waiter rethrows it, so that every request it was
     // serving leaves run() the way the discovery itself does, rather than waiting forever.
     std::exception_ptr failure;
+
+    // The time-sync phase a discovery that does not synchronise owes the requests queued behind it
+    // that authenticate: its identity phase records only an unsigned pair, which they may not
+    // carry. The first such request leaves its Credentials, and runDiscovery goes on to a second
+    // pass with them before it wakes anyone. Its outcome is theirs alone; the requests that needed
+    // only the engineID have ec. Every request that authenticates shares the one pass, as it would
+    // behind a discovery that an authenticated request started.
+    struct OwedSync {
+      Credentials credentials;
+      net::ErrorCode ec;
+    };
+    std::optional<OwedSync> owedSync;
+
+    // Whether a request at this level needs the time-sync phase this discovery does not run.
+    [[nodiscard]] bool owesSyncTo(SecurityLevel level) const {
+      return isAuthenticated(level) && !synchronises;
+    }
+    // A request queued behind this discovery. If it is owed the time-sync phase and is the first
+    // to be, its Credentials are the ones the second pass runs with.
+    void queue(const Credentials& creds) {
+      if (owesSyncTo(creds.level) && !owedSync) owedSync = OwedSync{.credentials = creds, .ec = {}};
+    }
+    // How it went for a request at this level.
+    [[nodiscard]] net::ErrorCode outcomeFor(SecurityLevel level) const {
+      return owesSyncTo(level) && owedSync ? owedSync->ec : ec;
+    }
   };
 
   // Stopping's second half, on the strand: closes the sockets, which ends the receive loops, and
@@ -403,9 +418,9 @@ class Client::Impl {
   net::Awaitable<void> runDiscovery(Ref self, Target target, Credentials creds,
                                     std::shared_ptr<Discovery> discovery);
   // By reference, which the coroutine check forbids for the dangling it usually means: here the one
-  // caller, runDiscovery, owns the Credentials in its own frame and awaits this to the end, so a
-  // copy would only be one more of the secrets to wipe. By value, GCC 16 also raises the spurious
-  // -Wmismatched-new-delete described in transact.
+  // caller, runDiscovery, awaits this to the end, and the Credentials outlive that wait -- its own,
+  // in its frame, or those a queued request left on the Discovery it holds (Discovery::OwedSync).
+  // By value, GCC 16 raises the spurious -Wmismatched-new-delete described in transact.
   net::Awaitable<net::ErrorCode> discoverEngine(
       Ref self, Target target,
       const Credentials& creds);  // NOLINT(cppcoreguidelines-avoid-reference-coroutine-parameters)
@@ -1081,9 +1096,7 @@ net::Awaitable<net::ErrorCode> Client::Impl::ensureEngine(Ref self, Target targe
     discovery = inFlight->second;
     // One that will stop after its identity phase leaves this request without a pair it may
     // carry, so it asks that discovery to go on and synchronise.
-    if (isAuthenticated(creds.level) && !discovery->synchronises && !discovery->owedSync) {
-      discovery->owedSync = creds;
-    }
+    discovery->queue(creds);
   } else {
     discovery = std::make_shared<Discovery>(m_strand);
     discovery->synchronises = isAuthenticated(creds.level);
@@ -1122,15 +1135,20 @@ net::Awaitable<void> Client::Impl::runDiscovery(Ref self, Target target, Credent
   const auto endpoint = target.endpoint;
   try {
     discovery->ec = co_await discoverEngine(self, target, creds);
-    // An authenticated request queued behind this one while it ran without authenticating. It
-    // runs again with that request's Credentials, still as the one discovery, rather than letting
-    // the request carry the unsigned pair the identity phase recorded. The requests that needed
-    // only the engineID wait for it too: one timer wakes every waiter. That costs them the second
-    // pass's round trips, and only when the two levels meet one Engine at once.
-    discovery->owedSyncEc = discovery->ec;
-    if (!discovery->ec && discovery->owedSync) {
-      discovery->owedSyncEc =
-          co_await discoverEngine(self, std::move(target), *discovery->owedSync);
+    // A request that authenticates queued behind this one while it ran without authenticating
+    // (see Discovery::OwedSync). The second pass is a whole discoverEngine, so it repeats the
+    // identity phase before the time-sync one, as a later authenticated request would. It runs even
+    // if the request that asked for it has since been cancelled: like the first pass, it belongs to
+    // the Engine (ADR-0003). The requests that needed only the engineID wait for it too, since one
+    // timer wakes every waiter. That costs them its round trips, but only when the two levels meet
+    // one Engine at once. Spelled out through discovery->owedSync each time: binding a reference
+    // to it trips the spurious GCC 16 -Wmismatched-new-delete described in transact.
+    if (discovery->owedSync) {
+      discovery->owedSync->ec = discovery->ec;
+      if (!discovery->ec) {
+        discovery->owedSync->ec =
+            co_await discoverEngine(self, std::move(target), discovery->owedSync->credentials);
+      }
     }
     discovery->finished = true;
   } catch (...) {

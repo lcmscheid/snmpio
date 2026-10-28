@@ -980,6 +980,16 @@ TEST(ClientV3, SynchronisesTimeWhenAnUnauthenticatedTargetIsLaterAuthenticated) 
   EXPECT_FALSE(f.ec) << f.ec.message();
 }
 
+// Issues the unauthenticated Get the next two tests queue an authenticated one behind, and
+// records how it went in `ec`.
+void getWithoutAuthentication(Fixture& f, const Target& target, net::ErrorCode& ec) {
+  f.client.asyncGet(target, credentials(AuthProtocol::None, SecurityLevel::NoAuthNoPriv),
+                    {sysDescr}, [&f, &ec](net::ErrorCode e, const Response&) {
+                      ec = e;
+                      f.finish();
+                    });
+}
+
 // The same, with both requests issued at once: the authenticated one queues behind the discovery
 // the unauthenticated one started, which on its own would stop after its identity phase. The pair
 // that phase recorded is unsigned, so the discovery has to go on to a time-sync phase -- carrying
@@ -1001,11 +1011,7 @@ TEST(ClientV3, AnAuthenticatedRequestQueuedBehindAnUnauthenticatedDiscoveryStill
 
   const auto target = targetFor(agent);
   net::ErrorCode noAuthEc;
-  f.client.asyncGet(target, credentials(AuthProtocol::None, SecurityLevel::NoAuthNoPriv),
-                    {sysDescr}, [&](net::ErrorCode e, const Response&) {
-                      noAuthEc = e;
-                      f.finish();
-                    });
+  getWithoutAuthentication(f, target, noAuthEc);
   f.client.asyncGet(target, credentials(), {sysUpTime}, f.requestToken());
   f.run();
 
@@ -1015,29 +1021,37 @@ TEST(ClientV3, AnAuthenticatedRequestQueuedBehindAnUnauthenticatedDiscoveryStill
   EXPECT_EQ(authenticatedAttempts, 1);
 }
 
-// The time-sync phase that queued request asks for is its own: when it fails, the unauthenticated
-// request the discovery was started for still has the engineID it needed, and succeeds.
-TEST(ClientV3, AFailedTimeSyncPhaseOwedToAQueuedRequestFailsOnlyThatRequest) {
+// The time-sync phase that the queued request asked for is that request's business. An Engine that
+// never answers it fails the authenticated request with the Timeout, before its Get ever goes out.
+// The unauthenticated request the discovery was started for already has the engineID it needed,
+// and succeeds.
+TEST(ClientV3, AnUnansweredTimeSyncPhaseFailsOnlyTheAuthenticatedRequestQueuedForIt) {
   Fixture f;
   f.expectedCompletions = 2;
   ScriptedV3Agent agent(f.io, credentials(), echoAnswer);
   f.agent = &agent;
 
-  const auto target = targetFor(agent);
-  auto wrongPassword = credentials();
-  wrongPassword.authPassword = "notthepassword";
+  int authenticatedAttempts = 0;
+  agent.setResponder(
+      [&](const ScriptedV3Agent::Request& req) -> std::optional<ScriptedV3Agent::Reply> {
+        if (isTimeSyncPhase(req)) return std::nullopt;
+        if (asksFor(req, sysUpTime)) ++authenticatedAttempts;
+        return agent.behaveLikeACompliantAgent(req);
+      });
+
+  // Short and without retries: the silence is the point, and waiting it out is all this test does.
+  Target target = targetFor(agent);
+  target.timeout = std::chrono::milliseconds(100);
+  target.retries = 0;
   net::ErrorCode noAuthEc;
-  f.client.asyncGet(target, credentials(AuthProtocol::None, SecurityLevel::NoAuthNoPriv),
-                    {sysDescr}, [&](net::ErrorCode e, const Response&) {
-                      noAuthEc = e;
-                      f.finish();
-                    });
-  f.client.asyncGet(target, wrongPassword, {sysUpTime}, f.requestToken());
+  getWithoutAuthentication(f, target, noAuthEc);
+  f.client.asyncGet(target, credentials(), {sysUpTime}, f.requestToken());
   f.run();
 
   EXPECT_FALSE(noAuthEc) << "the queued request's failure failed the request it queued behind: "
                          << noAuthEc.message();
-  EXPECT_EQ(f.ec, make_error_code(Errc::AuthFailed));
+  EXPECT_EQ(f.ec, make_error_code(Errc::Timeout)) << f.ec.message();
+  EXPECT_EQ(authenticatedAttempts, 0) << "the Get went out on the identity phase's unsigned pair";
 }
 
 // ADR-0003: "Engine Discovery is single-flight per Engine and outlives any individual waiter, so

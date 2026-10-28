@@ -86,8 +86,8 @@ _Avoid_: security mode, auth level
 The exchange that learns an Authoritative Engine's engineID and then its boots/time pair. Two phases,
 and asynchronous — requests issued against an undiscovered Engine queue behind it. The second phase
 runs only for a request that authenticates. One that authenticates but queues behind a discovery
-started without authentication makes that discovery go on to the second phase before any request
-is woken; a failure there fails only the requests that authenticate.
+started without authentication makes that discovery run both phases again, authenticated, before
+any request is woken; a failure there fails only the requests that authenticate.
 _Avoid_: probe, handshake, engine negotiation
 
 **Time Window**:

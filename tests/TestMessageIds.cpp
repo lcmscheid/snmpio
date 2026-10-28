@@ -1,0 +1,289 @@
+#include <gtest/gtest.h>
+
+#include <cstddef>
+#include <cstdint>
+#include <map>
+#include <optional>
+#include <set>
+#include <utility>
+#include <vector>
+
+#include <snmpio/Client.hpp>
+
+#include "Deadlines.hpp"
+#include "ScriptedAgent.hpp"
+#include "ScriptedV3Agent.hpp"
+
+// Message IDs and request-ids, as the Agent sees them: unpredictable, fresh for every
+// transmission, and never shared by two Outstanding Requests (threat model R7). Every check is made
+// at the Scripted Agent, since what matters is what goes out on the wire.
+namespace snmpio {
+namespace {
+
+using test::longDeadlineTarget;
+using test::respondWith;
+using test::ScriptedAgent;
+using test::ScriptedV3Agent;
+using test::targetFor;
+
+const Community publicCommunity{Community("public")};
+const Oid sysDescr{1, 3, 6, 1, 2, 1, 1, 1, 0};
+
+Credentials credentials() {
+  return Credentials{"bert",       SecurityLevel::AuthPriv, AuthProtocol::Sha256,
+                     "maplesyrup", PrivProtocol::Aes128,    "privatepass"};
+}
+
+Pdu echoAnswer(const Pdu& request) {
+  Pdu p;
+  p.type = PduType::Response;
+  for (const auto& vb : request.varbinds) {
+    p.varbinds.push_back(Varbind{vb.name, Octets{std::byte{'o'}, std::byte{'k'}}});
+  }
+  return p;
+}
+
+// One io_context on the test thread, stopped once every operation has completed, so that a hung
+// operation is a hung test rather than a flake.
+struct Fixture {
+  net::IoContext io;
+  Client client{io.get_executor()};
+  std::function<void()> closeAgent;
+  int expected = 1;
+  int completions = 0;
+
+  void finish() {
+    if (++completions < expected) return;
+    client.stop();
+    if (closeAgent) closeAgent();
+  }
+
+  void run() {
+    io.run();
+    EXPECT_EQ(completions, expected) << "an operation never completed";
+  }
+};
+
+// True if any two neighbours are one apart, which a counter's IDs are.
+bool anyConsecutive(const std::vector<std::int32_t>& ids) {
+  for (std::size_t i = 1; i < ids.size(); ++i) {
+    if (static_cast<std::int64_t>(ids[i]) - ids[i - 1] == 1) return true;
+  }
+  return false;
+}
+
+bool allDistinct(const std::vector<std::int32_t>& ids) {
+  return std::set<std::int32_t>(ids.begin(), ids.end()).size() == ids.size();
+}
+
+// The request-ids one Client sends for `count` GETs, in the order its Agent read them.
+std::vector<std::int32_t> requestIdsOfOneClient(int count) {
+  Fixture f;
+  f.expected = count;
+  std::vector<std::int32_t> ids;
+  ScriptedAgent agent(f.io, [&ids](const V2cMessage& msg) {
+    ids.push_back(msg.pdu.requestId);
+    return respondWith({Varbind{msg.pdu.varbinds.at(0).name, null}});
+  });
+  f.closeAgent = [&agent] { agent.close(); };
+
+  for (int i = 0; i < count; ++i) {
+    f.client.asyncGet(longDeadlineTarget(agent), publicCommunity, {sysDescr},
+                      [&f](net::ErrorCode ec, const Response&) {
+                        EXPECT_FALSE(ec) << ec.message();
+                        f.finish();
+                      });
+  }
+  f.run();
+  return ids;
+}
+
+TEST(MessageIds, ConsecutiveRequestIdsAreNotSequential) {
+  const auto ids = requestIdsOfOneClient(64);
+  ASSERT_EQ(ids.size(), 64U);
+  // A counter would put every one a step from the last, and an Agent that sees some would know
+  // the rest -- those in flight to every other Target included.
+  EXPECT_FALSE(anyConsecutive(ids));
+  EXPECT_TRUE(allDistinct(ids));
+}
+
+TEST(MessageIds, TwoClientsProduceDifferentSequences) {
+  // Each Client keys its own: two that drew the same key would hand each other's Agents the IDs.
+  const auto first = requestIdsOfOneClient(16);
+  const auto second = requestIdsOfOneClient(16);
+  ASSERT_EQ(first.size(), 16U);
+  ASSERT_EQ(second.size(), 16U);
+  EXPECT_NE(first, second);
+}
+
+TEST(MessageIds, EachRetransmissionCarriesAFreshRequestId) {
+  Fixture f;
+  std::vector<std::int32_t> ids;
+  ScriptedAgent agent(f.io, [&ids](const V2cMessage& msg) {
+    ids.push_back(msg.pdu.requestId);
+    return std::nullopt;
+  });
+  f.closeAgent = [&agent] { agent.close(); };
+
+  f.client.asyncGet(targetFor(agent, 3), publicCommunity, {sysDescr},
+                    [&f](net::ErrorCode ec, const Response&) {
+                      EXPECT_EQ(ec, Errc::Timeout);
+                      f.finish();
+                    });
+  f.run();
+
+  ASSERT_EQ(ids.size(), 4U);  // the first attempt and three retransmissions
+  EXPECT_TRUE(allDistinct(ids));
+}
+
+// Every exchange is answered only on its second transmission: Engine Discovery's two phases, then
+// the request itself. Each phase must have sent two different Message IDs, and the request two
+// different request-ids as well.
+TEST(MessageIds, EachV3RetransmissionCarriesAFreshMessageIdDiscoveryIncluded) {
+  Fixture f;
+  ScriptedV3Agent agent(f.io, credentials(), echoAnswer);
+  f.closeAgent = [&agent] { agent.close(); };
+
+  enum class Phase { Identity, TimeSync, Request };
+  std::map<Phase, std::vector<std::int32_t>> msgIds;
+  std::vector<std::int32_t> requestIds;
+  std::vector<std::int32_t> everyMsgId;
+  agent.setResponder(
+      [&](const ScriptedV3Agent::Request& req) -> std::optional<ScriptedV3Agent::Reply> {
+        const auto& m = req.message;
+        Phase phase = Phase::Request;
+        if (m.security.engineId.empty()) {
+          phase = Phase::Identity;
+        } else if (m.scoped.pdu.varbinds.empty()) {
+          phase = Phase::TimeSync;
+        }
+        auto& ids = msgIds[phase];
+        ids.push_back(m.header.msgId);
+        everyMsgId.push_back(m.header.msgId);
+        if (phase == Phase::Request) requestIds.push_back(m.scoped.pdu.requestId);
+        if (ids.size() == 1) return std::nullopt;  // the first transmission is lost
+        return agent.behaveLikeACompliantAgent(req);
+      });
+
+  f.client.asyncGet(targetFor(agent, 1), credentials(), {sysDescr},
+                    [&f](net::ErrorCode ec, const Response& r) {
+                      EXPECT_FALSE(ec) << ec.message();
+                      EXPECT_EQ(r.varbinds.size(), 1U);
+                      f.finish();
+                    });
+  f.run();
+
+  for (const auto phase : {Phase::Identity, Phase::TimeSync, Phase::Request}) {
+    ASSERT_EQ(msgIds[phase].size(), 2U);
+    EXPECT_NE(msgIds[phase][0], msgIds[phase][1]);
+  }
+  ASSERT_EQ(requestIds.size(), 2U);
+  EXPECT_NE(requestIds[0], requestIds[1]);
+  // One generator serves every exchange, discovery's too, and none of it counts up.
+  EXPECT_TRUE(allDistinct(everyMsgId));
+  EXPECT_FALSE(anyConsecutive(everyMsgId));
+}
+
+// The reply to the first transmission arrives only once the retransmission has gone out: a reply
+// delayed in the network, which must still count (CONTEXT.md, Message ID).
+TEST(MessageIds, AReplyToTheFirstTransmissionCountsAfterARetransmission) {
+  Fixture f;
+  std::optional<V2cMessage> first;
+  ScriptedAgent* self = nullptr;
+  ScriptedAgent agent(f.io, [&](const V2cMessage& msg) -> std::optional<Pdu> {
+    if (!first) {
+      first = msg;
+      return std::nullopt;
+    }
+    EXPECT_NE(msg.pdu.requestId, first->pdu.requestId);
+    self->answerLate(*first, respondWith({Varbind{sysDescr, std::int32_t{7}}}));
+    return std::nullopt;
+  });
+  self = &agent;
+  f.closeAgent = [&agent] { agent.close(); };
+
+  f.client.asyncGet(targetFor(agent, 1), publicCommunity, {sysDescr},
+                    [&f](net::ErrorCode ec, const Response& r) {
+                      EXPECT_FALSE(ec) << ec.message();
+                      ASSERT_EQ(r.varbinds.size(), 1U);
+                      EXPECT_EQ(r.varbinds[0].val, Value(std::int32_t{7}));
+                      f.finish();
+                    });
+  f.run();
+
+  EXPECT_EQ(agent.requestsSeen(), 2);
+}
+
+TEST(MessageIds, AV3ReplyToTheFirstTransmissionCountsAfterARetransmission) {
+  Fixture f;
+  ScriptedV3Agent agent(f.io, credentials(), echoAnswer);
+  f.closeAgent = [&agent] { agent.close(); };
+
+  std::optional<ScriptedV3Agent::Request> first;
+  agent.setResponder(
+      [&](const ScriptedV3Agent::Request& req) -> std::optional<ScriptedV3Agent::Reply> {
+        if (req.message.scoped.pdu.varbinds.empty()) return agent.behaveLikeACompliantAgent(req);
+        if (!first) {
+          first = req;
+          return std::nullopt;
+        }
+        EXPECT_NE(req.message.header.msgId, first->message.header.msgId);
+        const auto reply = agent.behaveLikeACompliantAgent(*first);
+        if (reply) agent.answerLate(*first, *reply);
+        return std::nullopt;
+      });
+
+  f.client.asyncGet(targetFor(agent, 1), credentials(), {sysDescr},
+                    [&f](net::ErrorCode ec, const Response& r) {
+                      EXPECT_FALSE(ec) << ec.message();
+                      EXPECT_EQ(r.varbinds.size(), 1U);
+                      f.finish();
+                    });
+  f.run();
+
+  // Two for Engine Discovery, two for the request.
+  EXPECT_EQ(agent.requestsSeen(), 4);
+}
+
+// Every request is held until the Agent has read them all, so that all of them are outstanding at
+// once, and then each is answered with its own OID: one ID shared by two would hand one of them
+// the other's answer, or leave it unanswered.
+TEST(MessageIds, NoIdIsSharedByTwoOutstandingRequests) {
+  constexpr int count = 100;
+  Fixture f;
+  f.expected = count;
+  std::vector<V2cMessage> held;
+  ScriptedAgent* self = nullptr;
+  ScriptedAgent agent(f.io, [&](const V2cMessage& msg) -> std::optional<Pdu> {
+    held.push_back(msg);
+    if (held.size() == count) {
+      for (const auto& h : held) {
+        self->answerLate(h, respondWith({Varbind{h.pdu.varbinds.at(0).name, null}}));
+      }
+    }
+    return std::nullopt;
+  });
+  self = &agent;
+  f.closeAgent = [&agent] { agent.close(); };
+
+  for (std::uint32_t i = 0; i < count; ++i) {
+    const Oid asked{1, 3, 6, 1, 4, 1, 99999, i};
+    f.client.asyncGet(longDeadlineTarget(agent), publicCommunity, {asked},
+                      [&f, asked](net::ErrorCode ec, const Response& r) {
+                        EXPECT_FALSE(ec) << ec.message();
+                        ASSERT_EQ(r.varbinds.size(), 1U);
+                        EXPECT_EQ(r.varbinds[0].name, asked);
+                        f.finish();
+                      });
+  }
+  f.run();
+
+  std::vector<std::int32_t> ids;
+  ids.reserve(held.size());
+  for (const auto& h : held) ids.push_back(h.pdu.requestId);
+  ASSERT_EQ(ids.size(), static_cast<std::size_t>(count));
+  EXPECT_TRUE(allDistinct(ids));
+}
+
+}  // namespace
+}  // namespace snmpio

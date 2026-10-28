@@ -1,6 +1,7 @@
 #include <snmpio/Client.hpp>
 #include <snmpio/detail/CacheView.hpp>
 
+#include "MessageIds.hpp"
 #include "Secret.hpp"
 
 #include <algorithm>
@@ -9,11 +10,11 @@
 #include <cstddef>
 #include <cstdlib>
 #include <exception>
+#include <functional>
 #include <limits>
 #include <map>
 #include <memory>
 #include <optional>
-#include <random>
 #include <span>
 #include <string>
 #include <thread>
@@ -46,11 +47,6 @@ constexpr std::uint32_t usmStatsUnknownUserNames = 3;
 constexpr std::uint32_t usmStatsUnknownEngineIds = 4;
 constexpr std::uint32_t usmStatsWrongDigests = 5;
 constexpr std::uint32_t usmStatsDecryptionErrors = 6;
-
-// A key that may not exist yet, as the span the encoder takes.
-std::span<const std::byte> keySpan(const SecretOctets* key) noexcept {
-  return key != nullptr ? std::span<const std::byte>(*key) : std::span<const std::byte>();
-}
 
 // RFC 3414 section 2.2.3. 150 seconds either side, and an Engine that has booted this many times
 // can no longer be trusted for timeliness at all.
@@ -97,21 +93,11 @@ net::ErrorCode reportError(std::optional<std::uint32_t> counter) {
 
 // A Get with no Varbinds: what each phase of Engine Discovery sends to provoke a Report, carrying
 // no request for data because it expects none to be answered.
-ScopedPdu discoveryScopedPdu(std::int32_t requestId, Octets contextEngineId) {
+ScopedPdu discoveryScopedPdu(Octets contextEngineId) {
   ScopedPdu s;
   s.contextEngineId = std::move(contextEngineId);
   s.pdu.type = PduType::Get;
-  s.pdu.requestId = requestId;
   return s;
-}
-
-std::int32_t randomRequestId() {
-  // RFC 3416 does not require unpredictability, but a fixed starting point makes a restarted
-  // Client collide with in-flight Responses from its previous life. Positive so the encoding
-  // stays short and the value reads plainly in a capture.
-  std::random_device rd;
-  std::uniform_int_distribution<std::int32_t> dist(1, std::numeric_limits<std::int32_t>::max());
-  return dist(rd);
 }
 
 // The completion of an Engine Discovery, which no operation awaits. It does not throw by design, so
@@ -220,7 +206,7 @@ class Client::Impl {
  public:
   using Ref = std::shared_ptr<Impl>;
 
-  explicit Impl(net::Strand strand) : m_strand(std::move(strand)), m_nextId(randomRequestId()) {}
+  explicit Impl(net::Strand strand) : m_strand(std::move(strand)) {}
 
   // detail::CacheView's, and only safe where it says.
   [[nodiscard]] detail::CacheCounts cacheCounts() const noexcept {
@@ -267,7 +253,6 @@ class Client::Impl {
     SecretOctets authKey;  // the Localized Key this exchange is authenticated with
     SecretOctets privKey;  // and the one it is encrypted with, at authPriv
     Octets engineId;       // the Authoritative Engine addressed; empty while discovering
-    std::int32_t requestId = 0;
     Pdu response;
     UsmParameters security;  // what the reply's security parameters said
     bool answered = false;
@@ -397,8 +382,6 @@ class Client::Impl {
     }
   }
 
-  std::int32_t nextId() noexcept;
-
   net::UdpSocket* socketFor(const Ref& self, const net::UdpEndpoint& to, net::ErrorCode& ec);
   net::Awaitable<void> receiveLoop(Ref self, net::UdpSocket* sock);
   void deliverV2c(std::span<const std::byte> datagram, const net::UdpEndpoint& from);
@@ -407,10 +390,20 @@ class Client::Impl {
   void observeEngineTime(const net::UdpEndpoint& from, const UsmParameters& security);
   static RequestResult toResult(const Pdu& response);
 
+  // One transmission of an exchange, built afresh for each: the datagram that carries this ID as
+  // its Message ID at v3, and as its request-id at both versions.
+  using Encoder = std::function<std::vector<std::byte>(std::int32_t id, net::ErrorCode& ec)>;
+
+  // The Encoder for a v3 exchange: the message as given, under the ID each transmission draws, and
+  // under the protocols and keys `pending` holds -- those its reply is checked with, so the two
+  // cannot differ. None, at noAuthNoPriv.
+  static Encoder v3Encoder(V3Header header, UsmParameters usm, ScopedPdu scoped,
+                           const std::shared_ptr<Pending>& pending);
+
   // The shared half of every exchange: send, wait, retransmit, and observe cancellation. Returns
   // an empty ErrorCode when `pending` was answered.
-  net::Awaitable<net::ErrorCode> transact(Ref self, Target target, std::vector<std::byte> datagram,
-                                          std::int32_t key, std::shared_ptr<Pending> pending);
+  net::Awaitable<net::ErrorCode> transact(Ref self, Target target, Encoder encode,
+                                          std::shared_ptr<Pending> pending);
 
   // RFC 3414 section 4, in two phases: the engineID, and then -- only when authenticating -- the
   // boots/time pair. At most one runs per Target; anything else arriving waits on it.
@@ -563,10 +556,11 @@ class Client::Impl {
   // than of the value because it decides how far the derivation is extended: PrivProtocol::None is
   // the authentication key's row.
   std::map<std::tuple<Octets, AuthProtocol, SecretOctets, PrivProtocol>, SecretOctets> m_keys;
-  // One counter for both the v3 msgID and the PDU request-id, so that the two protocols cannot
+  // One sequence for both the v3 msgID and the PDU request-id, so that the two protocols cannot
   // collide in m_pending -- which is keyed on the msgID for v3, as CONTEXT.md requires, because a
-  // message we cannot open must still be attributable.
-  std::int32_t m_nextId;
+  // message we cannot open must still be attributable. Unpredictable, and fresh for every
+  // transmission (see transact).
+  detail::MessageIds m_ids;
 };
 
 Client::Client(const net::Executor& ex)
@@ -614,12 +608,6 @@ void Client::Impl::finishStopping() {
   for (auto& [id, pending] : m_pending) pending->timer.cancel();
   // Anything parked on a discovery is waiting on a reply that will now never come.
   for (auto& [endpoint, discovery] : m_discovering) discovery->done.cancel();
-}
-
-std::int32_t Client::Impl::nextId() noexcept {
-  const std::int32_t id = m_nextId;
-  m_nextId = m_nextId == std::numeric_limits<std::int32_t>::max() ? 1 : m_nextId + 1;
-  return id;
 }
 
 std::vector<Varbind> Client::toVarbinds(std::vector<Oid> oids) {
@@ -704,8 +692,8 @@ void Client::Impl::deliverV2c(std::span<const std::byte> datagram, const net::Ud
 
   const auto it = m_pending.find(msg->pdu.requestId);
   if (it == m_pending.end() || it->second->v3) return;
-  // The request-id is guessable and UDP is trivially spoofable, so a Response only counts if it
-  // came back from the Target we asked and quoted the Community we used.
+  // The request-id is in the clear for anyone on the path and UDP is trivially spoofable, so a
+  // Response only counts if it came back from the Target we asked and quoted the Community we used.
   if (from != it->second->from || msg->community != it->second->community) return;
 
   it->second->response = std::move(msg->pdu);
@@ -714,7 +702,7 @@ void Client::Impl::deliverV2c(std::span<const std::byte> datagram, const net::Ud
 }
 
 // Everything here is a reason to *drop* a datagram rather than to fail the request that it claims
-// to answer. UDP is spoofable and the msgID is guessable, so a caller whose request could be
+// to answer. UDP is spoofable and the msgID is in the clear, so a caller whose request could be
 // failed by a malformed reply would be a caller anyone on the path could cancel at will. A dropped
 // datagram leaves the request outstanding and its retransmission timer running.
 void Client::Impl::deliverV3(std::span<const std::byte> datagram, const net::UdpEndpoint& from) {
@@ -794,7 +782,10 @@ void Client::Impl::deliverV3(std::span<const std::byte> datagram, const net::Udp
   // resynchronisation the protocol has.
   if (!isReport) {
     if (!p.engineId.empty() && msg->security.engineId != p.engineId) return;
-    if (msg->scoped.pdu.requestId != p.requestId) return;
+    // Each transmission carries its Message ID as its request-id too, so a Response must quote
+    // the pair one transmission went out with -- not one transmission's msgID and another's
+    // request-id.
+    if (msg->scoped.pdu.requestId != it->first) return;
     if (msg->scoped.pdu.type != PduType::Response) return;
     if (p.authRequired && !timely(from, msg->security)) {
       p.dropReason = make_error_code(Errc::NotInTimeWindow);
@@ -873,9 +864,18 @@ void Client::Impl::observeEngineTime(const net::UdpEndpoint& from, const UsmPara
   // -Wmismatched-new-delete described in transact.)
 }
 
-net::Awaitable<net::ErrorCode> Client::Impl::transact(Ref self, Target target,
-                                                      std::vector<std::byte> datagram,
-                                                      std::int32_t key,
+Client::Impl::Encoder Client::Impl::v3Encoder(V3Header header, UsmParameters usm, ScopedPdu scoped,
+                                              const std::shared_ptr<Pending>& pending) {
+  return [header, usm = std::move(usm), scoped = std::move(scoped), pending](
+             std::int32_t id, net::ErrorCode& ec) mutable {
+    header.msgId = id;
+    scoped.pdu.requestId = id;
+    return encodeV3Message(header, usm, scoped, pending->authProtocol, pending->authKey, ec,
+                           pending->privProtocol, pending->privKey);
+  };
+}
+
+net::Awaitable<net::ErrorCode> Client::Impl::transact(Ref self, Target target, Encoder encode,
                                                       std::shared_ptr<Pending> pending) {
   // Before the socket, so that nothing reopens one Stopping has closed.
   if (m_stopping) co_return make_error_code(Errc::ClientStopped);
@@ -883,7 +883,12 @@ net::Awaitable<net::ErrorCode> Client::Impl::transact(Ref self, Target target,
   net::UdpSocket* sock = socketFor(self, target.endpoint, ec);
   if (ec) co_return ec;
 
-  m_pending.emplace(key, pending);
+  // Every transmission's ID, each mapped to this request until it completes, so that a reply to
+  // any of them counts: one delayed past its deadline still answers the request after the
+  // retransmission has gone out (CONTEXT.md, Message ID). None can belong to another Outstanding
+  // Request, since m_ids repeats nothing short of 2^31 transmissions.
+  std::vector<std::int32_t> ids;
+  ids.reserve(static_cast<std::size_t>(target.retries) + 1);
 
   // Cancellation is handled here rather than thrown, so every exit still goes through the
   // bookkeeping below. Which types are observable at all is decided once per request, where the
@@ -899,6 +904,16 @@ net::Awaitable<net::ErrorCode> Client::Impl::transact(Ref self, Target target,
   };
 
   for (int attempt = 0; attempt <= target.retries; ++attempt) {
+    // A fresh ID for each transmission, as RFC 3412 section 6.2 asks: a retransmission that
+    // repeated one would tell an observer which reply to forge for longest. Re-encoded rather than
+    // patched, so that at authPriv each transmission has a salt of its own as well.
+    const auto id = m_ids.next(ec);
+    if (!id) break;
+    const auto datagram = encode(*id, ec);
+    if (ec) break;
+    m_pending.emplace(*id, pending);
+    ids.push_back(*id);
+
     co_await sock->async_send_to(net::asio::buffer(datagram), target.endpoint,
                                  redirect_error(use_awaitable, ec));
     // Stopping may have begun while the send was in flight, and its cleanup has then already
@@ -931,7 +946,7 @@ net::Awaitable<net::ErrorCode> Client::Impl::transact(Ref self, Target target,
     }
   }
 
-  m_pending.erase(key);
+  for (const auto id : ids) m_pending.erase(id);
 
   // Terminal drops the exchange whatever else happened, including a reply that landed while the
   // signal was on its way; total lets that reply count, and ends the request otherwise. Both are
@@ -1008,18 +1023,16 @@ net::Awaitable<Client::RequestResult> Client::Impl::doRequestV2c(Ref self, Targe
                                                                  Community community, Pdu pdu) {
   co_await observeBothCancellationTypes();
 
-  pdu.requestId = nextId();
-
-  net::ErrorCode ec;
-  auto datagram = encodeV2cMessage(community.value, pdu, ec);
-  if (ec) co_return RequestResult{ec, Response{}};
-
   const auto pending = std::make_shared<Pending>(co_await net::asio::this_coro::executor);
   pending->from = target.endpoint;
   pending->community = community.value;
-  pending->requestId = pdu.requestId;
 
-  ec = co_await transact(self, std::move(target), std::move(datagram), pdu.requestId, pending);
+  auto encode = [community = std::move(community.value), pdu = std::move(pdu)](
+                    std::int32_t id, net::ErrorCode& ec) mutable {
+    pdu.requestId = id;
+    return encodeV2cMessage(community, pdu, ec);
+  };
+  const auto ec = co_await transact(self, std::move(target), std::move(encode), pending);
   if (ec) co_return RequestResult{ec, Response{}};
   co_return toResult(pending->response);
 }
@@ -1167,22 +1180,14 @@ net::Awaitable<void> Client::Impl::runDiscovery(Ref self, Target target, Credent
 net::Awaitable<net::ErrorCode> Client::Impl::discoverEngine(
     Ref self, Target target,
     const Credentials& creds) {  // NOLINT(cppcoreguidelines-avoid-reference-coroutine-parameters)
-  const std::int32_t identifyId = nextId();
-  V3Header header;
-  header.msgId = identifyId;
-  header.level = SecurityLevel::NoAuthNoPriv;
-
-  net::ErrorCode ec;
-  auto datagram = encodeV3Message(header, UsmParameters{}, discoveryScopedPdu(identifyId, {}),
-                                  AuthProtocol::None, {}, ec);
-  if (ec) co_return ec;
-
   const auto identify = std::make_shared<Pending>(co_await net::asio::this_coro::executor);
   identify->from = target.endpoint;
   identify->v3 = true;
-  identify->requestId = identifyId;
 
-  ec = co_await transact(self, target, std::move(datagram), identifyId, identify);
+  V3Header header;
+  header.level = SecurityLevel::NoAuthNoPriv;
+  auto identifyEncoder = v3Encoder(header, UsmParameters{}, discoveryScopedPdu({}), identify);
+  auto ec = co_await transact(self, target, std::move(identifyEncoder), identify);
   if (ec) co_return ec;
   // Some Agents answer with a Report and some with an ordinary Response; either way the engineID
   // is in the security parameters, and that is the only part of the reply this phase wanted.
@@ -1206,23 +1211,6 @@ net::Awaitable<net::ErrorCode> Client::Impl::discoverEngine(
   const auto [key, privKey] = localizedKeys(creds, engineId, ec);
   if (ec) co_return ec;
 
-  const std::int32_t syncId = nextId();
-  V3Header syncHeader;
-  syncHeader.msgId = syncId;
-  syncHeader.level = creds.level;
-  UsmParameters usm;
-  usm.engineId = engineId;
-  usm.userName = creds.userName;  // boots and time left at zero: being wrong is the point
-
-  // Sent at the Credentials' own level rather than downgraded to authNoPriv: an Engine may enforce
-  // a minimum level per user, and being refused for asking too politely would end discovery. The
-  // Engine never has to decrypt it -- RFC 3414 section 3.2 rejects it as untimely at step 7, one
-  // step before decryption -- and the Report that rejection produces is the point of sending it.
-  auto syncDatagram =
-      encodeV3Message(syncHeader, usm, discoveryScopedPdu(syncId, engineId), creds.authProtocol,
-                      *key, ec, creds.privProtocol, keySpan(privKey));
-  if (ec) co_return ec;
-
   const auto sync = std::make_shared<Pending>(co_await net::asio::this_coro::executor);
   sync->from = target.endpoint;
   sync->v3 = true;
@@ -1232,10 +1220,20 @@ net::Awaitable<net::ErrorCode> Client::Impl::discoverEngine(
   sync->authKey = *key;
   if (privKey != nullptr) sync->privKey = *privKey;
   sync->engineId = engineId;
-  sync->requestId = syncId;
   sync->timeSyncPhase = true;
 
-  ec = co_await transact(self, std::move(target), std::move(syncDatagram), syncId, sync);
+  V3Header syncHeader;
+  syncHeader.level = creds.level;
+  UsmParameters usm;
+  usm.engineId = engineId;
+  usm.userName = creds.userName;  // boots and time left at zero: being wrong is the point
+
+  // Sent at the Credentials' own level rather than downgraded to authNoPriv: an Engine may enforce
+  // a minimum level per user, and being refused for asking too politely would end discovery. The
+  // Engine never has to decrypt it -- RFC 3414 section 3.2 rejects it as untimely at step 7, one
+  // step before decryption -- and the Report that rejection produces is the point of sending it.
+  auto syncEncoder = v3Encoder(syncHeader, std::move(usm), discoveryScopedPdu(engineId), sync);
+  ec = co_await transact(self, std::move(target), std::move(syncEncoder), sync);
   if (ec) co_return ec;
   // RFC 3414 sections 3.2 step 7(b) and 11.1: the pair is learnt from an authenticated message,
   // and only from one. That is usually the notInTimeWindows Report this phase was sent to provoke,
@@ -1306,11 +1304,12 @@ std::optional<net::ErrorCode> Client::Impl::handleReport(const net::UdpEndpoint&
   // judging timeliness until the rediscovery completes -- the same window the first discovery had.
   //
   // Not a replay hole. The Report carries our msgID inside the signed header and msgIDs do not
-  // repeat within a Client short of 2^31 requests, so an old capture cannot match a request still
-  // waiting for an answer. What remains is a recording from an earlier Client process that happened
-  // to reuse the msgID. That buys one rediscovery per request -- mayRetry bounds it -- and the
-  // rediscovery is exposed exactly as every first discovery is: only a second recording that
-  // matches the time-sync phase's own msgID could set its baseline.
+  // repeat within a Client short of 2^31 transmissions, so an old capture cannot match a request
+  // still waiting for an answer. What remains is a recording from an earlier Client process whose
+  // unrelated, separately keyed IDs happened to include this one. That buys one rediscovery per
+  // request -- mayRetry bounds it -- and the rediscovery is exposed exactly as every first
+  // discovery is: only a second recording that matches the time-sync phase's own msgID could set
+  // its baseline.
   EngineState* engine = engineAt(from);
   if (engine != nullptr && engine->timeSynced && pending.security.boots < engine->boots) {
     engine->timeSynced = false;
@@ -1353,11 +1352,7 @@ net::Awaitable<Client::RequestResult> Client::Impl::doRequestV3(Ref self, Target
     const auto [key, privKey] = localizedKeys(creds, engine->engineId, ec);
     if (ec) co_return RequestResult{ec, Response{}};
 
-    const std::int32_t id = nextId();
-    pdu.requestId = id;
-
     V3Header header;
-    header.msgId = id;
     header.level = creds.level;
 
     UsmParameters usm;
@@ -1370,10 +1365,6 @@ net::Awaitable<Client::RequestResult> Client::Impl::doRequestV3(Ref self, Target
     scoped.contextEngineId = engine->engineId;
     scoped.pdu = pdu;
 
-    auto datagram = encodeV3Message(header, usm, scoped, creds.authProtocol, keySpan(key), ec,
-                                    creds.privProtocol, keySpan(privKey));
-    if (ec) co_return RequestResult{ec, Response{}};
-
     const auto pending = std::make_shared<Pending>(co_await net::asio::this_coro::executor);
     pending->from = target.endpoint;
     pending->v3 = true;
@@ -1383,9 +1374,9 @@ net::Awaitable<Client::RequestResult> Client::Impl::doRequestV3(Ref self, Target
     if (key != nullptr) pending->authKey = *key;
     if (privKey != nullptr) pending->privKey = *privKey;
     pending->engineId = engine->engineId;
-    pending->requestId = id;
 
-    ec = co_await transact(self, target, std::move(datagram), id, pending);
+    ec = co_await transact(self, target,
+                           v3Encoder(header, std::move(usm), std::move(scoped), pending), pending);
     if (ec) co_return RequestResult{ec, Response{}};
 
     if (pending->response.type == PduType::Report) {

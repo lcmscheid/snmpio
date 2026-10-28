@@ -28,6 +28,7 @@ add_executable(snmpio_tests
   TestInteropSet.cpp
   TestInteropV3.cpp
   TestInteropWalk.cpp
+  TestMessageIds.cpp
   TestOid.cpp
   TestPdu.cpp
   TestSecrets.cpp

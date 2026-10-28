@@ -9,11 +9,13 @@
 #include <optional>
 #include <span>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <snmpio/Client.hpp>
 #include <snmpio/detail/CacheView.hpp>
 
+#include "CompletionOracle.hpp"
 #include "Deadlines.hpp"
 #include "MasterKeys.hpp"
 #include "ScriptedV3Agent.hpp"
@@ -334,6 +336,12 @@ bool isTimeSyncPhase(const ScriptedV3Agent::Request& req) {
   return !req.message.security.engineId.empty() && req.message.security.boots == 0;
 }
 
+// Which of a test's requests this is, told apart by the first name it asks for.
+bool asksFor(const ScriptedV3Agent::Request& req, const Oid& name) {
+  const auto& varbinds = req.message.scoped.pdu.varbinds;
+  return !varbinds.empty() && varbinds.front().name == name;
+}
+
 // Criterion: the signed notInTimeWindows Report from an Engine now at a lower boots is the Engine
 // telling us its real clock, and the cache is rediscovered from it rather than refusing it forever.
 TEST(ClientV3, RediscoversAnEngineWhoseBootsWentBackwards) {
@@ -403,6 +411,82 @@ TEST(ClientV3, AForcedResyncHappensAtMostOncePerRequest) {
   EXPECT_EQ(r.second, make_error_code(Errc::NotInTimeWindow)) << r.second.message();
   // The stale request, the identity and time-sync phases of one rediscovery, and one retry.
   EXPECT_EQ(r.requestsAfterTheSecondGet, 4);
+}
+
+// #43. Two Outstanding Requests sent at the cached boots 3, and the Engine resets to boots 1
+// between signing a Response to one and answering the other. The other request's signed lower-boots
+// Report forgets the clock, and its retry starts a rediscovery. The signed Response is held back
+// until that rediscovery's identity phase is on the wire. It is authenticated and not behind the
+// pair we held, so RFC 3414 section 3.2 step 7(b)(1) lets it update the cache, but it must not
+// stand in for the time-sync phase the rediscovery owes. Had it done so, the retry would go out at
+// boots 3 and fail, since no request gets a second forced resync.
+TEST(ClientV3, ALateSignedResponseDoesNotCancelAPendingRediscovery) {
+  // The Engine's clock as the cache settled it, and as it is after the reset.
+  constexpr std::int32_t oldBoots = 3;
+  constexpr std::int32_t oldTime = 1000;
+  constexpr std::int32_t resetBoots = 1;
+  constexpr std::int32_t resetTime = 50;
+
+  Fixture f;
+  f.expectedCompletions = 2;
+  ScriptedV3Agent agent(f.io, credentials(), echoAnswer);
+  f.agent = &agent;
+  test::CompletionOracle reported(f.io);  // asks for sysDescr, and meets the lower-boots Report
+  test::CompletionOracle late(f.io);      // asks for sysUpTime, and its Response is held back
+
+  std::optional<ScriptedV3Agent::Request> reportedRequest;
+  std::optional<ScriptedV3Agent::Request> lateRequest;
+  std::optional<ScriptedV3Agent::Reply> lateResponse;
+  bool reset = false;
+  int timeSyncPhases = 0;
+  std::vector<std::int32_t> bootsTheReportedRequestCarried;
+
+  agent.setBoots(oldBoots);
+  agent.setTime(oldTime);
+  agent.setResponder(
+      [&](const ScriptedV3Agent::Request& req) -> std::optional<ScriptedV3Agent::Reply> {
+        if (isTimeSyncPhase(req)) ++timeSyncPhases;
+        const bool isReported = asksFor(req, sysDescr);
+        const bool isLate = asksFor(req, sysUpTime);
+        if (isReported) bootsTheReportedRequestCarried.push_back(req.message.security.boots);
+
+        if (!reset && (isReported || isLate)) {
+          // Hold whichever arrives first, so that both were sent at the old boots before the reset.
+          (isReported ? reportedRequest : lateRequest) = req;
+          if (!reportedRequest || !lateRequest) return std::nullopt;
+          // Signed at the old clock, before the reset, and not yet sent.
+          lateResponse = agent.behaveLikeACompliantAgent(*lateRequest);
+          lateResponse->boots = oldBoots;
+          lateResponse->time = oldTime;
+          reset = true;
+          agent.setBoots(resetBoots);
+          agent.setTime(resetTime);
+          agent.answerLate(*reportedRequest, *agent.behaveLikeACompliantAgent(*reportedRequest));
+          return std::nullopt;
+        }
+        // The rediscovery's identity phase. The held Response goes out just ahead of its answer.
+        if (reset && lateResponse && req.message.security.engineId.empty()) {
+          agent.answerLate(*lateRequest, *std::exchange(lateResponse, std::nullopt));
+        }
+        return agent.behaveLikeACompliantAgent(req);
+      });
+
+  // Long enough that nothing is retransmitted: every datagram here is one the test chose.
+  Target target = targetFor(agent);
+  target.timeout = std::chrono::seconds(5);
+  const auto finish = [&f](net::ErrorCode, const Response&) { f.finish(); };
+  f.client.asyncGet(target, credentials(), {sysDescr}, reported.handler(finish));
+  f.client.asyncGet(target, credentials(), {sysUpTime}, late.handler(finish));
+  f.run();
+
+  ASSERT_TRUE(reset) << "the Agent never saw both requests";
+  EXPECT_TRUE(late.completedExactlyOnce({net::ErrorCode{}}));
+  EXPECT_TRUE(reported.completedExactlyOnce({net::ErrorCode{}}))
+      << "the late Response stood in for the rediscovery's time-sync phase";
+  // The first discovery's, and the rediscovery's.
+  EXPECT_EQ(timeSyncPhases, 2);
+  // The request at the old boots, and its retry at the rediscovered one.
+  EXPECT_EQ(bootsTheReportedRequestCarried, (std::vector<std::int32_t>{oldBoots, resetBoots}));
 }
 
 // The direction that was always right stays as it was: a signed Report naming a *higher* boots is
@@ -894,6 +978,80 @@ TEST(ClientV3, SynchronisesTimeWhenAnUnauthenticatedTargetIsLaterAuthenticated) 
   // Had the authenticated request reused the unauthenticated discovery's boots/time, the Agent
   // would have rejected it as untimely and this would be Errc::NotInTimeWindow.
   EXPECT_FALSE(f.ec) << f.ec.message();
+}
+
+// Issues the unauthenticated Get the next two tests queue an authenticated one behind, and
+// records how it went in `ec`.
+void getWithoutAuthentication(Fixture& f, const Target& target, net::ErrorCode& ec) {
+  f.client.asyncGet(target, credentials(AuthProtocol::None, SecurityLevel::NoAuthNoPriv),
+                    {sysDescr}, [&f, &ec](net::ErrorCode e, const Response&) {
+                      ec = e;
+                      f.finish();
+                    });
+}
+
+// The same, with both requests issued at once: the authenticated one queues behind the discovery
+// the unauthenticated one started, which on its own would stop after its identity phase. The pair
+// that phase recorded is unsigned, so the discovery has to go on to a time-sync phase -- carrying
+// that pair instead would leave the Engine unsynced, and every later reply unchecked against the
+// Time Window.
+TEST(ClientV3, AnAuthenticatedRequestQueuedBehindAnUnauthenticatedDiscoveryStillSynchronises) {
+  Fixture f;
+  f.expectedCompletions = 2;
+  ScriptedV3Agent agent(f.io, credentials(), echoAnswer);
+  f.agent = &agent;
+
+  int timeSyncPhases = 0;
+  int authenticatedAttempts = 0;
+  agent.setResponder([&](const ScriptedV3Agent::Request& req) {
+    if (isTimeSyncPhase(req)) ++timeSyncPhases;
+    if (asksFor(req, sysUpTime)) ++authenticatedAttempts;
+    return agent.behaveLikeACompliantAgent(req);
+  });
+
+  const auto target = targetFor(agent);
+  net::ErrorCode noAuthEc;
+  getWithoutAuthentication(f, target, noAuthEc);
+  f.client.asyncGet(target, credentials(), {sysUpTime}, f.requestToken());
+  f.run();
+
+  EXPECT_FALSE(noAuthEc) << noAuthEc.message();
+  EXPECT_FALSE(f.ec) << f.ec.message();
+  EXPECT_EQ(timeSyncPhases, 1) << "the authenticated request went out on an unsigned pair";
+  EXPECT_EQ(authenticatedAttempts, 1);
+}
+
+// The time-sync phase that the queued request asked for is that request's business. An Engine that
+// never answers it fails the authenticated request with the Timeout, before its Get ever goes out.
+// The unauthenticated request the discovery was started for already has the engineID it needed,
+// and succeeds.
+TEST(ClientV3, AnUnansweredTimeSyncPhaseFailsOnlyTheAuthenticatedRequestQueuedForIt) {
+  Fixture f;
+  f.expectedCompletions = 2;
+  ScriptedV3Agent agent(f.io, credentials(), echoAnswer);
+  f.agent = &agent;
+
+  int authenticatedAttempts = 0;
+  agent.setResponder(
+      [&](const ScriptedV3Agent::Request& req) -> std::optional<ScriptedV3Agent::Reply> {
+        if (isTimeSyncPhase(req)) return std::nullopt;
+        if (asksFor(req, sysUpTime)) ++authenticatedAttempts;
+        return agent.behaveLikeACompliantAgent(req);
+      });
+
+  // Short and without retries: the silence is the point, and waiting it out is all this test does.
+  Target target = targetFor(agent);
+  target.timeout = std::chrono::milliseconds(100);
+  target.retries = 0;
+  net::ErrorCode noAuthEc;
+  getWithoutAuthentication(f, target, noAuthEc);
+  f.client.asyncGet(target, credentials(), {sysUpTime}, f.requestToken());
+  f.run();
+
+  EXPECT_FALSE(noAuthEc) << "the queued request's failure failed the request it queued behind: "
+                         << noAuthEc.message();
+  EXPECT_EQ(f.ec, make_error_code(Errc::Timeout)) << f.ec.message();
+  EXPECT_EQ(authenticatedAttempts, 0) << "the Get went out on the identity phase's unsigned pair";
 }
 
 // ADR-0003: "Engine Discovery is single-flight per Engine and outlives any individual waiter, so

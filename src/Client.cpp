@@ -291,9 +291,16 @@ class Client::Impl {
     std::int32_t boots = 0;
     std::int32_t time = 0;
     std::chrono::steady_clock::time_point at;
-    // Whether the pair above came from an authenticated exchange. A noAuthNoPriv discovery learns
-    // the engineID and nothing trustworthy about its clock, so the first authenticated request
-    // against the same Engine still has to synchronise.
+    // Whether the pair above is a baseline from discovery's time-sync phase, kept current since by
+    // signed replies, and not doubted since. A noAuthNoPriv discovery learns the engineID and
+    // nothing trustworthy about its clock, so the first authenticated request against the same
+    // Engine still has to synchronise. Only discoverEngine's time-sync phase sets it; handleReport
+    // clears it when a signed Report says the pair is wrong (ADR-0010). Nothing else may set it
+    // (#43). A Response the Engine signed just before its boots went backwards can still be in
+    // flight when handleReport clears the flag. It is timely by RFC 3414 section 3.2 step 7(b)(1),
+    // and observeEngineTime adopts its pair, but it says nothing about the Engine having been
+    // rediscovered since. Had it set the flag, the rediscovery that clearing it asked for would
+    // skip its time-sync phase, and the retry would go out at the old boots.
     bool timeSynced = false;
   };
 
@@ -304,9 +311,37 @@ class Client::Impl {
     net::SteadyTimer done;
     net::ErrorCode ec;
     bool finished = false;
+    // Whether it runs the time-sync phase: it does when the request that started it authenticates.
+    bool synchronises = false;
     // What the discovery threw, if it did: each waiter rethrows it, so that every request it was
     // serving leaves run() the way the discovery itself does, rather than waiting forever.
     std::exception_ptr failure;
+
+    // The time-sync phase a discovery that does not synchronise owes the requests queued behind it
+    // that authenticate: its identity phase records only an unsigned pair, which they may not
+    // carry. The first such request leaves its Credentials, and runDiscovery goes on to a second
+    // pass with them before it wakes anyone. Its outcome is theirs alone; the requests that needed
+    // only the engineID have ec. Every request that authenticates shares the one pass, as it would
+    // behind a discovery that an authenticated request started.
+    struct OwedSync {
+      Credentials credentials;
+      net::ErrorCode ec;
+    };
+    std::optional<OwedSync> owedSync;
+
+    // Whether a request at this level needs the time-sync phase this discovery does not run.
+    [[nodiscard]] bool owesSyncTo(SecurityLevel level) const {
+      return isAuthenticated(level) && !synchronises;
+    }
+    // A request queued behind this discovery. If it is owed the time-sync phase and is the first
+    // to be, its Credentials are the ones the second pass runs with.
+    void queue(const Credentials& creds) {
+      if (owesSyncTo(creds.level) && !owedSync) owedSync = OwedSync{.credentials = creds, .ec = {}};
+    }
+    // How it went for a request at this level.
+    [[nodiscard]] net::ErrorCode outcomeFor(SecurityLevel level) const {
+      return owesSyncTo(level) && owedSync ? owedSync->ec : ec;
+    }
   };
 
   // Stopping's second half, on the strand: closes the sockets, which ends the receive loops, and
@@ -383,9 +418,9 @@ class Client::Impl {
   net::Awaitable<void> runDiscovery(Ref self, Target target, Credentials creds,
                                     std::shared_ptr<Discovery> discovery);
   // By reference, which the coroutine check forbids for the dangling it usually means: here the one
-  // caller, runDiscovery, owns the Credentials in its own frame and awaits this to the end, so a
-  // copy would only be one more of the secrets to wipe. By value, GCC 16 also raises the spurious
-  // -Wmismatched-new-delete described in transact.
+  // caller, runDiscovery, awaits this to the end, and the Credentials outlive that wait -- its own,
+  // in its frame, or those a queued request left on the Discovery it holds (Discovery::OwedSync).
+  // By value, GCC 16 raises the spurious -Wmismatched-new-delete described in transact.
   net::Awaitable<net::ErrorCode> discoverEngine(
       Ref self, Target target,
       const Credentials& creds);  // NOLINT(cppcoreguidelines-avoid-reference-coroutine-parameters)
@@ -831,7 +866,11 @@ void Client::Impl::observeEngineTime(const net::UdpEndpoint& from, const UsmPara
   engine->boots = security.boots;
   engine->time = security.time;
   engine->at = std::chrono::steady_clock::now();
-  engine->timeSynced = true;
+  // And never marks the Engine synced: see EngineState::timeSynced (#43). There is no early return
+  // for an unsynced Engine above because it would save nothing: a pair written then is never
+  // relied on, since timely() ignores it and the next discovery overwrites it before an
+  // authenticated request carries it. (The early return also trips the spurious GCC 16
+  // -Wmismatched-new-delete described in transact.)
 }
 
 net::Awaitable<net::ErrorCode> Client::Impl::transact(Ref self, Target target,
@@ -1055,8 +1094,12 @@ net::Awaitable<net::ErrorCode> Client::Impl::ensureEngine(Ref self, Target targe
     // CONTEXT.md: requests issued against an undiscovered Engine queue behind the one discovery
     // rather than each starting their own.
     discovery = inFlight->second;
+    // One that will stop after its identity phase leaves this request without a pair it may
+    // carry, so it asks that discovery to go on and synchronise.
+    discovery->queue(creds);
   } else {
     discovery = std::make_shared<Discovery>(m_strand);
+    discovery->synchronises = isAuthenticated(creds.level);
     // A timer used as an event rather than a deadline: it never expires on its own, and cancelling
     // it is how every waiter is woken at once.
     discovery->done.expires_at(std::chrono::steady_clock::time_point::max());
@@ -1064,9 +1107,10 @@ net::Awaitable<net::ErrorCode> Client::Impl::ensureEngine(Ref self, Target targe
     // Spawned on its own rather than awaited, and this is the point of ADR-0003's "Engine
     // Discovery outlives any individual waiter": the discovery belongs to the Engine, not to
     // whichever request happened to arrive first, so cancelling that request must not cancel what
-    // everyone else is queued behind.
-    net::asio::co_spawn(
-        m_strand, runDiscovery(self, std::move(target), std::move(creds), discovery), rethrow);
+    // everyone else is queued behind. The Credentials are copied, not moved: this request reads
+    // their level after the wait. Reading it into a local first instead trips the spurious GCC 16
+    // -Wmismatched-new-delete described in transact.
+    net::asio::co_spawn(m_strand, runDiscovery(self, std::move(target), creds, discovery), rethrow);
   }
 
   co_await net::asio::this_coro::throw_if_cancelled(false);
@@ -1083,14 +1127,29 @@ net::Awaitable<net::ErrorCode> Client::Impl::ensureEngine(Ref self, Target targe
   if (cancelled.cancelled() != net::asio::cancellation_type::none || !discovery->finished) {
     co_return net::ErrorCode(net::asio::error::operation_aborted);
   }
-  co_return discovery->ec;
+  co_return discovery->outcomeFor(creds.level);
 }
 
 net::Awaitable<void> Client::Impl::runDiscovery(Ref self, Target target, Credentials creds,
                                                 std::shared_ptr<Discovery> discovery) {
   const auto endpoint = target.endpoint;
   try {
-    discovery->ec = co_await discoverEngine(self, std::move(target), creds);
+    discovery->ec = co_await discoverEngine(self, target, creds);
+    // A request that authenticates queued behind this one while it ran without authenticating
+    // (see Discovery::OwedSync). The second pass is a whole discoverEngine, so it repeats the
+    // identity phase before the time-sync one, as a later authenticated request would. It runs even
+    // if the request that asked for it has since been cancelled: like the first pass, it belongs to
+    // the Engine (ADR-0003). The requests that needed only the engineID wait for it too, since one
+    // timer wakes every waiter. That costs them its round trips, but only when the two levels meet
+    // one Engine at once. Spelled out through discovery->owedSync each time: binding a reference
+    // to it trips the spurious GCC 16 -Wmismatched-new-delete described in transact.
+    if (discovery->owedSync) {
+      discovery->owedSync->ec = discovery->ec;
+      if (!discovery->ec) {
+        discovery->owedSync->ec =
+            co_await discoverEngine(self, std::move(target), discovery->owedSync->credentials);
+      }
+    }
     discovery->finished = true;
   } catch (...) {
     discovery->failure = std::current_exception();

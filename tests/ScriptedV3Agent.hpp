@@ -97,6 +97,15 @@ class ScriptedV3Agent {
   // The compliant behaviour, for a Responder that wants to misbehave in one place only.
   std::optional<Reply> behaveLikeACompliantAgent(const Request& req) { return behave(req); }
 
+  // Answers an earlier request now. A Responder holds a reply back by answering silence, and lets
+  // it go at a moment of its own choosing, as a reply delayed in the network would arrive. Unlike
+  // a delayed delivery, the order against the other replies is the test's, not a timer's. Leave the
+  // reply's boots and time unset and they are the Agent's clock now, not as it was when it was
+  // asked. It goes out as one copy, at once: setDelivery's plan is not consulted.
+  void answerLate(const Request& req, Reply reply) {
+    send(std::move(reply), req.message.header.msgId, req.message.scoped.pdu.requestId, {});
+  }
+
   // RFC 3414 section 5's counters, so that a test says which Report it means rather than which
   // number it is.
   static constexpr std::uint32_t unsupportedSecLevels = 1;

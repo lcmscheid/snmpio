@@ -291,9 +291,13 @@ class Client::Impl {
     std::int32_t boots = 0;
     std::int32_t time = 0;
     std::chrono::steady_clock::time_point at;
-    // Whether the pair above came from an authenticated exchange. A noAuthNoPriv discovery learns
-    // the engineID and nothing trustworthy about its clock, so the first authenticated request
-    // against the same Engine still has to synchronise.
+    // Whether the pair above is a baseline from discovery's time-sync phase, kept current since by
+    // signed replies, and not doubted since. A noAuthNoPriv discovery learns the engineID and
+    // nothing trustworthy about its clock, so the first authenticated request against the same
+    // Engine still has to synchronise. Only discoverEngine sets it; handleReport clears it when a
+    // signed Report says the pair is wrong (ADR-0010). Nothing else may set it, or a signed reply
+    // to an older request could cancel the rediscovery that clearing it asked for (#43). The
+    // regression test pins that, not a guard in observeEngineTime: see the note at its end.
     bool timeSynced = false;
   };
 
@@ -831,7 +835,15 @@ void Client::Impl::observeEngineTime(const net::UdpEndpoint& from, const UsmPara
   engine->boots = security.boots;
   engine->time = security.time;
   engine->at = std::chrono::steady_clock::now();
-  engine->timeSynced = true;
+  // And never marks the Engine synced: only discoverEngine's time-sync phase does. A signed reply
+  // that was in flight when handleReport doubted the pair -- a Response the Engine signed just
+  // before its boots went backwards -- is timely by step 7(b)(1), and adopting its pair is right.
+  // But it does not say the Engine has been rediscovered since, and marking it synced would skip
+  // the time-sync phase that rediscovery owes (#43). An unsynced pair written here is never relied
+  // on: timely() ignores it, and the rediscovery overwrites it before any request carries it.
+  // Which is why there is no early return for an unsynced Engine above: it would only save writing
+  // a pair nothing reads, and it trips the spurious GCC 16 -Wmismatched-new-delete described in
+  // transact.
 }
 
 net::Awaitable<net::ErrorCode> Client::Impl::transact(Ref self, Target target,

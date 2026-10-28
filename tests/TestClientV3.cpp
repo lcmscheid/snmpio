@@ -9,11 +9,13 @@
 #include <optional>
 #include <span>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <snmpio/Client.hpp>
 #include <snmpio/detail/CacheView.hpp>
 
+#include "CompletionOracle.hpp"
 #include "Deadlines.hpp"
 #include "MasterKeys.hpp"
 #include "ScriptedV3Agent.hpp"
@@ -403,6 +405,82 @@ TEST(ClientV3, AForcedResyncHappensAtMostOncePerRequest) {
   EXPECT_EQ(r.second, make_error_code(Errc::NotInTimeWindow)) << r.second.message();
   // The stale request, the identity and time-sync phases of one rediscovery, and one retry.
   EXPECT_EQ(r.requestsAfterTheSecondGet, 4);
+}
+
+// #43. Two Outstanding Requests sent at the cached boots 3, and the Engine resets to boots 1
+// between signing a Response to one and answering the other. The other request's signed lower-boots
+// Report forgets the clock, and its retry starts a rediscovery. The signed Response is held back
+// until that rediscovery's identity phase is on the wire. It is authenticated and not behind the
+// pair we held, so RFC 3414 section 3.2 step 7(b)(1) lets it update the cache, but it must not
+// stand in for the time-sync phase the rediscovery owes. Had it done so, the retry would go out at
+// boots 3 and fail, since no request gets a second forced resync.
+TEST(ClientV3, ALateSignedResponseDoesNotCancelAPendingRediscovery) {
+  net::IoContext io;
+  Client client(io.get_executor());
+  ScriptedV3Agent agent(io, credentials(), echoAnswer);
+  test::CompletionOracle reported(io);  // asks for sysDescr, and meets the lower-boots Report
+  test::CompletionOracle late(io);      // asks for sysUpTime, and its Response is held back
+
+  std::optional<ScriptedV3Agent::Request> reportedRequest;
+  std::optional<ScriptedV3Agent::Request> lateRequest;
+  std::optional<ScriptedV3Agent::Reply> lateResponse;
+  bool reset = false;
+  int timeSyncPhases = 0;
+  std::vector<std::int32_t> bootsTheReportedRequestCarried;
+
+  agent.setResponder(
+      [&](const ScriptedV3Agent::Request& req) -> std::optional<ScriptedV3Agent::Reply> {
+        if (isTimeSyncPhase(req)) ++timeSyncPhases;
+        const auto asksFor = [&req](const Oid& name) {
+          const auto& varbinds = req.message.scoped.pdu.varbinds;
+          return !varbinds.empty() && varbinds.front().name == name;
+        };
+        const bool isReported = asksFor(sysDescr);
+        const bool isLate = asksFor(sysUpTime);
+        if (isReported) bootsTheReportedRequestCarried.push_back(req.message.security.boots);
+
+        if (!reset && (isReported || isLate)) {
+          // Hold whichever arrives first, so that both were sent at boots 3 before the reset.
+          (isReported ? reportedRequest : lateRequest) = req;
+          if (!reportedRequest || !lateRequest) return std::nullopt;
+          // Signed at boots 3 and time 1000, before the reset, and not yet sent.
+          lateResponse = agent.behaveLikeACompliantAgent(*lateRequest);
+          lateResponse->boots = 3;
+          lateResponse->time = 1000;
+          reset = true;
+          agent.setBoots(1);
+          agent.setTime(50);
+          agent.answerLate(*reportedRequest, *agent.behaveLikeACompliantAgent(*reportedRequest));
+          return std::nullopt;
+        }
+        // The rediscovery's identity phase. The held Response goes out just ahead of its answer.
+        if (reset && lateResponse && req.message.security.engineId.empty()) {
+          agent.answerLate(*lateRequest, *std::exchange(lateResponse, std::nullopt));
+        }
+        return agent.behaveLikeACompliantAgent(req);
+      });
+
+  // Long enough that nothing is retransmitted: every datagram here is one the test chose.
+  Target target = targetFor(agent);
+  target.timeout = std::chrono::seconds(5);
+  int completions = 0;
+  const auto completed = [&](net::ErrorCode, const Response&) {
+    if (++completions < 2) return;
+    client.stop();
+    agent.close();
+  };
+  client.asyncGet(target, credentials(), {sysDescr}, reported.handler(completed));
+  client.asyncGet(target, credentials(), {sysUpTime}, late.handler(completed));
+  io.run();
+
+  ASSERT_TRUE(reset) << "the Agent never saw both requests";
+  EXPECT_TRUE(late.completedExactlyOnce({net::ErrorCode{}}));
+  EXPECT_TRUE(reported.completedExactlyOnce({net::ErrorCode{}}))
+      << "the late Response stood in for the rediscovery's time-sync phase";
+  // The first discovery's, and the rediscovery's.
+  EXPECT_EQ(timeSyncPhases, 2);
+  // The request at the old boots, and its retry at the rediscovered one.
+  EXPECT_EQ(bootsTheReportedRequestCarried, (std::vector<std::int32_t>{3, 1}));
 }
 
 // The direction that was always right stays as it was: a signed Report naming a *higher* boots is

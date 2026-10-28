@@ -93,6 +93,14 @@ TEST(ErrorClassification, AnArgumentPastItsBoundIsTheCallersToFix) {
             std::string::npos);
 }
 
+TEST(ErrorClassification, APasswordTooShortIsTheCallersToFix) {
+  // RFC 3414 section 11.2's minimum. The same Credentials fail the same way every time, so not
+  // Retriable; a longer password fixes it, so not Fatal.
+  EXPECT_EQ(classify(make_error_code(Errc::PasswordTooShort)), ErrorClass::Configuration);
+  EXPECT_EQ(errorCategory().message(static_cast<int>(Errc::PasswordTooShort)).rfind("unknown", 0),
+            std::string::npos);
+}
+
 TEST(ErrorClassification, MalformedRepliesAndOurOwnStopAreFatal) {
   EXPECT_EQ(classify(make_error_code(Errc::Truncated)), ErrorClass::Fatal);
   EXPECT_EQ(classify(make_error_code(Errc::NonIncreasingOid)), ErrorClass::Fatal);

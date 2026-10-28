@@ -139,7 +139,7 @@ class InteropV3 : public ::testing::Test {
     ASSERT_TRUE(target.has_value())
         << "SNMPIO_INTEROP_TARGET/_PORT is not an address and a port: " << *address;
     m_target = *target;
-    m_password = password.value_or("");
+    m_passwords = test::interopPasswords();
 
     if (!user) return;
     // Set but unspellable fails the run, like every other interop variable: a protocol name that
@@ -164,7 +164,7 @@ class InteropV3 : public ::testing::Test {
   // The user to send for one pair: the one this run named, or the conventional one that says what
   // it carries. Callers filter first -- a named user serves its own pair and no other.
   [[nodiscard]] Credentials credentials(const AuthRow& auth, const PrivRow& priv) const {
-    return credentialsFor(auth, priv, m_password, m_named ? &*m_named : nullptr);
+    return credentialsFor(auth, priv, m_passwords, m_named ? &*m_named : nullptr);
   }
 
   // The pair the tests that want one reach for: the named user's, or SHA-256 over AES-128.
@@ -205,7 +205,7 @@ class InteropV3 : public ::testing::Test {
   }
 
   Target m_target;
-  std::string m_password;
+  test::InteropPasswords m_passwords;
   std::optional<NamedUser> m_named;
 };
 
@@ -340,7 +340,7 @@ TEST_F(InteropV3, WritesReadsBackAndRestoresSysContactAtEverySecurityLevel) {
     }
     // Set but unusable fails, as everywhere -- as a failed row rather than an assertion, so the
     // levels after it still reach the summary.
-    if (auth.protocol != AuthProtocol::None && m_password.empty()) {
+    if (auth.protocol != AuthProtocol::None && m_passwords.auth.empty()) {
       recordOutcome(operationLabel(Operation::Set, pairLabel(auth, priv)),
                     std::string(variable) + "=" + *writer + " carries " + auth.name +
                         ", so it needs SNMPIO_INTEROP_V3_PASSWORD to authenticate with",
@@ -349,7 +349,7 @@ TEST_F(InteropV3, WritesReadsBackAndRestoresSysContactAtEverySecurityLevel) {
       continue;
     }
     const NamedUser user{*writer, auth, priv};
-    writeReadAndRestoreAndRecord(m_target, credentialsFor(auth, priv, m_password, &user),
+    writeReadAndRestoreAndRecord(m_target, credentialsFor(auth, priv, m_passwords, &user),
                                  pairLabel(auth, priv));
     anyWriterNamed = true;
   }
@@ -426,7 +426,7 @@ TEST_F(InteropV3, SurfacesAWrongPasswordAsAReport) {
   // refuse the request before ever checking the digest; the conventional path keeps the
   // authNoPriv user it has always used.
   Credentials wrong = m_named ? singlePairCredentials() : credentials(sha256Row, noPrivRow);
-  wrong.authPassword += "-and-then-some";
+  wrong.authPassword = std::string(wrong.authPassword.view()) + "-and-then-some";
   const auto wrongResult = get(m_target, wrong);
   EXPECT_EQ(wrongResult.ec, make_error_code(Errc::AuthFailed))
       << "got " << test::errorText(wrongResult.ec);

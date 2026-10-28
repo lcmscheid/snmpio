@@ -48,7 +48,7 @@ constexpr std::uint32_t usmStatsWrongDigests = 5;
 constexpr std::uint32_t usmStatsDecryptionErrors = 6;
 
 // A key that may not exist yet, as the span the encoder takes.
-std::span<const std::byte> keySpan(const Octets* key) noexcept {
+std::span<const std::byte> keySpan(const SecretOctets* key) noexcept {
   return key != nullptr ? std::span<const std::byte>(*key) : std::span<const std::byte>();
 }
 
@@ -174,14 +174,11 @@ bool requestInRange(const Target& target, const Pdu& pdu) noexcept {
   return pdu.nonRepeaters() >= 0 && withinCeiling(pdu.maxRepetitions(), maxRepetitionsCeiling);
 }
 
-// The Credentials' Master Keys, where they carry any (detail::Secret::inRange). Both are checked
-// whatever the Security Level, a privacy key at authNoPriv included: a Master Key that could never
-// be right is a mistake in the Credentials, refused here rather than when the level is raised. A
-// Community has nothing to check.
-bool credentialsInRange(const std::variant<Community, Credentials>& auth) noexcept {
+// What is wrong with the Credentials a request travels under, if anything
+// (detail::credentialsFault). A Community has nothing to check.
+std::optional<Errc> authFault(const std::variant<Community, Credentials>& auth) noexcept {
   const auto* creds = std::get_if<Credentials>(&auth);
-  return creds == nullptr ||
-         (detail::Secret::auth(*creds).inRange() && detail::Secret::priv(*creds).inRange());
+  return creds == nullptr ? std::nullopt : detail::credentialsFault(*creds);
 }
 
 // A Walk's: its Target's retries, and the WalkOptions. A negative maxRepetitions would otherwise
@@ -267,9 +264,9 @@ class Client::Impl {
     bool authRequired = false;
     AuthProtocol authProtocol = AuthProtocol::None;
     PrivProtocol privProtocol = PrivProtocol::None;
-    Octets authKey;   // the Localized Key this exchange is authenticated with
-    Octets privKey;   // and the one it is encrypted with, at authPriv
-    Octets engineId;  // the Authoritative Engine addressed; empty while discovering
+    SecretOctets authKey;  // the Localized Key this exchange is authenticated with
+    SecretOctets privKey;  // and the one it is encrypted with, at authPriv
+    Octets engineId;       // the Authoritative Engine addressed; empty while discovering
     std::int32_t requestId = 0;
     Pdu response;
     UsmParameters security;  // what the reply's security parameters said
@@ -385,19 +382,33 @@ class Client::Impl {
   net::Awaitable<net::ErrorCode> ensureEngine(Ref self, Target target, Credentials creds);
   net::Awaitable<void> runDiscovery(Ref self, Target target, Credentials creds,
                                     std::shared_ptr<Discovery> discovery);
-  net::Awaitable<net::ErrorCode> discoverEngine(Ref self, Target target, Credentials creds);
+  // By reference, which the coroutine check forbids for the dangling it usually means: here the one
+  // caller, runDiscovery, owns the Credentials in its own frame and awaits this to the end, so a
+  // copy would only be one more of the secrets to wipe. By value, GCC 16 also raises the spurious
+  // -Wmismatched-new-delete described in transact.
+  net::Awaitable<net::ErrorCode> discoverEngine(
+      Ref self, Target target,
+      const Credentials& creds);  // NOLINT(cppcoreguidelines-avoid-reference-coroutine-parameters)
   // The Engine currently believed to answer at this endpoint, or nullptr if none is known.
   EngineState* engineAt(const net::UdpEndpoint& endpoint);
 
   // The Master Key for one secret: the one the Credentials carry, or the one this Client derived
   // from the password -- once, the first time it met it, since the derivation is a megabyte hash
-  // and deliberately expensive (CONTEXT.md).
-  const Octets* masterKey(const detail::Secret& secret, net::ErrorCode& ec);
-  // Localized per Engine from the Master Key, and cached: a short hash for the authentication key,
-  // but a second megabyte for a Reeder privacy key, whose extension runs password-to-key again.
-  const Octets* localizedKey(const Credentials& creds, const Octets& engineId, net::ErrorCode& ec);
-  const Octets* localizedPrivacyKey(const Credentials& creds, const Octets& engineId,
-                                    net::ErrorCode& ec);
+  // and deliberately expensive (CONTEXT.md). Empty, with `ec` set, if there is none.
+  std::span<const std::byte> masterKey(const detail::Secret& secret, net::ErrorCode& ec);
+  // One secret's key, localized per Engine from its Master Key, and cached: a short hash for the
+  // authentication key, but a second megabyte for a Reeder privacy key, whose extension runs
+  // password-to-key again.
+  const SecretOctets* localizedKey(const detail::Secret& secret, const Octets& engineId,
+                                   net::ErrorCode& ec);
+  // The keys a message at the Credentials' Security Level goes out with: the authentication key
+  // wherever it authenticates, the privacy key wherever it encrypts, nullptr for either it does
+  // not use. Both point into the cache, which never evicts (threat model B2).
+  struct LocalizedKeys {
+    const SecretOctets* auth = nullptr;
+    const SecretOctets* priv = nullptr;
+  };
+  LocalizedKeys localizedKeys(const Credentials& creds, const Octets& engineId, net::ErrorCode& ec);
 
   // What a Report means for the request that provoked it: an ErrorCode to fail with, or nothing
   // when it named something we can act on and ask again about. `cancelled` is the request's
@@ -432,11 +443,14 @@ class Client::Impl {
 
   // Why an operation will not start, in the order every operation keeps: Stopping first, so that
   // one initiated after it completes with ClientStopped whatever else is wrong with it; then the
-  // arguments (requestInRange, walkInRange, credentialsInRange), before anything is sent or
-  // discovered.
-  [[nodiscard]] std::optional<net::ErrorCode> refusal(bool argumentsInRange) const {
+  // arguments (requestInRange or walkInRange); then the Credentials (authFault) -- all before
+  // anything is sent or discovered. Both checks are the caller's to make, since what is in range
+  // depends on the operation.
+  [[nodiscard]] std::optional<net::ErrorCode> refusal(bool argumentsInRange,
+                                                      std::optional<Errc> authProblem) const {
     if (m_stopping) return make_error_code(Errc::ClientStopped);
     if (!argumentsInRange) return make_error_code(Errc::ArgumentOutOfRange);
+    if (authProblem) return make_error_code(*authProblem);
     return std::nullopt;
   }
 
@@ -501,18 +515,19 @@ class Client::Impl {
   // Master Keys this Client derived, per (hash, password) -- the password as a passwordDigest
   // under m_digestKey rather than in plaintext, so that no password outlives the Credentials that
   // brought it (threat model S4). Master Keys the caller supplied are not copied here; they are
-  // already as cheap to reach as a cache could make them.
-  std::map<std::pair<AuthProtocol, Octets>, Octets> m_masterKeys;
+  // already as cheap to reach as a cache could make them. Every key and digest the Client keeps,
+  // here and below, wipes itself when it goes (threat model S5).
+  std::map<std::pair<AuthProtocol, SecretOctets>, SecretOctets> m_masterKeys;
   // The Client's own random key for passwordDigest, so that two Clients' digests of one password
   // differ and none can be looked up in a table built before the Client existed. Drawn the first
   // time a password needs it, so a Client handed only Master Keys never draws one.
-  Octets m_digestKey;
+  SecretOctets m_digestKey;
   std::size_t m_masterKeyDerivations = 0;  // for detail::CacheView, and nothing else
   // (engineID, hash, Master Key, privacy protocol) -- ADR-0003's (master key, engineID), whether
   // the Master Key was derived above or supplied. The privacy protocol is part of the key rather
   // than of the value because it decides how far the derivation is extended: PrivProtocol::None is
   // the authentication key's row.
-  std::map<std::tuple<Octets, AuthProtocol, Octets, PrivProtocol>, Octets> m_keys;
+  std::map<std::tuple<Octets, AuthProtocol, SecretOctets, PrivProtocol>, SecretOctets> m_keys;
   // One counter for both the v3 msgID and the PDU request-id, so that the two protocols cannot
   // collide in m_pending -- which is keyed on the msgID for v3, as CONTEXT.md requires, because a
   // message we cannot open must still be attributable.
@@ -929,7 +944,7 @@ net::Awaitable<void> Client::Impl::observeBothCancellationTypes() {
 
 net::Awaitable<Client::RequestResult> Client::Impl::doRequest(Ref self, Target target, Auth auth,
                                                               Pdu pdu) {
-  if (const auto refused = refusal(requestInRange(target, pdu) && credentialsInRange(auth))) {
+  if (const auto refused = refusal(requestInRange(target, pdu), authFault(auth))) {
     co_return RequestResult{*refused, Response{}};
   }
   co_return co_await doExchange(self, std::move(target), std::move(auth), std::move(pdu));
@@ -946,7 +961,7 @@ net::Awaitable<Client::RequestResult> Client::Impl::doExchange(Ref self, Target 
   if (const auto* community = std::get_if<Community>(&auth)) {
     co_return co_await doRequestV2c(self, std::move(target), *community, std::move(pdu));
   }
-  co_return co_await doRequestV3(self, std::move(target), std::get<Credentials>(auth),
+  co_return co_await doRequestV3(self, std::move(target), std::move(std::get<Credentials>(auth)),
                                  std::move(pdu));
 }
 
@@ -970,51 +985,58 @@ net::Awaitable<Client::RequestResult> Client::Impl::doRequestV2c(Ref self, Targe
   co_return toResult(pending->response);
 }
 
-const Octets* Client::Impl::masterKey(const detail::Secret& secret, net::ErrorCode& ec) {
+std::span<const std::byte> Client::Impl::masterKey(const detail::Secret& secret,
+                                                   net::ErrorCode& ec) {
   ec = {};
-  if (const Octets* supplied = secret.suppliedMasterKey()) return supplied;
+  if (const SecretOctets* supplied = secret.suppliedMasterKey()) return *supplied;
   if (m_digestKey.empty()) {
     m_digestKey = detail::randomDigestKey(ec);
-    if (ec) return nullptr;
+    if (ec) return {};
   }
   // A keyed digest, not a bare hash: a bare one could be checked against a table of guesses built
   // for any Client. It is still far cheaper to guess against than the megabyte-hashed Master Key
   // beside it, which is why it is keyed per Client and not kept anywhere else.
   auto digest = detail::passwordDigest(m_digestKey, secret.password(), ec);
-  if (ec) return nullptr;
+  if (ec) return {};
   auto cacheKey = std::make_pair(secret.authProtocol(), std::move(digest));
   const auto it = m_masterKeys.find(cacheKey);
-  if (it != m_masterKeys.end()) return &it->second;
+  if (it != m_masterKeys.end()) return it->second;
   auto derived = passwordToKey(secret.authProtocol(), secret.password(), ec);
-  if (ec) return nullptr;
+  if (ec) return {};
   ++m_masterKeyDerivations;
-  return &m_masterKeys.emplace(std::move(cacheKey), std::move(derived)).first->second;
+  return m_masterKeys.emplace(std::move(cacheKey), std::move(derived)).first->second;
 }
 
-const Octets* Client::Impl::localizedKey(const Credentials& creds, const Octets& engineId,
-                                         net::ErrorCode& ec) {
-  const Octets* master = masterKey(detail::Secret::auth(creds), ec);
-  if (master == nullptr) return nullptr;
+const SecretOctets* Client::Impl::localizedKey(const detail::Secret& secret, const Octets& engineId,
+                                               net::ErrorCode& ec) {
+  const auto master = masterKey(secret, ec);
+  if (ec) return nullptr;
   // The user name is deliberately not part of the key: what the derivation consumes is the Master
-  // Key, the protocol and the engineID, so two users sharing a password share a key.
-  auto cacheKey = std::make_tuple(engineId, creds.authProtocol, *master, PrivProtocol::None);
+  // Key, the protocols and the engineID, so two users sharing a password share a key.
+  auto cacheKey =
+      std::make_tuple(engineId, secret.authProtocol(), SecretOctets(master.begin(), master.end()),
+                      secret.privProtocol());
   const auto it = m_keys.find(cacheKey);
   if (it != m_keys.end()) return &it->second;
-  auto derived = localizeKey(creds.authProtocol, *master, engineId, ec);
+  auto derived = detail::localizedKeyFor(secret, master, engineId, ec);
   if (ec) return nullptr;
   return &m_keys.emplace(std::move(cacheKey), std::move(derived)).first->second;
 }
 
-const Octets* Client::Impl::localizedPrivacyKey(const Credentials& creds, const Octets& engineId,
-                                                net::ErrorCode& ec) {
-  const Octets* master = masterKey(detail::Secret::priv(creds), ec);
-  if (master == nullptr) return nullptr;
-  auto cacheKey = std::make_tuple(engineId, creds.authProtocol, *master, creds.privProtocol);
-  const auto it = m_keys.find(cacheKey);
-  if (it != m_keys.end()) return &it->second;
-  auto derived = localizedPrivKey(creds.authProtocol, creds.privProtocol, *master, engineId, ec);
-  if (ec) return nullptr;
-  return &m_keys.emplace(std::move(cacheKey), std::move(derived)).first->second;
+Client::Impl::LocalizedKeys Client::Impl::localizedKeys(const Credentials& creds,
+                                                        const Octets& engineId,
+                                                        net::ErrorCode& ec) {
+  ec = {};
+  LocalizedKeys keys;
+  if (isAuthenticated(creds.level)) {
+    keys.auth = localizedKey(detail::Secret::auth(creds), engineId, ec);
+    if (ec) return {};
+  }
+  if (isEncrypted(creds.level)) {
+    keys.priv = localizedKey(detail::Secret::priv(creds), engineId, ec);
+    if (ec) return {};
+  }
+  return keys;
 }
 
 net::Awaitable<net::ErrorCode> Client::Impl::ensureEngine(Ref self, Target target,
@@ -1068,7 +1090,7 @@ net::Awaitable<void> Client::Impl::runDiscovery(Ref self, Target target, Credent
                                                 std::shared_ptr<Discovery> discovery) {
   const auto endpoint = target.endpoint;
   try {
-    discovery->ec = co_await discoverEngine(self, std::move(target), std::move(creds));
+    discovery->ec = co_await discoverEngine(self, std::move(target), creds);
     discovery->finished = true;
   } catch (...) {
     discovery->failure = std::current_exception();
@@ -1083,8 +1105,9 @@ net::Awaitable<void> Client::Impl::runDiscovery(Ref self, Target target, Credent
 // RFC 3414 section 4. Phase one asks with no engineID at all and reads the Engine's own from what
 // comes back; phase two, needed only when authenticating, sends a deliberately untimely message
 // and reads the real boots/time out of the rejection.
-net::Awaitable<net::ErrorCode> Client::Impl::discoverEngine(Ref self, Target target,
-                                                            Credentials creds) {
+net::Awaitable<net::ErrorCode> Client::Impl::discoverEngine(
+    Ref self, Target target,
+    const Credentials& creds) {  // NOLINT(cppcoreguidelines-avoid-reference-coroutine-parameters)
   const std::int32_t identifyId = nextId();
   V3Header header;
   header.msgId = identifyId;
@@ -1121,13 +1144,8 @@ net::Awaitable<net::ErrorCode> Client::Impl::discoverEngine(Ref self, Target tar
   // pair we already synchronised stands and only the identity phase had to run again.
   if (engine.timeSynced) co_return net::ErrorCode{};
 
-  const Octets* key = localizedKey(creds, engineId, ec);
+  const auto [key, privKey] = localizedKeys(creds, engineId, ec);
   if (ec) co_return ec;
-  const Octets* privKey = nullptr;
-  if (isEncrypted(creds.level)) {
-    privKey = localizedPrivacyKey(creds, engineId, ec);
-    if (ec) co_return ec;
-  }
 
   const std::int32_t syncId = nextId();
   V3Header syncHeader;
@@ -1248,10 +1266,10 @@ net::Awaitable<Client::RequestResult> Client::Impl::doRequestV3(Ref self, Target
   co_await observeBothCancellationTypes();
   // Refused at the call rather than downgraded: a message that claims privacy it does not have is
   // worse than one that was never sent.
-  if (isEncrypted(creds.level) && creds.privProtocol == PrivProtocol::None) {
+  if (detail::Secret::priv(creds).protocolMissing()) {
     co_return RequestResult{make_error_code(Errc::UnsupportedPrivProtocol), Response{}};
   }
-  if (isAuthenticated(creds.level) && creds.authProtocol == AuthProtocol::None) {
+  if (detail::Secret::auth(creds).protocolMissing()) {
     co_return RequestResult{make_error_code(Errc::UnsupportedAuthProtocol), Response{}};
   }
 
@@ -1273,16 +1291,8 @@ net::Awaitable<Client::RequestResult> Client::Impl::doRequestV3(Ref self, Target
     const auto projected =
         std::min<std::int64_t>(static_cast<std::int64_t>(engine->time) + elapsed, timeCeiling);
 
-    const Octets* key = nullptr;
-    if (isAuthenticated(creds.level)) {
-      key = localizedKey(creds, engine->engineId, ec);
-      if (ec) co_return RequestResult{ec, Response{}};
-    }
-    const Octets* privKey = nullptr;
-    if (isEncrypted(creds.level)) {
-      privKey = localizedPrivacyKey(creds, engine->engineId, ec);
-      if (ec) co_return RequestResult{ec, Response{}};
-    }
+    const auto [key, privKey] = localizedKeys(creds, engine->engineId, ec);
+    if (ec) co_return RequestResult{ec, Response{}};
 
     const std::int32_t id = nextId();
     pdu.requestId = id;
@@ -1409,7 +1419,7 @@ net::Awaitable<Client::WalkResult> Client::Impl::doWalk(Ref self, Target target,
   // everything, so it has to be observable here -- and observed, not thrown. The state is asked
   // for at each use rather than held, because each request underneath re-seats it.
   co_await observeBothCancellationTypes();
-  if (const auto refused = refusal(walkInRange(target, options) && credentialsInRange(auth))) {
+  if (const auto refused = refusal(walkInRange(target, options), authFault(auth))) {
     co_return WalkResult{*refused};
   }
 

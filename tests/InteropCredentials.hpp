@@ -7,6 +7,8 @@
 
 #include <snmpio/Usm.hpp>
 
+#include "InteropTarget.hpp"
+
 // The v3 half of the interop suite's vocabulary: which auth and privacy protocols it names, what
 // the pairs are called, and the Credentials a pair adds up to. Said once here, so that every v3
 // interop test -- the GET matrix, and each operation run over it -- addresses the same users by the
@@ -120,18 +122,34 @@ struct NamedUser {
   PrivRow priv;
 };
 
+// The two passwords every interop user carries, one per key. SNMPIO_INTEROP_V3_PASSWORD is the
+// authentication one; SNMPIO_INTEROP_V3_PRIV_PASSWORD the privacy one, and the authentication one
+// again when it is unset, since a bench user set up with a single password is the common case.
+// tests/interop/start-agent.sh sets both, and differently, so our own Agents are configured as USM
+// intends: a privacy password shared with authentication is lost with it.
+struct InteropPasswords {
+  std::string auth;
+  std::string priv;
+};
+
+[[nodiscard]] inline InteropPasswords interopPasswords() {
+  const auto auth = envVar("SNMPIO_INTEROP_V3_PASSWORD");
+  const auto priv = envVar("SNMPIO_INTEROP_V3_PRIV_PASSWORD");
+  return {auth.value_or(""), priv.value_or(auth.value_or(""))};
+}
+
 // The Credentials to send for one pair: the named user's when there is one, or the conventional
 // user that says what it carries. Callers filter first -- a named user serves its own pair and no
-// other. Every interop user has the one password, used for both keys.
+// other.
 [[nodiscard]] inline Credentials credentialsFor(const AuthRow& auth, const PrivRow& priv,
-                                                const std::string& password,
+                                                const InteropPasswords& passwords,
                                                 const NamedUser* named = nullptr) {
   return Credentials{named != nullptr ? named->name : conventionalUser(auth, priv),
                      securityLevel(auth, priv),
                      auth.protocol,
-                     auth.protocol == AuthProtocol::None ? std::string() : password,
+                     auth.protocol == AuthProtocol::None ? std::string() : passwords.auth,
                      priv.protocol,
-                     priv.protocol == PrivProtocol::None ? std::string() : password};
+                     priv.protocol == PrivProtocol::None ? std::string() : passwords.priv};
 }
 
 }  // namespace snmpio::test

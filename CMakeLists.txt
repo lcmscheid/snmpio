@@ -119,6 +119,7 @@ add_library(snmpio
   src/Client.cpp
   src/Error.cpp
   src/Oid.cpp
+  src/Password.cpp
   src/Pdu.cpp
   src/Usm.cpp
   src/V3Message.cpp

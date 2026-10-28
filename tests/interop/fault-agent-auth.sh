@@ -7,17 +7,19 @@
 # configuration names them differently, and a suite that followed it would need a second table
 # saying the same thing twice.
 #
-# The password arrives in the environment rather than in this file: one value configures the Agent
-# and drives the suite, so the two cannot drift.
+# The passwords arrive in the environment rather than in this file: one value configures the Agent
+# and drives the suite, so the two cannot drift. Each user's privacy key gets
+# SNMPIO_INTEROP_V3_PRIV_PASSWORD, or the authentication password when that is unset.
 set -eu
 
 : "${SNMPIO_INTEROP_V3_PASSWORD:?set it to the password every interop user gets (8+ characters)}"
+privPassword=${SNMPIO_INTEROP_V3_PRIV_PASSWORD:-$SNMPIO_INTEROP_V3_PASSWORD}
 
 user() {  # user <name> <authProtocol> [privProtocol]
   printf ',\n    {"username": "%s", "authProtocol": "%s", "authPassphrase": "%s"' \
     "$1" "$2" "$SNMPIO_INTEROP_V3_PASSWORD"
   [ $# -eq 3 ] && printf ', "privProtocol": "%s", "privPassphrase": "%s"' \
-    "$3" "$SNMPIO_INTEROP_V3_PASSWORD"
+    "$3" "$privPassword"
   printf '}'
 }
 

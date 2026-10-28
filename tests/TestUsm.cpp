@@ -75,19 +75,19 @@ TEST(PasswordToKey, MatchesTheKnownVectors) {
   }
 }
 
-// The expansion is hashed in chunks of about 16 KiB, each a whole number of passwords, so what
-// each chunk starts with depends on where the one before it ended. These lengths are the ones a
-// chunking mistake shows up at: one character, a length that divides nothing, either side of RFC
-// 3414's 64-Octet line, a password that fits a chunk only once and one that fits it exactly, one
-// longer than a chunk, which is a chunk of its own, and one longer than the whole megabyte, of
-// which only the first megabyte is hashed. Computed with Python's hashlib over the megabyte built
-// whole.
+// The expansion is hashed about 16 KiB at a time, from one buffer of the password repeated a whole
+// number of times, so where each update starts depends on where the one before it ended. These
+// lengths are the ones a mistake in that shows up at: the shortest RFC 3414 allows, two lengths
+// that divide nothing, either side of RFC 3414's 64-Octet line, a password that fits the buffer
+// only once and one that fits it exactly, one longer than the target, which is the buffer on its
+// own, and one longer than the whole megabyte, of which only the first megabyte is hashed. Computed
+// with Python's hashlib over the megabyte built whole.
 TEST(PasswordToKey, MatchesAWholeMegabyteHashAtAwkwardLengths) {
   struct Row {
     std::string password;
     std::string_view master;
   };
-  // A period of 16 divides the chunk and the megabyte, so the rows added for the chunk's and the
+  // A period of 16 divides the buffer and the megabyte, so the rows added for the buffer's and the
   // megabyte's edges use 17; the 5000-character row keeps the 16 it was pinned with.
   const auto patterned = [](std::size_t length, std::string_view period) {
     std::string out;
@@ -95,9 +95,10 @@ TEST(PasswordToKey, MatchesAWholeMegabyteHashAtAwkwardLengths) {
     out.resize(length);
     return out;
   };
-  const std::array<Row, 9> rows = {{
-      {"a", "9bc1b2a288b26af7257a36277ae3816a7d4f16e89c1e7e77d0a5c48bad62b360"},
-      {"seven77", "f0d372e8f5a95c7e16b75b9a67ccae1f02b7153d5ab8c4f506df6112ad1dd3a9"},
+  const std::array<Row, 10> rows = {{
+      {"eight888", "0e5e24d878d7db0e5635d6d65c00fb27a026cc64b7cca7156a1380f48dcf2a15"},
+      {"ninechars", "4b033e5f3013a79a98ee2f7c8023104b6d79079929b09da7cc6d25381d9a2b6b"},
+      {"elevenchars", "3b9059c889f9cf8661247e5a4ee5fce56716769e02796ea070d7b799afdef515"},
       {std::string(64, 'x'), "8f990ba0b577b51cf009ea049368c16bbda1b21e1b93be07a824758bb253c39b"},
       {std::string(65, 'y'), "34bc6ad8178071438d388d4680bc6c236abeb0c88be1cee99a16f921d7d84999"},
       {patterned(5000, "0123456789abcdef"),
@@ -117,6 +118,22 @@ TEST(PasswordToKey, MatchesAWholeMegabyteHashAtAwkwardLengths) {
     EXPECT_FALSE(ec) << ec.message();
     EXPECT_EQ(hex(master), hex(fromHex(row.master))) << row.password.size() << " characters";
   }
+}
+
+// RFC 3414 section 11.2: "a password ... MUST be at least 8 characters". Refused here too, not
+// only by the Client, so that a Master Key derived ahead of time is held to the same rule; empty is
+// one of the lengths refused, not a fault of its own.
+TEST(PasswordToKey, RefusesAPasswordShorterThanEightCharacters) {
+  for (const std::string_view tooShort : {"", "a", "seven77"}) {
+    net::ErrorCode ec;
+    const auto master = passwordToKey(AuthProtocol::Sha256, tooShort, ec);
+    EXPECT_EQ(ec, Errc::PasswordTooShort) << tooShort.size() << " characters";
+    EXPECT_TRUE(master.empty());
+  }
+  net::ErrorCode ec;
+  const auto master = passwordToKey(AuthProtocol::Sha256, "eight888", ec);
+  EXPECT_FALSE(ec) << ec.message();
+  EXPECT_EQ(master.size(), keySize(AuthProtocol::Sha256));
 }
 
 TEST(LocalizeKey, MatchesTheKnownVectors) {
@@ -291,8 +308,8 @@ TEST(LocalizedKeys, ReadAMasterKeyTheCredentialsCarry) {
     auto creds = privCreds(v.auth, v.priv);
     const auto viaPasswords = localizedAuthKey(creds, privEngineId(), ec);
     ASSERT_FALSE(ec) << ec.message();
-    creds.authMasterKey = passwordToKey(v.auth, creds.authPassword, ec);
-    creds.privMasterKey = passwordToKey(v.auth, creds.privPassword, ec);
+    creds.authMasterKey = passwordToKey(v.auth, creds.authPassword.view(), ec);
+    creds.privMasterKey = passwordToKey(v.auth, creds.privPassword.view(), ec);
     creds.authPassword.clear();
     creds.privPassword.clear();
 

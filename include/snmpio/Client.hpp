@@ -103,7 +103,9 @@ class Client {
   // or a negative WalkOptions::timeLimit completes it with Errc::ArgumentOutOfRange rather than
   // being clamped. So does a Master Key in the Credentials that is not keySize(authProtocol)
   // Octets, or that is given beside its password rather than in place of it, whatever the Security
-  // Level -- a privacy Master Key at authNoPriv, which nothing would use, included.
+  // Level -- a privacy Master Key at authNoPriv, which nothing would use, included. A password
+  // shorter than minimumPasswordLength completes it with Errc::PasswordTooShort instead, where the
+  // Security Level uses that password and wherever one is given at all (Password.hpp).
   //
   // Stopping: refuses new work, closes the sockets and fails every outstanding operation with
   // Errc::ClientStopped. Idempotent, safe from any thread, and harmless before the destructor,
@@ -254,7 +256,8 @@ class Client {
  private:
   // Which Credentials a request travels under. A variant rather than two parallel stacks: from the
   // retransmission loop down the two protocols are identical, and the only places that care are
-  // where the datagram is built and where a reply is matched to it.
+  // where the datagram is built and where a reply is matched to it. Each copy of the Credentials a
+  // coroutine frame keeps wipes its secrets with it (threat model S5).
   using Auth = std::variant<Community, Credentials>;
 
   // Named because a coroutine's co_return cannot deduce a braced tuple.

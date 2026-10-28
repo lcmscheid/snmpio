@@ -77,7 +77,7 @@ class ScriptedV3Agent {
     net::ErrorCode ec;
     m_key = localizedAuthKey(m_creds, m_engineId, ec);
     m_privKey = m_creds.privProtocol == PrivProtocol::None
-                    ? Octets{}
+                    ? SecretOctets{}
                     : localizedPrivKey(m_creds, m_engineId, ec);
   }
   void setBoots(std::int32_t boots) noexcept { m_boots = boots; }
@@ -225,8 +225,8 @@ class ScriptedV3Agent {
   DeliveryPlan m_delivery;
   ReplySender m_sender{m_socket};
   Octets m_engineId;
-  Octets m_key;
-  Octets m_privKey;
+  SecretOctets m_key;
+  SecretOctets m_privKey;
   std::int32_t m_boots = 3;
   std::int32_t m_time = 1000;
   net::UdpEndpoint m_from;

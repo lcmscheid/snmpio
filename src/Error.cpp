@@ -3,6 +3,7 @@
 #include <string>
 #include <system_error>
 
+#include <snmpio/Password.hpp>
 #include <snmpio/Pdu.hpp>
 
 namespace snmpio {
@@ -89,8 +90,9 @@ class SnmpioCategory final : public net::ErrorCategory {
         return "message security model is not USM";
       case Errc::BadMessageFlags:
         return "message flags are not a single Octet, or claim privacy without authentication";
-      case Errc::EmptyPassword:
-        return "authentication password is empty";
+      case Errc::PasswordTooShort:
+        return "password is shorter than the " + std::to_string(minimumPasswordLength) +
+               " characters RFC 3414 requires";
       case Errc::CryptoFailure:
         return "cryptographic operation failed";
       case Errc::AuthFailed:
@@ -147,7 +149,7 @@ ErrorClass classifyErrc(Errc e) noexcept {
     case Errc::UnsupportedSecurityLevel:
     case Errc::UnsupportedPrivProtocol:
     case Errc::LegacyProviderUnavailable:
-    case Errc::EmptyPassword:
+    case Errc::PasswordTooShort:
     case Errc::AuthFailed:
     case Errc::DecryptionFailed:
     case Errc::UnknownUserName:

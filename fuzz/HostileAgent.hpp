@@ -83,8 +83,8 @@ inline std::optional<std::size_t> requestIndexOf(const Pdu& pdu) {
 }
 
 struct Keys {
-  Octets auth;
-  Octets priv;
+  SecretOctets auth;
+  SecretOctets priv;
 };
 
 // The Localized Keys for these Credentials at this engineID. Derivation is a megabyte hash per key,
@@ -504,13 +504,13 @@ class HostileAgent {
   // Level claims one the Credentials do not: the digest or the ciphertext is then simply wrong.
   [[nodiscard]] Octets encode(const V3Reply& reply) const {
     AuthProtocol auth = m_profile.creds.authProtocol;
-    Octets authKey = reply.keys.auth;
+    SecretOctets authKey = reply.keys.auth;
     if (auth == AuthProtocol::None) auth = AuthProtocol::Sha1;
     if (authKey.empty()) authKey.assign(keySize(auth), std::byte{0x5A});
     if (reply.corruptAuth) authKey.front() ^= std::byte{0xFF};
 
     PrivProtocol priv = m_profile.creds.privProtocol;
-    Octets privKey = reply.keys.priv;
+    SecretOctets privKey = reply.keys.priv;
     if (priv == PrivProtocol::None) priv = PrivProtocol::Aes128;
     if (privKey.empty()) privKey.assign(privKeySize(priv), std::byte{0xA5});
     if (reply.corruptPriv) privKey.front() ^= std::byte{0xFF};

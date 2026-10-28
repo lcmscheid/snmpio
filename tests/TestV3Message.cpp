@@ -36,7 +36,7 @@ UsmParameters params() {
   return u;
 }
 
-Octets authKey(AuthProtocol p) {
+SecretOctets authKey(AuthProtocol p) {
   net::ErrorCode ec;
   const Credentials creds{"bert",       SecurityLevel::AuthNoPriv, p,
                           "maplesyrup", PrivProtocol::None,        ""};
@@ -319,7 +319,7 @@ TEST(V3Message, RejectsTruncatedInput) {
 // Privacy
 // ---------------------------------------------------------------------------
 
-Octets privKey(AuthProtocol auth, PrivProtocol priv) {
+SecretOctets privKey(AuthProtocol auth, PrivProtocol priv) {
   net::ErrorCode ec;
   const Credentials creds{"bert", SecurityLevel::AuthPriv, auth, "maplesyrup", priv, "privatepass"};
   auto key = localizedPrivKey(creds, engineId(), ec);

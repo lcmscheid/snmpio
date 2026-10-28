@@ -30,6 +30,7 @@ add_executable(snmpio_tests
   TestInteropWalk.cpp
   TestOid.cpp
   TestPdu.cpp
+  TestSecrets.cpp
   TestSoakPlan.cpp
   TestUsm.cpp
   TestV3Message.cpp

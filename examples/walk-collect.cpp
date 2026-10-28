@@ -1,12 +1,15 @@
 // SNMPv3 authPriv Walk, in the coroutine form. Engine Discovery and time synchronisation happen
 // underneath and are never surfaced -- there is no session to open and nothing to call first.
 //
-//   ./example-walk-collect 127.0.0.1 16161 privsha1aes snmpio-interop 1.3.6.1.2.1.1
+//   ./example-walk-collect 127.0.0.1 16161 privsha1aes 1.3.6.1.2.1.1
+//
+// with SNMPIO_AUTH_PASSWORD and SNMPIO_PRIV_PASSWORD set in the environment.
 #include <cstdlib>
 #include <iostream>
-#include <string>
 
 #include <snmpio/Client.hpp>
+
+#include "Environment.hpp"
 
 namespace net = snmpio::net;
 
@@ -31,8 +34,9 @@ net::Awaitable<void> run(snmpio::Client& client, snmpio::Target target,
 }
 
 int main(int argc, char** argv) {
-  if (argc != 6) {
-    std::cerr << "usage: " << argv[0] << " <address> <port> <user> <password> <base-oid>\n";
+  if (argc != 5) {
+    std::cerr << "usage: SNMPIO_AUTH_PASSWORD=... SNMPIO_PRIV_PASSWORD=... " << argv[0]
+              << " <address> <port> <user> <base-oid>\n";
     return 2;
   }
 
@@ -41,19 +45,19 @@ int main(int argc, char** argv) {
                      static_cast<std::uint16_t>(std::atoi(argv[2]))};
 
   // The level is required rather than inferred: a Client that silently downgraded authPriv would
-  // be a security hole. One password here drives both keys, which is a convenience of this
-  // example and not of the protocol -- USM keeps them separate.
+  // be a security hole. Two passwords, one per key, from the environment: USM keeps the secrets
+  // separate, and so does this example.
   snmpio::Credentials credentials;
   credentials.userName = argv[3];
   credentials.level = snmpio::SecurityLevel::AuthPriv;
   credentials.authProtocol = snmpio::AuthProtocol::Sha1;
-  credentials.authPassword = argv[4];
+  credentials.authPassword = passwordFrom("SNMPIO_AUTH_PASSWORD");
   credentials.privProtocol = snmpio::PrivProtocol::Aes128;
-  credentials.privPassword = argv[4];
+  credentials.privPassword = passwordFrom("SNMPIO_PRIV_PASSWORD");
 
-  const auto base = snmpio::Oid::parse(argv[5]);
+  const auto base = snmpio::Oid::parse(argv[4]);
   if (!base) {
-    std::cerr << "bad base OID: " << argv[5] << "\n";
+    std::cerr << "bad base OID: " << argv[4] << "\n";
     return 2;
   }
 

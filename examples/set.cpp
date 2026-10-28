@@ -1,6 +1,8 @@
 // SNMPv3 authPriv SET, in the callback form: writes sysContact.0 under SHA-256 and AES-128.
 //
-//   ./example-set 127.0.0.1 16161 writer-privsha256aes snmpio-interop "ops@example.net"
+//   ./example-set 127.0.0.1 16161 writer-privsha256aes "ops@example.net"
+//
+// with SNMPIO_AUTH_PASSWORD and SNMPIO_PRIV_PASSWORD set in the environment.
 //
 // Against the interop snmpd, a user that may only read -- privsha256aes, with the same protocols
 // -- is refused, and the refusal is printed as the Agent sent it.
@@ -11,9 +13,12 @@
 
 #include <snmpio/Client.hpp>
 
+#include "Environment.hpp"
+
 int main(int argc, char** argv) {
-  if (argc != 6) {
-    std::cerr << "usage: " << argv[0] << " <address> <port> <user> <password> <sysContact>\n";
+  if (argc != 5) {
+    std::cerr << "usage: SNMPIO_AUTH_PASSWORD=... SNMPIO_PRIV_PASSWORD=... " << argv[0]
+              << " <address> <port> <user> <sysContact>\n";
     return 2;
   }
 
@@ -25,19 +30,20 @@ int main(int argc, char** argv) {
   target.endpoint = {net::asio::ip::make_address(argv[1]),
                      static_cast<std::uint16_t>(std::atoi(argv[2]))};
 
-  // Usm.hpp lists the other authentication and privacy protocols. One password drives both keys
-  // here, which is a convenience of this example and not of the protocol.
+  // Usm.hpp lists the other authentication and privacy protocols. Two passwords, one per key, as
+  // USM intends: a privacy password shared with authentication is lost with it. Each must be at
+  // least snmpio::minimumPasswordLength characters, or the SET fails with Errc::PasswordTooShort.
   snmpio::Credentials credentials;
   credentials.userName = argv[3];
   credentials.level = snmpio::SecurityLevel::AuthPriv;
   credentials.authProtocol = snmpio::AuthProtocol::Sha256;
-  credentials.authPassword = argv[4];
+  credentials.authPassword = passwordFrom("SNMPIO_AUTH_PASSWORD");
   credentials.privProtocol = snmpio::PrivProtocol::Aes128;
-  credentials.privPassword = argv[4];
+  credentials.privPassword = passwordFrom("SNMPIO_PRIV_PASSWORD");
 
   // A SET carries Values, not just names. sysContact is a DisplayString, which is an OCTET STRING
   // on the wire -- Octets, not std::string, since nothing obliges one to be text.
-  const std::string contact = argv[5];
+  const std::string contact = argv[4];
   snmpio::Octets octets;
   for (const char c : contact) octets.push_back(static_cast<std::byte>(c));
   const snmpio::Varbind sysContact{snmpio::Oid{1, 3, 6, 1, 2, 1, 1, 4, 0}, octets};

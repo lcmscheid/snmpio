@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cstdint>
 #include <functional>
@@ -1343,18 +1344,18 @@ TEST(ClientV3MasterKey, AWrongLengthMasterKeyIsRefused) {
   const auto sha1Key = passwordToKey(AuthProtocol::Sha1, "maplesyrup", ec);
   ASSERT_FALSE(ec) << ec.message();
   const auto good = withMasterKeys(privCredentials(PrivProtocol::Aes128));
-  const auto shortened = [](Octets key) {
+  const auto shortened = [](SecretOctets key) {
     key.pop_back();
     return key;
   };
-  const auto lengthened = [](Octets key) {
+  const auto lengthened = [](SecretOctets key) {
     key.push_back(std::byte{0});
     return key;
   };
 
   std::vector<Credentials> cases;
   for (const auto& key :
-       {shortened(*good.authMasterKey), lengthened(*good.authMasterKey), Octets{}, sha1Key}) {
+       {shortened(*good.authMasterKey), lengthened(*good.authMasterKey), SecretOctets{}, sha1Key}) {
     auto authWrong = good;
     authWrong.authMasterKey = key;
     cases.push_back(authWrong);
@@ -1424,7 +1425,7 @@ TEST(ClientV3MasterKey, AnUnusedPrivacyMasterKeyIsStillChecked) {
 
   auto creds = withMasterKeys(credentials(AuthProtocol::Sha256));
   ASSERT_EQ(creds.level, SecurityLevel::AuthNoPriv);
-  creds.privMasterKey = Octets(3, std::byte{0});
+  creds.privMasterKey = SecretOctets(3, std::byte{0});
   f.client.asyncGet(targetFor(agent), creds, {sysDescr}, f.requestToken());
   f.run();
 
@@ -1485,6 +1486,222 @@ TEST(ClientV3MasterKey, OnePasswordUnderTwoHashesIsTwoMasterKeys) {
   // The second fails at the Agent, which holds the SHA-1 user; the derivation happened regardless.
   EXPECT_EQ(detail::CacheView::counts(f.client).masterKeyDerivations, 2U);
   EXPECT_EQ(detail::CacheView::counts(f.client).masterKeys, 2U);
+}
+
+// RFC 3414 section 11.2: a password is at least 8 characters. Refused before anything is sent,
+// Engine Discovery included, as an argument out of range is -- for either secret.
+TEST(ClientV3Password, ASevenCharacterPasswordIsRefused) {
+  for (const bool privacy : {false, true}) {
+    Fixture f;
+    ScriptedV3Agent agent(f.io, privCredentials(PrivProtocol::Aes128), echoAnswer);
+    f.agent = &agent;
+
+    auto creds = privCredentials(PrivProtocol::Aes128);
+    (privacy ? creds.privPassword : creds.authPassword) = "seven77";
+    f.client.asyncGet(targetFor(agent), creds, {sysDescr}, f.requestToken());
+    f.run();
+
+    EXPECT_EQ(f.ec, Errc::PasswordTooShort)
+        << (privacy ? "privacy" : "authentication") << ": " << f.ec.message();
+    EXPECT_EQ(agent.requestsSeen(), 0) << "nothing is sent";
+  }
+}
+
+TEST(ClientV3Password, AnEightCharacterPasswordIsAccepted) {
+  const Credentials creds{"bert",     SecurityLevel::AuthPriv, AuthProtocol::Sha256,
+                          "authpass", PrivProtocol::Aes128,    "privpass"};
+  ASSERT_EQ(creds.authPassword.size(), 8U);
+  ASSERT_EQ(creds.privPassword.size(), 8U);
+  Fixture f;
+  ScriptedV3Agent agent(f.io, creds, echoAnswer);
+  f.agent = &agent;
+
+  f.client.asyncGet(targetFor(agent), creds, {sysDescr}, f.requestToken());
+  f.run();
+
+  EXPECT_FALSE(f.ec) << f.ec.message();
+  ASSERT_EQ(f.response.varbinds.size(), 1U);
+  EXPECT_EQ(f.response.varbinds[0].name, sysDescr);
+}
+
+// Empty is shorter than 8 too, where the Security Level needs the password; where it does not, an
+// empty password is no password, and the usual way to leave the privacy secret unset.
+TEST(ClientV3Password, AnEmptyPasswordIsRefusedOnlyWhereTheLevelNeedsIt) {
+  {
+    Fixture f;
+    ScriptedV3Agent agent(f.io, credentials(), echoAnswer);
+    f.agent = &agent;
+    auto creds = credentials();
+    creds.authPassword.clear();
+    f.client.asyncGet(targetFor(agent), creds, {sysDescr}, f.requestToken());
+    f.run();
+    EXPECT_EQ(f.ec, Errc::PasswordTooShort) << f.ec.message();
+    EXPECT_EQ(agent.requestsSeen(), 0);
+  }
+  {
+    Fixture f;
+    ScriptedV3Agent agent(f.io, credentials(), echoAnswer);
+    f.agent = &agent;
+    ASSERT_TRUE(credentials().privPassword.empty());
+    f.client.asyncGet(targetFor(agent), credentials(), {sysDescr}, f.requestToken());
+    f.run();
+    EXPECT_FALSE(f.ec) << f.ec.message();
+  }
+}
+
+// A short password the level does not use is still a mistake in the Credentials, as an unused
+// Master Key of the wrong width is (AnUnusedPrivacyMasterKeyIsStillChecked).
+TEST(ClientV3Password, AnUnusedShortPrivacyPasswordIsStillChecked) {
+  Fixture f;
+  ScriptedV3Agent agent(f.io, credentials(), echoAnswer);
+  f.agent = &agent;
+
+  auto creds = credentials();
+  ASSERT_EQ(creds.level, SecurityLevel::AuthNoPriv);
+  creds.privPassword = "short";
+  f.client.asyncGet(targetFor(agent), creds, {sysDescr}, f.requestToken());
+  f.run();
+
+  EXPECT_EQ(f.ec, Errc::PasswordTooShort) << f.ec.message();
+  EXPECT_EQ(agent.requestsSeen(), 0);
+}
+
+// Both Walk styles check the Credentials as a request does, before any Batch is asked for: the
+// streaming one and the collecting one, for either secret.
+TEST(ClientV3Password, AWalkWithASevenCharacterPasswordIsRefused) {
+  for (const bool collect : {false, true}) {
+    for (const bool privacy : {false, true}) {
+      Fixture f;
+      ScriptedV3Agent agent(f.io, privCredentials(PrivProtocol::Aes128), echoAnswer);
+      f.agent = &agent;
+
+      auto creds = privCredentials(PrivProtocol::Aes128);
+      (privacy ? creds.privPassword : creds.authPassword) = "seven77";
+      int batches = 0;
+      if (collect) {
+        f.client.asyncWalkCollect(targetFor(agent), creds, Oid{1, 3, 6, 1, 2, 1, 1}, WalkOptions{},
+                                  f.collectToken());
+      } else {
+        f.client.asyncWalk(
+            targetFor(agent), creds, Oid{1, 3, 6, 1, 2, 1, 1}, WalkOptions{},
+            [&](std::span<const Varbind>) {
+              ++batches;
+              return true;
+            },
+            [&](net::ErrorCode e) {
+              f.ec = e;
+              f.finish();
+            });
+      }
+      f.run();
+
+      const auto* what = privacy ? "privacy" : "authentication";
+      const auto* how = collect ? "asyncWalkCollect" : "asyncWalk";
+      EXPECT_EQ(f.ec, Errc::PasswordTooShort) << how << ", " << what << ": " << f.ec.message();
+      EXPECT_EQ(batches, 0) << how << ", " << what;
+      EXPECT_EQ(agent.requestsSeen(), 0) << how << ", " << what << ": nothing is sent";
+    }
+  }
+}
+
+TEST(ClientV3Password, AWalkWithEightCharacterPasswordsIsAccepted) {
+  const Credentials creds{"bert",     SecurityLevel::AuthPriv, AuthProtocol::Sha256,
+                          "authpass", PrivProtocol::Aes128,    "privpass"};
+  for (const bool collect : {false, true}) {
+    Fixture f;
+    std::uint32_t next = 1;
+    ScriptedV3Agent agent(f.io, creds, [&](const Pdu&) {
+      Pdu p;
+      p.type = PduType::Response;
+      p.varbinds = {next > 3 ? Varbind{Oid{1, 3, 6, 1, 2, 1, 2, 1, 0}, Counter32{7}}  // past it
+                             : Varbind{Oid{1, 3, 6, 1, 2, 1, 1, next, 0}, Counter32{next}}};
+      ++next;
+      return p;
+    });
+    f.agent = &agent;
+
+    std::size_t walked = 0;
+    if (collect) {
+      f.client.asyncWalkCollect(targetFor(agent), creds, Oid{1, 3, 6, 1, 2, 1, 1}, WalkOptions{1},
+                                f.collectToken());
+    } else {
+      f.client.asyncWalk(
+          targetFor(agent), creds, Oid{1, 3, 6, 1, 2, 1, 1}, WalkOptions{1},
+          [&](std::span<const Varbind> batch) {
+            walked += batch.size();
+            return true;
+          },
+          [&](net::ErrorCode e) {
+            f.ec = e;
+            f.finish();
+          });
+    }
+    f.run();
+
+    const auto* how = collect ? "asyncWalkCollect" : "asyncWalk";
+    EXPECT_FALSE(f.ec) << how << ": " << f.ec.message();
+    EXPECT_EQ(collect ? f.collected.size() : walked, 3U) << how;
+  }
+}
+
+// A level that names no protocol for a secret is refused for the missing protocol, which is the
+// mistake, not for the password nothing would have used.
+TEST(ClientV3Password, AMissingProtocolIsReportedAheadOfItsMissingPassword) {
+  struct Case {
+    Credentials creds;
+    Errc expected = Errc::Ok;
+  };
+  const std::array<Case, 2> cases = {{
+      {Credentials{"bert", SecurityLevel::AuthNoPriv, AuthProtocol::None, "", PrivProtocol::None,
+                   ""},
+       Errc::UnsupportedAuthProtocol},
+      {credentials(AuthProtocol::Sha256, SecurityLevel::AuthPriv), Errc::UnsupportedPrivProtocol},
+  }};
+  for (const auto& c : cases) {
+    Fixture f;
+    ScriptedV3Agent agent(f.io, credentials(), echoAnswer);
+    f.agent = &agent;
+    f.client.asyncGet(targetFor(agent), c.creds, {sysDescr}, f.requestToken());
+    f.run();
+    EXPECT_EQ(f.ec, c.expected) << f.ec.message();
+    EXPECT_EQ(agent.requestsSeen(), 0);
+  }
+}
+
+// Only an empty password defers to the missing protocol. A short one is a password given, and
+// refused as one, whatever protocol it was given for.
+TEST(ClientV3Password, AShortPasswordForAMissingProtocolIsStillTooShort) {
+  const std::array<Credentials, 2> cases = {{
+      Credentials{"bert", SecurityLevel::AuthNoPriv, AuthProtocol::None, "short",
+                  PrivProtocol::None, ""},
+      Credentials{"bert", SecurityLevel::AuthPriv, AuthProtocol::Sha256, "maplesyrup",
+                  PrivProtocol::None, "short"},
+  }};
+  for (const auto& creds : cases) {
+    Fixture f;
+    ScriptedV3Agent agent(f.io, credentials(), echoAnswer);
+    f.agent = &agent;
+    f.client.asyncGet(targetFor(agent), creds, {sysDescr}, f.requestToken());
+    f.run();
+    EXPECT_EQ(f.ec, Errc::PasswordTooShort) << f.ec.message();
+    EXPECT_EQ(agent.requestsSeen(), 0);
+  }
+}
+
+// A stopped Client says so ahead of anything wrong with the Credentials, as it does ahead of an
+// argument out of range.
+TEST(ClientV3Password, AStoppedClientSaysSoAheadOfAShortPassword) {
+  Fixture f;
+  ScriptedV3Agent agent(f.io, credentials(), echoAnswer);
+  f.agent = &agent;
+
+  auto creds = credentials();
+  creds.authPassword = "seven77";
+  f.client.stop();
+  f.client.asyncGet(targetFor(agent), creds, {sysDescr}, f.requestToken());
+  f.run();
+
+  EXPECT_EQ(f.ec, Errc::ClientStopped) << f.ec.message();
 }
 
 }  // namespace

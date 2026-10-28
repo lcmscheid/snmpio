@@ -101,7 +101,7 @@ class ScriptedV3Agent {
   // it go at a moment of its own choosing, as a reply delayed in the network would arrive. Unlike
   // a delayed delivery, the order against the other replies is the test's, not a timer's. Leave the
   // reply's boots and time unset and they are the Agent's clock now, not as it was when it was
-  // asked.
+  // asked. It goes out as one copy, at once: setDelivery's plan is not consulted.
   void answerLate(const Request& req, Reply reply) {
     send(std::move(reply), req.message.header.msgId, req.message.scoped.pdu.requestId, {});
   }

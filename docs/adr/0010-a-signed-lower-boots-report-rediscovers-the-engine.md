@@ -45,7 +45,10 @@ The flag that is cleared belongs to the Engine, so every Target reaching it stop
 until the rediscovery completes. That is the same window the first discovery opens. Only Engine
 Discovery's time-sync phase marks an Engine synced again. A signed Response arriving late at the
 old pair is still adopted, as step 7(b)(1) allows, but it cannot stand in for the rediscovery. An
-earlier version let it, which failed the request whose Report had forced the rediscovery (#43).
+earlier version let it, which failed the request whose Report had forced the rediscovery (#43). The
+same Response arriving *after* the rediscovery is still adopted, because its higher boots looks
+like a restart. A request then fails if that happens before its retry goes out. That window is
+open (#84).
 
 A captured Report is useful to an attacker only if its `msgID` matches a request still waiting for
 an answer, and `msgID`s do not repeat within one Client. A recording from an earlier process costs

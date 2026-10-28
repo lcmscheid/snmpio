@@ -421,11 +421,18 @@ TEST(ClientV3, AForcedResyncHappensAtMostOncePerRequest) {
 // stand in for the time-sync phase the rediscovery owes. Had it done so, the retry would go out at
 // boots 3 and fail, since no request gets a second forced resync.
 TEST(ClientV3, ALateSignedResponseDoesNotCancelAPendingRediscovery) {
-  net::IoContext io;
-  Client client(io.get_executor());
-  ScriptedV3Agent agent(io, credentials(), echoAnswer);
-  test::CompletionOracle reported(io);  // asks for sysDescr, and meets the lower-boots Report
-  test::CompletionOracle late(io);      // asks for sysUpTime, and its Response is held back
+  // The Engine's clock as the cache settled it, and as it is after the reset.
+  constexpr std::int32_t oldBoots = 3;
+  constexpr std::int32_t oldTime = 1000;
+  constexpr std::int32_t resetBoots = 1;
+  constexpr std::int32_t resetTime = 50;
+
+  Fixture f;
+  f.expectedCompletions = 2;
+  ScriptedV3Agent agent(f.io, credentials(), echoAnswer);
+  f.agent = &agent;
+  test::CompletionOracle reported(f.io);  // asks for sysDescr, and meets the lower-boots Report
+  test::CompletionOracle late(f.io);      // asks for sysUpTime, and its Response is held back
 
   std::optional<ScriptedV3Agent::Request> reportedRequest;
   std::optional<ScriptedV3Agent::Request> lateRequest;
@@ -434,6 +441,8 @@ TEST(ClientV3, ALateSignedResponseDoesNotCancelAPendingRediscovery) {
   int timeSyncPhases = 0;
   std::vector<std::int32_t> bootsTheReportedRequestCarried;
 
+  agent.setBoots(oldBoots);
+  agent.setTime(oldTime);
   agent.setResponder(
       [&](const ScriptedV3Agent::Request& req) -> std::optional<ScriptedV3Agent::Reply> {
         if (isTimeSyncPhase(req)) ++timeSyncPhases;
@@ -442,16 +451,16 @@ TEST(ClientV3, ALateSignedResponseDoesNotCancelAPendingRediscovery) {
         if (isReported) bootsTheReportedRequestCarried.push_back(req.message.security.boots);
 
         if (!reset && (isReported || isLate)) {
-          // Hold whichever arrives first, so that both were sent at boots 3 before the reset.
+          // Hold whichever arrives first, so that both were sent at the old boots before the reset.
           (isReported ? reportedRequest : lateRequest) = req;
           if (!reportedRequest || !lateRequest) return std::nullopt;
-          // Signed at boots 3 and time 1000, before the reset, and not yet sent.
+          // Signed at the old clock, before the reset, and not yet sent.
           lateResponse = agent.behaveLikeACompliantAgent(*lateRequest);
-          lateResponse->boots = 3;
-          lateResponse->time = 1000;
+          lateResponse->boots = oldBoots;
+          lateResponse->time = oldTime;
           reset = true;
-          agent.setBoots(1);
-          agent.setTime(50);
+          agent.setBoots(resetBoots);
+          agent.setTime(resetTime);
           agent.answerLate(*reportedRequest, *agent.behaveLikeACompliantAgent(*reportedRequest));
           return std::nullopt;
         }
@@ -465,15 +474,10 @@ TEST(ClientV3, ALateSignedResponseDoesNotCancelAPendingRediscovery) {
   // Long enough that nothing is retransmitted: every datagram here is one the test chose.
   Target target = targetFor(agent);
   target.timeout = std::chrono::seconds(5);
-  int completions = 0;
-  const auto completed = [&](net::ErrorCode, const Response&) {
-    if (++completions < 2) return;
-    client.stop();
-    agent.close();
-  };
-  client.asyncGet(target, credentials(), {sysDescr}, reported.handler(completed));
-  client.asyncGet(target, credentials(), {sysUpTime}, late.handler(completed));
-  io.run();
+  const auto finish = [&f](net::ErrorCode, const Response&) { f.finish(); };
+  f.client.asyncGet(target, credentials(), {sysDescr}, reported.handler(finish));
+  f.client.asyncGet(target, credentials(), {sysUpTime}, late.handler(finish));
+  f.run();
 
   ASSERT_TRUE(reset) << "the Agent never saw both requests";
   EXPECT_TRUE(late.completedExactlyOnce({net::ErrorCode{}}));
@@ -482,7 +486,7 @@ TEST(ClientV3, ALateSignedResponseDoesNotCancelAPendingRediscovery) {
   // The first discovery's, and the rediscovery's.
   EXPECT_EQ(timeSyncPhases, 2);
   // The request at the old boots, and its retry at the rediscovered one.
-  EXPECT_EQ(bootsTheReportedRequestCarried, (std::vector<std::int32_t>{3, 1}));
+  EXPECT_EQ(bootsTheReportedRequestCarried, (std::vector<std::int32_t>{oldBoots, resetBoots}));
 }
 
 // The direction that was always right stays as it was: a signed Report naming a *higher* boots is

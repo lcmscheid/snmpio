@@ -336,6 +336,12 @@ bool isTimeSyncPhase(const ScriptedV3Agent::Request& req) {
   return !req.message.security.engineId.empty() && req.message.security.boots == 0;
 }
 
+// Which of a test's requests this is, told apart by the first name it asks for.
+bool asksFor(const ScriptedV3Agent::Request& req, const Oid& name) {
+  const auto& varbinds = req.message.scoped.pdu.varbinds;
+  return !varbinds.empty() && varbinds.front().name == name;
+}
+
 // Criterion: the signed notInTimeWindows Report from an Engine now at a lower boots is the Engine
 // telling us its real clock, and the cache is rediscovered from it rather than refusing it forever.
 TEST(ClientV3, RediscoversAnEngineWhoseBootsWentBackwards) {
@@ -431,12 +437,8 @@ TEST(ClientV3, ALateSignedResponseDoesNotCancelAPendingRediscovery) {
   agent.setResponder(
       [&](const ScriptedV3Agent::Request& req) -> std::optional<ScriptedV3Agent::Reply> {
         if (isTimeSyncPhase(req)) ++timeSyncPhases;
-        const auto asksFor = [&req](const Oid& name) {
-          const auto& varbinds = req.message.scoped.pdu.varbinds;
-          return !varbinds.empty() && varbinds.front().name == name;
-        };
-        const bool isReported = asksFor(sysDescr);
-        const bool isLate = asksFor(sysUpTime);
+        const bool isReported = asksFor(req, sysDescr);
+        const bool isLate = asksFor(req, sysUpTime);
         if (isReported) bootsTheReportedRequestCarried.push_back(req.message.security.boots);
 
         if (!reset && (isReported || isLate)) {
@@ -972,6 +974,66 @@ TEST(ClientV3, SynchronisesTimeWhenAnUnauthenticatedTargetIsLaterAuthenticated) 
   // Had the authenticated request reused the unauthenticated discovery's boots/time, the Agent
   // would have rejected it as untimely and this would be Errc::NotInTimeWindow.
   EXPECT_FALSE(f.ec) << f.ec.message();
+}
+
+// The same, with both requests issued at once: the authenticated one queues behind the discovery
+// the unauthenticated one started, which on its own would stop after its identity phase. The pair
+// that phase recorded is unsigned, so the discovery has to go on to a time-sync phase -- carrying
+// that pair instead would leave the Engine unsynced, and every later reply unchecked against the
+// Time Window.
+TEST(ClientV3, AnAuthenticatedRequestQueuedBehindAnUnauthenticatedDiscoveryStillSynchronises) {
+  Fixture f;
+  f.expectedCompletions = 2;
+  ScriptedV3Agent agent(f.io, credentials(), echoAnswer);
+  f.agent = &agent;
+
+  int timeSyncPhases = 0;
+  int authenticatedAttempts = 0;
+  agent.setResponder([&](const ScriptedV3Agent::Request& req) {
+    if (isTimeSyncPhase(req)) ++timeSyncPhases;
+    if (asksFor(req, sysUpTime)) ++authenticatedAttempts;
+    return agent.behaveLikeACompliantAgent(req);
+  });
+
+  const auto target = targetFor(agent);
+  net::ErrorCode noAuthEc;
+  f.client.asyncGet(target, credentials(AuthProtocol::None, SecurityLevel::NoAuthNoPriv),
+                    {sysDescr}, [&](net::ErrorCode e, const Response&) {
+                      noAuthEc = e;
+                      f.finish();
+                    });
+  f.client.asyncGet(target, credentials(), {sysUpTime}, f.requestToken());
+  f.run();
+
+  EXPECT_FALSE(noAuthEc) << noAuthEc.message();
+  EXPECT_FALSE(f.ec) << f.ec.message();
+  EXPECT_EQ(timeSyncPhases, 1) << "the authenticated request went out on an unsigned pair";
+  EXPECT_EQ(authenticatedAttempts, 1);
+}
+
+// The time-sync phase that queued request asks for is its own: when it fails, the unauthenticated
+// request the discovery was started for still has the engineID it needed, and succeeds.
+TEST(ClientV3, AFailedTimeSyncPhaseOwedToAQueuedRequestFailsOnlyThatRequest) {
+  Fixture f;
+  f.expectedCompletions = 2;
+  ScriptedV3Agent agent(f.io, credentials(), echoAnswer);
+  f.agent = &agent;
+
+  const auto target = targetFor(agent);
+  auto wrongPassword = credentials();
+  wrongPassword.authPassword = "notthepassword";
+  net::ErrorCode noAuthEc;
+  f.client.asyncGet(target, credentials(AuthProtocol::None, SecurityLevel::NoAuthNoPriv),
+                    {sysDescr}, [&](net::ErrorCode e, const Response&) {
+                      noAuthEc = e;
+                      f.finish();
+                    });
+  f.client.asyncGet(target, wrongPassword, {sysUpTime}, f.requestToken());
+  f.run();
+
+  EXPECT_FALSE(noAuthEc) << "the queued request's failure failed the request it queued behind: "
+                         << noAuthEc.message();
+  EXPECT_EQ(f.ec, make_error_code(Errc::AuthFailed));
 }
 
 // ADR-0003: "Engine Discovery is single-flight per Engine and outlives any individual waiter, so

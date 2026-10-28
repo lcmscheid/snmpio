@@ -32,9 +32,9 @@ class MessageIds {
   MessageIds(MessageIds&&) = delete;
   MessageIds& operator=(MessageIds&&) = delete;
 
-  // The next ID, in 0..2^31-1. Nothing, with CryptoFailure, if OpenSSL has no key to give or
-  // cannot encrypt.
-  [[nodiscard]] std::optional<std::int32_t> next(net::ErrorCode& ec);
+  // The next ID, in 0..2^31-1. CryptoFailure, and no ID, if OpenSSL has no key to give or cannot
+  // encrypt.
+  [[nodiscard]] std::int32_t next(net::ErrorCode& ec);
 
  private:
   bool keyed(net::ErrorCode& ec);

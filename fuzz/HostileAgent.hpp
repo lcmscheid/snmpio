@@ -167,10 +167,10 @@ class HostileAgent {
     return it == m_seen.end() ? nullptr : &it->second;
   }
 
-  // From now on, read what the Client sent without answering it. A reply that guessed a Message ID
-  // or request-id ahead of the Client -- the next one, say, which a sequential counter (#33) makes
-  // easy -- can complete a request whose datagram this Agent has not read by the time every
-  // request has completed. Reading what is left is what lets the oracle attribute such a reply.
+  // From now on, read what the Client sent without answering it. A reply whose Message ID or
+  // request-id the fuzz input rewrote can land on one the Client has sent but this Agent has not
+  // yet read -- a retransmission's, say -- and complete that request before every request has
+  // completed. Reading what is left is what lets the oracle attribute such a reply.
   void stopAnswering() { m_answering = false; }
 
   void close() {

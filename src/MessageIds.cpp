@@ -17,7 +17,9 @@ namespace {
 // 2: the halves are 15 and 16 bits, they trade places each round, and there are FF1's ten rounds.
 // FF1 itself is not in OpenSSL, and its big-number arithmetic buys nothing at radix 2, so this is
 // that structure with plain modular addition, around a round function that is AES-128 under the
-// Client's key -- OpenSSL's primitive, as everything cryptographic here is (ADR-0001).
+// Client's key. The primitive is OpenSSL's; the construction around it is ours, which stretches
+// CLAUDE.md's "never our own" crypto rule, deliberately: OpenSSL has no small-domain permutation,
+// and #33 asks for one. What rests on it is unpredictability of IDs, not confidentiality.
 constexpr unsigned idBits = 31;
 constexpr unsigned shortHalf = idBits / 2;         // 15
 constexpr unsigned longHalf = idBits - shortHalf;  // 16
@@ -90,13 +92,13 @@ std::optional<std::uint32_t> MessageIds::permute(std::uint32_t x) const {
   return (a << longHalf) | b;
 }
 
-std::optional<std::int32_t> MessageIds::next(net::ErrorCode& ec) {
+std::int32_t MessageIds::next(net::ErrorCode& ec) {
   ec = {};
-  if (!keyed(ec)) return std::nullopt;
+  if (!keyed(ec)) return 0;
   const auto id = permute(m_counter);
   if (!id) {
     ec = make_error_code(Errc::CryptoFailure);
-    return std::nullopt;
+    return 0;
   }
   m_counter = (m_counter + 1) & idMask;
   return static_cast<std::int32_t>(*id);

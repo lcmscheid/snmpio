@@ -556,7 +556,7 @@ class Client::Impl {
   // than of the value because it decides how far the derivation is extended: PrivProtocol::None is
   // the authentication key's row.
   std::map<std::tuple<Octets, AuthProtocol, SecretOctets, PrivProtocol>, SecretOctets> m_keys;
-  // One sequence for both the v3 msgID and the PDU request-id, so that the two protocols cannot
+  // One generator for both the v3 msgID and the PDU request-id, so that the two protocols cannot
   // collide in m_pending -- which is keyed on the msgID for v3, as CONTEXT.md requires, because a
   // message we cannot open must still be attributable. Unpredictable, and fresh for every
   // transmission (see transact).
@@ -907,12 +907,12 @@ net::Awaitable<net::ErrorCode> Client::Impl::transact(Ref self, Target target, E
     // A fresh ID for each transmission, as RFC 3412 section 6.2 asks: a retransmission that
     // repeated one would tell an observer which reply to forge for longest. Re-encoded rather than
     // patched, so that at authPriv each transmission has a salt of its own as well.
-    const auto id = m_ids.next(ec);
-    if (!id) break;
-    const auto datagram = encode(*id, ec);
+    const std::int32_t id = m_ids.next(ec);
     if (ec) break;
-    m_pending.emplace(*id, pending);
-    ids.push_back(*id);
+    const auto datagram = encode(id, ec);
+    if (ec) break;
+    m_pending.emplace(id, pending);
+    ids.push_back(id);
 
     co_await sock->async_send_to(net::asio::buffer(datagram), target.endpoint,
                                  redirect_error(use_awaitable, ec));

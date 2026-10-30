@@ -10,7 +10,7 @@ automated half is done; the hardware checklist remains.
 
 - **`CONTEXT.md`** — the domain glossary. Its _Avoid:_ lists are binding: this codebase says
   Target, not "device"; Command Generator, not "manager"; Credentials, not "auth config".
-- **`docs/adr/`** — eleven decisions, several of which look wrong until you read why. If a change
+- **`docs/adr/`** — twelve decisions, several of which look wrong until you read why. If a change
   contradicts one, say so explicitly rather than quietly overriding it.
 
 ## Build
@@ -48,11 +48,15 @@ code changes the new major asks for, and nothing else. Use `/usr/bin/clang-forma
 disabled check carries its reason in the file; add yours the same way rather than silently
 widening the list. `tests/` and `fuzz/` have an overlay for test idioms.
 
-**Crypto** — OpenSSL EVP, never our own (ADR-0001). Key derivation is pinned to RFC 3414's own
-MD5 and SHA-1 vectors; the SHA-2 rows have no published vectors and were generated from an
-independent implementation, so they pin against drift rather than against being wrong. The privacy
-key rows are the same arrangement, generated from gosnmp — no RFC publishes AES-192/256 key
-extension vectors, because neither extension is in an RFC.
+**Crypto** — OpenSSL EVP (ADR-0001), never our own. Every primitive is OpenSSL's (EVP for ciphers
+and digests, RAND for keys). A construction around one is allowed only when a published
+specification defines it: RFC 3414's password-to-key, the key extensions' IETF drafts, and FF1 for
+Message IDs (ADR-0012). Never one of our own design. Key derivation is pinned to RFC 3414's own MD5
+and SHA-1 vectors; the SHA-2 rows have no published vectors and were generated from an independent
+implementation, so they pin against drift rather than against being wrong. The privacy key rows
+are the same arrangement, generated from gosnmp — no RFC publishes AES-192/256 key extension
+vectors, because neither extension is in an RFC. FF1's rows are too: an independent FF1, checked
+against NIST's samples first.
 
 **Codec posture** — lenient where leniency is unambiguous (redundant integer sign padding,
 non-minimal long-form lengths), strict where it is not (indefinite length, high-tag-number form,

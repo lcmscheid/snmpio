@@ -24,6 +24,7 @@ namespace snmpio {
 
 namespace detail {
 struct CacheView;
+struct MessageIdView;
 }  // namespace detail
 
 // What a completed request hands back.
@@ -310,6 +311,7 @@ class Client {
   }
 
   friend struct detail::CacheView;
+  friend struct detail::MessageIdView;
 
   // Everything the Client knows, and the coroutines that act on it, co-owned by each of those
   // coroutines (ADR-0009). Defined in Client.cpp.

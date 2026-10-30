@@ -118,6 +118,7 @@ add_library(snmpio
   src/BerWriter.cpp
   src/Client.cpp
   src/Error.cpp
+  src/MessageIdGenerator.cpp
   src/Oid.cpp
   src/Password.cpp
   src/Pdu.cpp

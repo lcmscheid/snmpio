@@ -52,6 +52,12 @@ class ScriptedAgent {
   void setDelivery(DeliveryPlan plan) { m_delivery = std::move(plan); }
   [[nodiscard]] const DeliveryCounts& deliveries() const noexcept { return m_sender.counts(); }
 
+  // Answers an earlier request now, as ScriptedV3Agent::answerLate does: a Responder holds a reply
+  // back by answering silence, and lets it go at a moment of its own choosing. It quotes that
+  // request's request-id, goes to whoever sent the latest request, and goes out as one copy, at
+  // once.
+  void answerLate(const V2cMessage& request, Pdu reply) { send(request, std::move(reply), {}); }
+
   void close() {
     m_sender.cancel();
     net::ErrorCode ignored;
@@ -67,18 +73,19 @@ class ScriptedAgent {
           net::ErrorCode decodeEc;
           if (auto msg = decodeV2cMessage(std::span<const std::byte>(m_buf).first(n), decodeEc)) {
             if (auto reply = m_responder(*msg)) {
-              reply->requestId = msg->pdu.requestId;
-              const auto community =
-                  m_communityOverride.empty() ? msg->community : m_communityOverride;
-              net::ErrorCode encodeEc;
-              m_out = encodeV2cMessage(community, *reply, encodeEc);
-              if (!encodeEc) {
-                m_sender.send(m_out, m_from, m_delivery ? m_delivery(msg->pdu) : ReplyDelivery{});
-              }
+              send(*msg, std::move(*reply), m_delivery ? m_delivery(msg->pdu) : ReplyDelivery{});
             }
           }
           receive();
         });
+  }
+
+  void send(const V2cMessage& request, Pdu reply, const ReplyDelivery& delivery) {
+    reply.requestId = request.pdu.requestId;
+    const auto community = m_communityOverride.empty() ? request.community : m_communityOverride;
+    net::ErrorCode encodeEc;
+    m_out = encodeV2cMessage(community, reply, encodeEc);
+    if (!encodeEc) m_sender.send(m_out, m_from, delivery);
   }
 
   net::UdpSocket m_socket;

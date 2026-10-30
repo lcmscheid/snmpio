@@ -105,6 +105,11 @@ class ScriptedV3Agent {
   void answerLate(const Request& req, Reply reply) {
     send(std::move(reply), req.message.header.msgId, req.message.scoped.pdu.requestId, {});
   }
+  // The same, quoting whichever msgID and request-id the test names: an Agent that mixed up two
+  // transmissions, or a forger that saw one ID of each.
+  void answerQuoting(std::int32_t msgId, std::int32_t requestId, Reply reply) {
+    send(std::move(reply), msgId, requestId, {});
+  }
 
   // RFC 3414 section 5's counters, so that a test says which Report it means rather than which
   // number it is.

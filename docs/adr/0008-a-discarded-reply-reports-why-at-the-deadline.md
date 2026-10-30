@@ -2,8 +2,8 @@
 
 A v3 reply this client cannot use is **dropped**, not failed: the request stays outstanding and its
 retransmission timer keeps running. That is deliberate and is not changing. UDP is spoofable and the
-`msgID` is guessable, so a client whose request could be failed by an unusable reply would be a
-client anyone on the path could cancel at will.
+`msgID` is in the clear to anyone on the path, so a client whose request could be failed by an
+unusable reply would be a client anyone on the path could cancel at will.
 
 The cost was that the *reason* went with the datagram. A request against a Target that is answering,
 but whose every reply we refuse, completed with `Errc::Timeout` — the same code a caller gets when

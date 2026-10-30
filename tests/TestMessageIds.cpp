@@ -9,6 +9,7 @@
 #include <vector>
 
 #include <snmpio/Client.hpp>
+#include <snmpio/detail/MessageIdView.hpp>
 
 #include "Deadlines.hpp"
 #include "ScriptedAgent.hpp"
@@ -20,6 +21,7 @@
 namespace snmpio {
 namespace {
 
+using detail::MessageIdView;
 using test::longDeadlineTarget;
 using test::respondWith;
 using test::ScriptedAgent;
@@ -102,7 +104,7 @@ TEST(MessageIds, ConsecutiveRequestIdsAreNotSequential) {
   const auto ids = requestIdsOfOneClient(64);
   ASSERT_EQ(ids.size(), 64U);
   // A counter would put every one a step from the last, and an Agent that sees some would know
-  // the rest -- those in flight to every other Target included.
+  // the rest -- those outstanding at every other Target included.
   EXPECT_FALSE(anyConsecutive(ids));
   EXPECT_TRUE(allDistinct(ids));
 }
@@ -309,6 +311,7 @@ TEST(MessageIds, ARequestThatCannotBeEncodedSendsNothingAndLeavesNothingBehind) 
   f.run();
 
   EXPECT_EQ(agent.requestsSeen(), 1);
+  EXPECT_EQ(MessageIdView::outstandingIds(f.client), 0U);
 }
 
 // The same at v3, where the PDU is encoded only once Engine Discovery has run.
@@ -334,6 +337,53 @@ TEST(MessageIds, AV3RequestThatCannotBeEncodedSendsNothingAndLeavesNothingBehind
   f.run();
 
   EXPECT_EQ(agent.requestsSeen(), 3);
+  EXPECT_EQ(MessageIdView::outstandingIds(f.client), 0U);
+}
+
+// The generator is stepped back while a request is outstanding, so its next draw is that request's
+// own ID, as it would be once the counter had gone all the way round. The second request must skip
+// it (RFC 3412 section 6.2): sharing it, one request would get the other's answer, or none.
+TEST(MessageIds, AnIdComeRoundAgainWhileOutstandingIsSkipped) {
+  Fixture f;
+  f.expected = 2;
+  const Oid firstAsked{1, 3, 6, 1, 4, 1, 99999, 1};
+  const Oid secondAsked{1, 3, 6, 1, 4, 1, 99999, 2};
+  const auto expectAnswerTo = [&f](const Oid& asked) {
+    return [&f, asked](net::ErrorCode ec, const Response& r) {
+      // EXPECT rather than ASSERT, so that a wrong answer still finishes, and fails, the test.
+      EXPECT_FALSE(ec) << ec.message();
+      EXPECT_EQ(r.varbinds.size(), 1U);
+      if (!r.varbinds.empty()) {
+        EXPECT_EQ(r.varbinds[0].name, asked);
+      }
+      f.finish();
+    };
+  };
+  std::vector<V2cMessage> held;
+  ScriptedAgent* self = nullptr;
+  ScriptedAgent agent(f.io, [&](const V2cMessage& msg) -> std::optional<Pdu> {
+    held.push_back(msg);
+    if (held.size() == 1) {
+      MessageIdView::rewindIds(f.client, 1);
+      f.client.asyncGet(longDeadlineTarget(*self), publicCommunity, {secondAsked},
+                        expectAnswerTo(secondAsked));
+    } else if (held.size() == 2) {
+      for (const auto& h : held) {
+        self->answerLate(h, respondWith({Varbind{h.pdu.varbinds.at(0).name, null}}));
+      }
+    }
+    return std::nullopt;
+  });
+  self = &agent;
+  f.closeAgent = [&agent] { agent.close(); };
+
+  f.client.asyncGet(longDeadlineTarget(agent), publicCommunity, {firstAsked},
+                    expectAnswerTo(firstAsked));
+  f.run();
+
+  ASSERT_EQ(held.size(), 2U);
+  EXPECT_NE(held[0].pdu.requestId, held[1].pdu.requestId);
+  EXPECT_EQ(MessageIdView::outstandingIds(f.client), 0U);
 }
 
 // Every request is held until the Agent has read them all, so that all of them are outstanding at
@@ -361,9 +411,13 @@ TEST(MessageIds, NoIdIsSharedByTwoOutstandingRequests) {
     const Oid asked{1, 3, 6, 1, 4, 1, 99999, i};
     f.client.asyncGet(longDeadlineTarget(agent), publicCommunity, {asked},
                       [&f, asked](net::ErrorCode ec, const Response& r) {
+                        // EXPECT rather than ASSERT, so that a wrong answer still finishes, and
+                        // fails, the test.
                         EXPECT_FALSE(ec) << ec.message();
-                        ASSERT_EQ(r.varbinds.size(), 1U);
-                        EXPECT_EQ(r.varbinds[0].name, asked);
+                        EXPECT_EQ(r.varbinds.size(), 1U);
+                        if (!r.varbinds.empty()) {
+                          EXPECT_EQ(r.varbinds[0].name, asked);
+                        }
                         f.finish();
                       });
   }

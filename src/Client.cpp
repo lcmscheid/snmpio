@@ -1,7 +1,8 @@
 #include <snmpio/Client.hpp>
 #include <snmpio/detail/CacheView.hpp>
+#include <snmpio/detail/MessageIdView.hpp>
 
-#include "MessageIds.hpp"
+#include "MessageIdGenerator.hpp"
 #include "Secret.hpp"
 
 #include <algorithm>
@@ -215,6 +216,10 @@ class Client::Impl {
             .masterKeyDerivations = m_masterKeyDerivations};
   }
 
+  // detail::MessageIdView's, and only safe where it says.
+  [[nodiscard]] std::size_t outstandingIds() const noexcept { return m_pending.size(); }
+  void rewindIds(std::uint32_t steps) noexcept { m_ids.rewind(steps); }
+
   // Stopping, from any thread. The flag is set at once, and the strand checks it before each
   // exchange and each Batch, so nothing begins once the strand has seen it; the cleanup that needs
   // the strand follows on it. From another thread the strand may already be past a check, mid-send
@@ -267,6 +272,7 @@ class Client::Impl {
     // Why the last unusable reply was discarded, or empty. Read only at expiry (ADR-0008).
     net::ErrorCode dropReason;
   };
+  using PendingMap = std::unordered_map<std::int32_t, std::shared_ptr<Pending>>;
 
   // What we know about one Authoritative Engine, and when we learnt it. The Engine's current time
   // is `time` advanced by the local clock since `at` -- the Time Window is checked against that
@@ -538,7 +544,7 @@ class Client::Impl {
   std::atomic<std::thread::id> m_deliverer;
   std::optional<net::UdpSocket> m_v4;
   std::optional<net::UdpSocket> m_v6;
-  std::unordered_map<std::int32_t, std::shared_ptr<Pending>> m_pending;
+  PendingMap m_pending;
   // Keyed on engineID with a separate endpoint->engineID index, as ADR-0003 requires: one Engine
   // reachable at two Targets is one cache entry, discovered once. The in-flight map below is keyed
   // on the endpoint of necessity -- learning which Engine is there is what discovery is for.
@@ -565,7 +571,7 @@ class Client::Impl {
   // collide in m_pending -- which is keyed on the msgID for v3, as CONTEXT.md requires, because a
   // message we cannot open must still be attributable. Unpredictable, and fresh for every
   // transmission (see transact).
-  detail::MessageIds m_ids;
+  detail::MessageIdGenerator m_ids;
 };
 
 Client::Client(const net::Executor& ex)
@@ -902,6 +908,25 @@ net::Awaitable<net::ErrorCode> Client::Impl::transact(Ref self, Target target, E
   // Request: m_ids is asked for one that m_pending does not hold.
   std::vector<std::int32_t> ids;
   ids.reserve(static_cast<std::size_t>(target.retries) + 1);
+  // Erased on every way out, an exception's included: a bad_alloc encoding a retransmission would
+  // otherwise leave the earlier transmissions' IDs mapped for the rest of the Client's life.
+  class ForgetIds {
+   public:
+    ForgetIds(PendingMap& pending, const std::vector<std::int32_t>& ids) noexcept
+        : m_pending(&pending), m_ids(&ids) {}
+    ForgetIds(const ForgetIds&) = delete;
+    ForgetIds& operator=(const ForgetIds&) = delete;
+    ForgetIds(ForgetIds&&) = delete;
+    ForgetIds& operator=(ForgetIds&&) = delete;
+    ~ForgetIds() {
+      for (const auto id : *m_ids) m_pending->erase(id);
+    }
+
+   private:
+    PendingMap* m_pending;
+    const std::vector<std::int32_t>* m_ids;
+  };
+  const ForgetIds forget(m_pending, ids);
 
   // Cancellation is handled here rather than thrown, so every exit still goes through the
   // bookkeeping below. Which types are observable at all is decided once per request, where the
@@ -959,8 +984,6 @@ net::Awaitable<net::ErrorCode> Client::Impl::transact(Ref self, Target target, E
       break;
     }
   }
-
-  for (const auto id : ids) m_pending.erase(id);
 
   // Terminal drops the exchange whatever else happened, including a reply that landed while the
   // signal was on its way; total lets that reply count, and ends the request otherwise. Both are
@@ -1554,6 +1577,14 @@ net::Awaitable<Client::CollectResult> Client::Impl::doWalkCollect(Ref self, Targ
 
 detail::CacheCounts detail::CacheView::counts(const Client& client) {
   return client.m_impl->cacheCounts();
+}
+
+std::size_t detail::MessageIdView::outstandingIds(const Client& client) {
+  return client.m_impl->outstandingIds();
+}
+
+void detail::MessageIdView::rewindIds(Client& client, std::uint32_t steps) {
+  client.m_impl->rewindIds(steps);
 }
 
 }  // namespace snmpio

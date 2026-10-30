@@ -1,4 +1,4 @@
-#include "MessageIds.hpp"
+#include "MessageIdGenerator.hpp"
 
 #include <algorithm>
 #include <array>
@@ -25,7 +25,6 @@ constexpr unsigned n = 31;
 constexpr unsigned u = n / 2;  // 15: A, the high half
 constexpr unsigned v = n - u;  // 16: B, the low half
 constexpr int rounds = 10;
-constexpr std::uint32_t idMask = (std::uint32_t{1} << n) - 1;
 
 constexpr std::size_t aesBlockBytes = 16;
 using Block = std::array<std::byte, aesBlockBytes>;
@@ -44,6 +43,8 @@ constexpr std::uint32_t lowBits(unsigned bits) noexcept {
   return (std::uint32_t{1} << bits) - 1;
 }
 
+constexpr std::uint32_t idMask = lowBits(n);
+
 // One AES block under the context's key: ECB, which on one block is the bare cipher.
 bool encryptBlock(evp_cipher_ctx_st* ctx, const Block& in, Block& out) {
   int written = 0;
@@ -55,15 +56,16 @@ bool encryptBlock(evp_cipher_ctx_st* ctx, const Block& in, Block& out) {
 
 }  // namespace
 
-MessageIds::MessageIds(std::span<const std::byte, keyBytes> key, std::uint32_t counter)
+MessageIdGenerator::MessageIdGenerator(std::span<const std::byte, keyBytes> key,
+                                       std::uint32_t counter)
     : m_fixedKey(key.begin(), key.end()), m_counter(counter & idMask) {}
 
-MessageIds::~MessageIds() {
+MessageIdGenerator::~MessageIdGenerator() {
   EVP_CIPHER_CTX_free(m_ctx);  // which cleanses the key schedule it holds
   cleanse(m_encryptedP.data(), m_encryptedP.size());
 }
 
-bool MessageIds::ensureKeyed(net::ErrorCode& ec) {
+bool MessageIdGenerator::ensureKeyed(net::ErrorCode& ec) {
   if (m_ctx != nullptr) return true;
   SecretOctets key = m_fixedKey;
   EVP_CIPHER* cipher = EVP_CIPHER_fetch(m_libctx, "AES-128-ECB", nullptr);
@@ -88,7 +90,7 @@ bool MessageIds::ensureKeyed(net::ErrorCode& ec) {
 }
 
 // Algorithm 7, steps 2 and 6 to 7, for one 31-bit X.
-std::uint32_t MessageIds::ff1Encrypt(std::uint32_t x, net::ErrorCode& ec) const {
+std::uint32_t MessageIdGenerator::ff1Encrypt(std::uint32_t x, net::ErrorCode& ec) {
   std::uint32_t a = x >> v;              // step 2: A = X[1..u]
   std::uint32_t bHalf = x & lowBits(v);  //         B = X[u+1..n]
   for (int i = 0; i < rounds; ++i) {
@@ -120,7 +122,11 @@ std::uint32_t MessageIds::ff1Encrypt(std::uint32_t x, net::ErrorCode& ec) const 
   return (a << v) | bHalf;
 }
 
-std::int32_t MessageIds::draw(net::ErrorCode& ec) {
+void MessageIdGenerator::rewind(std::uint32_t steps) noexcept {
+  m_counter = (m_counter - steps) & idMask;
+}
+
+std::int32_t MessageIdGenerator::draw(net::ErrorCode& ec) {
   ec = {};
   if (!ensureKeyed(ec)) return 0;
   const std::uint32_t id = ff1Encrypt(m_counter, ec);

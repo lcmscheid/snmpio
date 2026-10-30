@@ -40,9 +40,11 @@ add_executable(snmpio_tests
 
 target_link_libraries(snmpio_tests PRIVATE snmpio snmpio_warnings GTest::gtest GTest::gtest_main)
 target_include_directories(snmpio_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-# TestMessageIdGenerator.cpp tests src/MessageIds.hpp directly, a header that is not installed, and
-# hands it OpenSSL library contexts of its own to fail in.
-target_include_directories(snmpio_tests PRIVATE ${PROJECT_SOURCE_DIR}/src)
+# TestMessageIdGenerator.cpp tests src/MessageIdGenerator.hpp directly, a header that is not
+# installed, and hands it OpenSSL library contexts of its own to fail in. The private headers are
+# on that one file's include path, not the whole binary's.
+set_property(SOURCE TestMessageIdGenerator.cpp APPEND PROPERTY INCLUDE_DIRECTORIES
+  ${PROJECT_SOURCE_DIR}/src)
 target_link_libraries(snmpio_tests PRIVATE OpenSSL::Crypto)
 target_compile_definitions(snmpio_tests PRIVATE ${SNMPIO_STDLIB_HARDENING})
 

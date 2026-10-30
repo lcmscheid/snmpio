@@ -9,7 +9,7 @@
 
 #include <snmpio/Error.hpp>
 
-#include "MessageIds.hpp"
+#include "MessageIdGenerator.hpp"
 
 #include <openssl/crypto.h>
 #include <openssl/provider.h>
@@ -20,9 +20,9 @@
 namespace snmpio {
 namespace {
 
-using detail::MessageIds;
+using detail::MessageIdGenerator;
 
-using Key = std::array<std::byte, MessageIds::keyBytes>;
+using Key = std::array<std::byte, MessageIdGenerator::keyBytes>;
 
 // Upper-case hex, as the SPs print their keys.
 Key keyFromHex(std::string_view hex) {
@@ -43,7 +43,7 @@ const Key countingKey = keyFromHex("000102030405060708090A0B0C0D0E0F");
 
 constexpr auto never = [](std::int32_t) { return false; };
 
-std::int32_t draw(MessageIds& ids) {
+std::int32_t draw(MessageIdGenerator& ids) {
   net::ErrorCode ec;
   const auto id = ids.next(never, ec);
   EXPECT_FALSE(ec) << ec.message();
@@ -73,13 +73,13 @@ const std::array ff1Rows{
 
 TEST(MessageIdGenerator, IsFf1AtRadixTwoOverThirtyOneBits) {
   for (const auto& row : ff1Rows) {
-    MessageIds ids(*row.key, row.counter);
+    MessageIdGenerator ids(*row.key, row.counter);
     EXPECT_EQ(draw(ids), row.id) << "counter " << row.counter;
   }
 }
 
 TEST(MessageIdGenerator, TheCounterWrapsAtThirtyOneBits) {
-  MessageIds ids(nistKey, 0x7fffffff);
+  MessageIdGenerator ids(nistKey, 0x7fffffff);
   EXPECT_EQ(draw(ids), 0x1a5fb67c);
   EXPECT_EQ(draw(ids), 0x3e24e95c);  // the counter's 0
 }
@@ -88,7 +88,7 @@ TEST(MessageIdGenerator, TheCounterWrapsAtThirtyOneBits) {
 // construction's collisions would show, every ID inside 0..2^31-1.
 TEST(MessageIdGenerator, SixtyFiveThousandIdsAreAllDistinct) {
   constexpr std::size_t count = 65536;
-  MessageIds ids;
+  MessageIdGenerator ids;
   std::set<std::int32_t> seen;
   for (std::size_t i = 0; i < count; ++i) {
     const auto id = draw(ids);
@@ -98,18 +98,19 @@ TEST(MessageIdGenerator, SixtyFiveThousandIdsAreAllDistinct) {
   EXPECT_EQ(seen.size(), count);
 }
 
-// The counter that FF1 maps to 0 under each key, and the IDs the two after it map to.
+// Each generator starts at the counter FF1 maps to 0 under its key, so its first draw is 0, which it
+// skips: what it hands out is the next counter's ID.
 TEST(MessageIdGenerator, NeverHandsOutZero) {
-  MessageIds nist(nistKey, 0x7f4053b8);
+  MessageIdGenerator nist(nistKey, 0x7f4053b8);
   EXPECT_EQ(draw(nist), 0x168dfc62);
-  MessageIds counting(countingKey, 0x357087c6);
+  MessageIdGenerator counting(countingKey, 0x357087c6);
   EXPECT_EQ(draw(counting), 0x1d2b9496);
 }
 
 // RFC 3412 section 6.2: no re-use of a value still outstanding. Only once the counter has gone all
 // the way round can the permutation reach one, so the test says which are.
 TEST(MessageIdGenerator, SkipsAnIdStillOutstanding) {
-  MessageIds ids(nistKey, 0);
+  MessageIdGenerator ids(nistKey, 0);
   net::ErrorCode ec;
   const auto id = ids.next([](std::int32_t candidate) { return candidate == 0x3e24e95c; }, ec);
   EXPECT_FALSE(ec) << ec.message();
@@ -118,7 +119,7 @@ TEST(MessageIdGenerator, SkipsAnIdStillOutstanding) {
 }
 
 TEST(MessageIdGenerator, SkipsZeroAndOutstandingIdsInARow) {
-  MessageIds ids(nistKey, 0x7f4053b8);
+  MessageIdGenerator ids(nistKey, 0x7f4053b8);
   net::ErrorCode ec;
   const auto id = ids.next([](std::int32_t candidate) { return candidate == 0x168dfc62; }, ec);
   EXPECT_FALSE(ec) << ec.message();
@@ -146,7 +147,7 @@ TEST(MessageIdGenerator, NoKeyIsCryptoFailureAndNoId) {
   const NoProviders openssl;
   ASSERT_NE(openssl.ctx, nullptr);
   ASSERT_NE(openssl.null, nullptr);
-  MessageIds ids(openssl.ctx);
+  MessageIdGenerator ids(openssl.ctx);
   net::ErrorCode ec;
   EXPECT_EQ(ids.next(never, ec), 0);
   EXPECT_EQ(ec, make_error_code(Errc::CryptoFailure));
@@ -157,7 +158,7 @@ TEST(MessageIdGenerator, NoKeyIsCryptoFailureAndNoId) {
 TEST(MessageIdGenerator, AFailedKeyingIsTriedAgain) {
   const NoProviders openssl;
   ASSERT_NE(openssl.ctx, nullptr);
-  MessageIds ids(openssl.ctx);
+  MessageIdGenerator ids(openssl.ctx);
   net::ErrorCode ec;
   (void)ids.next(never, ec);
   ASSERT_EQ(ec, make_error_code(Errc::CryptoFailure));

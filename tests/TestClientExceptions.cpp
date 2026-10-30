@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include <atomic>
 #include <chrono>
 #include <cstddef>
 #include <new>
@@ -9,6 +10,7 @@
 
 #include <snmpio/Client.hpp>
 #include <snmpio/Usm.hpp>
+#include <snmpio/detail/MessageIdView.hpp>
 
 #include "Deadlines.hpp"
 #include "FailingAllocation.hpp"
@@ -164,6 +166,58 @@ TEST(ClientExceptions, AReceiveLoopThatThrowsStopsTheClient) {
   ASSERT_EQ(completions.size(), 3U) << "a request was left waiting out its deadline";
   for (const auto& ec : completions) EXPECT_EQ(ec, Errc::ClientStopped) << ec.message();
   EXPECT_EQ(agent.requestsSeen(), 2) << "the request after the throw was sent";
+}
+
+// ber::Writer's opening reservation for a v2c message: the first allocation encoding one makes,
+// whatever the request-id. Between the first transmission and the retransmission nothing else on
+// the Client's thread asks for 256 bytes -- the Agent is silent and runs on a thread of its own,
+// and Asio's timers do not allocate through operator new -- and failing.fired() checks it.
+constexpr std::size_t v2cEncoderReservation = 256;
+
+// An exception thrown encoding a retransmission leaves run() (L7), and takes no ID with it: the
+// first transmission's must not stay mapped for the rest of the Client's life.
+TEST(ClientExceptions, ARetransmissionThatThrowsLeavesNoIdMapped) {
+  if (!FailingAllocation::available()) GTEST_SKIP() << "this build cannot replace operator new";
+  net::IoContext agentIo;
+  std::atomic<int> seen{0};
+  ScriptedAgent agent(agentIo, [&seen](const V2cMessage&) -> std::optional<Pdu> {
+    ++seen;
+    return std::nullopt;
+  });
+  std::thread agentThread([&agentIo] { agentIo.run(); });
+
+  net::IoContext io;
+  Client client(io.get_executor());
+  // Long enough that the failure is armed well before the retransmission is due.
+  auto target = test::targetFor(agent, 1);
+  target.timeout = std::chrono::milliseconds(500);
+  client.asyncGet(target, Community("public"), {sysDescr}, [](net::ErrorCode ec, const Response&) {
+    ADD_FAILURE() << "completed with " << ec.message() << " rather than throwing";
+  });
+
+  const auto deadline = std::chrono::steady_clock::now() + longDeadline;
+  while (seen.load() == 0 && std::chrono::steady_clock::now() < deadline) {
+    io.run_one_for(std::chrono::milliseconds(5));
+  }
+  ASSERT_EQ(seen.load(), 1) << "the first transmission never arrived";
+  EXPECT_EQ(detail::MessageIdView::outstandingIds(client), 1U);
+
+  int thrown = 0;
+  {
+    const FailingAllocation failing(v2cEncoderReservation);
+    try {
+      io.run_until(deadline);
+    } catch (const std::bad_alloc&) {
+      ++thrown;
+    }
+    EXPECT_TRUE(failing.fired()) << "no allocation of the encoder's size was made";
+  }
+  net::asio::post(agentIo, [&agent] { agent.close(); });
+  agentThread.join();
+
+  EXPECT_EQ(thrown, 1);
+  EXPECT_EQ(seen.load(), 1) << "the retransmission went out";
+  EXPECT_EQ(detail::MessageIdView::outstandingIds(client), 0U);
 }
 
 }  // namespace

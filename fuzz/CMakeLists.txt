@@ -21,7 +21,7 @@ add_library(snmpio_fuzzed STATIC
   ${CMAKE_SOURCE_DIR}/src/BerWriter.cpp
   ${CMAKE_SOURCE_DIR}/src/Client.cpp
   ${CMAKE_SOURCE_DIR}/src/Error.cpp
-  ${CMAKE_SOURCE_DIR}/src/MessageIds.cpp
+  ${CMAKE_SOURCE_DIR}/src/MessageIdGenerator.cpp
   ${CMAKE_SOURCE_DIR}/src/Oid.cpp
   ${CMAKE_SOURCE_DIR}/src/Password.cpp
   ${CMAKE_SOURCE_DIR}/src/Pdu.cpp

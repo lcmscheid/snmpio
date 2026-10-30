@@ -98,8 +98,8 @@ TEST(MessageIdGenerator, SixtyFiveThousandIdsAreAllDistinct) {
   EXPECT_EQ(seen.size(), count);
 }
 
-// Each generator starts at the counter FF1 maps to 0 under its key, so its first draw is 0, which it
-// skips: what it hands out is the next counter's ID.
+// Each generator starts at the counter FF1 maps to 0 under its key, so its first draw is 0, which
+// it skips: what it hands out is the next counter's ID.
 TEST(MessageIdGenerator, NeverHandsOutZero) {
   MessageIdGenerator nist(nistKey, 0x7f4053b8);
   EXPECT_EQ(draw(nist), 0x168dfc62);

@@ -886,7 +886,8 @@ against that ADR rather than a decision against it -- and IDEA, which ADR-0005 e
 
 A **Response** that fails to decode, to authenticate, or to be timely is dropped, not failed — the
 request stays outstanding and its retransmission timer keeps running. UDP is spoofable and the
-`msgID` is guessable, so the alternative is a library whose requests anyone on the path can cancel.
+`msgID` is in the clear to anyone on the path, so the alternative is a library whose requests anyone
+on the path can cancel.
 
 **Reports are the exception, and cannot not be.** The four counters worth hearing about are exactly
 the ones an Engine cannot sign — it does not know the user, or the key, or the engineID it was

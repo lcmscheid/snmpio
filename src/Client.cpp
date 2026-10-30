@@ -391,9 +391,14 @@ class Client::Impl {
   static RequestResult toResult(const Pdu& response);
 
   // One transmission of an exchange, built afresh for each: the datagram that carries this ID as
-  // its Message ID at v3, and as its request-id at both versions.
+  // its Message ID at v3, and as its request-id at both versions. Called once per transmission, so
+  // a callable that is invoked repeatedly -- std::function's contract -- rather than a completion
+  // handler: Asio's any_completion_handler is one-shot, and the type erasure it would buy is the
+  // same.
   using Encoder = std::function<std::vector<std::byte>(std::int32_t id, net::ErrorCode& ec)>;
 
+  // The Encoder for a v2c exchange: the PDU as given, under the ID each transmission draws.
+  static Encoder v2cEncoder(Community community, Pdu pdu);
   // The Encoder for a v3 exchange: the message as given, under the ID each transmission draws, and
   // under the protocols and keys `pending` holds -- those its reply is checked with, so the two
   // cannot differ. None, at noAuthNoPriv.
@@ -864,6 +869,14 @@ void Client::Impl::observeEngineTime(const net::UdpEndpoint& from, const UsmPara
   // -Wmismatched-new-delete described in transact.)
 }
 
+Client::Impl::Encoder Client::Impl::v2cEncoder(Community community, Pdu pdu) {
+  return [community = std::move(community.value), pdu = std::move(pdu)](
+             std::int32_t id, net::ErrorCode& ec) mutable {
+    pdu.requestId = id;
+    return encodeV2cMessage(community, pdu, ec);
+  };
+}
+
 Client::Impl::Encoder Client::Impl::v3Encoder(V3Header header, UsmParameters usm, ScopedPdu scoped,
                                               const std::shared_ptr<Pending>& pending) {
   return [header, usm = std::move(usm), scoped = std::move(scoped), pending](
@@ -886,7 +899,7 @@ net::Awaitable<net::ErrorCode> Client::Impl::transact(Ref self, Target target, E
   // Every transmission's ID, each mapped to this request until it completes, so that a reply to
   // any of them counts: one delayed past its deadline still answers the request after the
   // retransmission has gone out (CONTEXT.md, Message ID). None can belong to another Outstanding
-  // Request, since m_ids repeats nothing short of 2^31 transmissions.
+  // Request: m_ids is asked for one that m_pending does not hold.
   std::vector<std::int32_t> ids;
   ids.reserve(static_cast<std::size_t>(target.retries) + 1);
 
@@ -907,7 +920,8 @@ net::Awaitable<net::ErrorCode> Client::Impl::transact(Ref self, Target target, E
     // A fresh ID for each transmission, as RFC 3412 section 6.2 asks: a retransmission that
     // repeated one would tell an observer which reply to forge for longest. Re-encoded rather than
     // patched, so that at authPriv each transmission has a salt of its own as well.
-    const std::int32_t id = m_ids.next(ec);
+    const std::int32_t id =
+        m_ids.next([this](std::int32_t candidate) { return m_pending.contains(candidate); }, ec);
     if (ec) break;
     const auto datagram = encode(id, ec);
     if (ec) break;
@@ -1027,12 +1041,8 @@ net::Awaitable<Client::RequestResult> Client::Impl::doRequestV2c(Ref self, Targe
   pending->from = target.endpoint;
   pending->community = community.value;
 
-  auto encode = [community = std::move(community.value), pdu = std::move(pdu)](
-                    std::int32_t id, net::ErrorCode& ec) mutable {
-    pdu.requestId = id;
-    return encodeV2cMessage(community, pdu, ec);
-  };
-  const auto ec = co_await transact(self, std::move(target), std::move(encode), pending);
+  const auto ec = co_await transact(self, std::move(target),
+                                    v2cEncoder(std::move(community), std::move(pdu)), pending);
   if (ec) co_return RequestResult{ec, Response{}};
   co_return toResult(pending->response);
 }

@@ -73,6 +73,7 @@ Outstanding Request. It is distinct from the PDU's `request-id` and is what Outs
 keyed on, because a message whose decryption fails must still be attributable. Each retransmission
 carries a fresh one, so one Outstanding Request may own several, and a reply to any of them counts.
 Message IDs are unpredictable, since anyone who can guess one can forge a reply that clears it.
+It is never 0, and never one another Outstanding Request still owns (RFC 3412 §6.2).
 snmpio draws each transmission's `request-id` from the same generator and gives it the same value,
 which is a choice of ours rather than an equivalence the protocol promises (RFC 3412 §6.2).
 _Avoid_: request id, transaction id, sequence number

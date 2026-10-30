@@ -107,7 +107,7 @@ TEST(MessageIds, ConsecutiveRequestIdsAreNotSequential) {
   EXPECT_TRUE(allDistinct(ids));
 }
 
-TEST(MessageIds, TwoClientsProduceDifferentSequences) {
+TEST(MessageIds, TwoClientsDrawDifferentIds) {
   // Each Client keys its own: two that drew the same key would hand each other's Agents the IDs.
   const auto first = requestIdsOfOneClient(16);
   const auto second = requestIdsOfOneClient(16);
@@ -243,6 +243,97 @@ TEST(MessageIds, AV3ReplyToTheFirstTransmissionCountsAfterARetransmission) {
 
   // Two for Engine Discovery, two for the request.
   EXPECT_EQ(agent.requestsSeen(), 4);
+}
+
+// Both transmissions are held, then answered with each one's msgID and the other's request-id. A
+// compliant Agent copies both from one message, so the pair must be one a transmission went out
+// with: net-snmp drops the same mismatch (snmpv3_verify_msg), and so does snmpio. Neither reply
+// counts, and the request times out.
+TEST(MessageIds, AV3ReplyQuotingTwoTransmissionsIdsIsDropped) {
+  Fixture f;
+  ScriptedV3Agent agent(f.io, credentials(), echoAnswer);
+  f.closeAgent = [&agent] { agent.close(); };
+
+  std::vector<ScriptedV3Agent::Request> held;
+  agent.setResponder(
+      [&](const ScriptedV3Agent::Request& req) -> std::optional<ScriptedV3Agent::Reply> {
+        if (req.message.scoped.pdu.varbinds.empty()) return agent.behaveLikeACompliantAgent(req);
+        held.push_back(req);
+        if (held.size() == 2) {
+          const auto& first = held[0].message;
+          const auto& second = held[1].message;
+          for (const auto& [msgId, requestId] :
+               {std::pair{first.header.msgId, second.scoped.pdu.requestId},
+                std::pair{second.header.msgId, first.scoped.pdu.requestId}}) {
+            auto reply = agent.behaveLikeACompliantAgent(held[0]);
+            if (reply) agent.answerQuoting(msgId, requestId, *reply);
+          }
+        }
+        return std::nullopt;
+      });
+
+  f.client.asyncGet(targetFor(agent, 1), credentials(), {sysDescr},
+                    [&f](net::ErrorCode ec, const Response&) {
+                      EXPECT_EQ(ec, make_error_code(Errc::Timeout)) << ec.message();
+                      f.finish();
+                    });
+  f.run();
+
+  ASSERT_EQ(held.size(), 2U);
+  EXPECT_NE(held[0].message.header.msgId, held[1].message.header.msgId);
+}
+
+// A request whose PDU cannot be encoded fails with why, sends nothing, and leaves nothing mapped:
+// the ID drawn for it is spent, and the next request goes out and is answered as usual.
+TEST(MessageIds, ARequestThatCannotBeEncodedSendsNothingAndLeavesNothingBehind) {
+  Fixture f;
+  f.expected = 2;
+  ScriptedAgent agent(f.io, [](const V2cMessage& msg) {
+    return respondWith({Varbind{msg.pdu.varbinds.at(0).name, null}});
+  });
+  f.closeAgent = [&agent] { agent.close(); };
+
+  const Oid unencodable{7};  // one arc, where BER needs two to begin with
+  f.client.asyncGet(longDeadlineTarget(agent), publicCommunity, {unencodable},
+                    [&](net::ErrorCode ec, const Response&) {
+                      EXPECT_EQ(ec, make_error_code(Errc::OidNotEncodable)) << ec.message();
+                      EXPECT_EQ(agent.requestsSeen(), 0);
+                      f.client.asyncGet(longDeadlineTarget(agent), publicCommunity, {sysDescr},
+                                        [&f](net::ErrorCode ec2, const Response& r) {
+                                          EXPECT_FALSE(ec2) << ec2.message();
+                                          EXPECT_EQ(r.varbinds.size(), 1U);
+                                          f.finish();
+                                        });
+                      f.finish();
+                    });
+  f.run();
+
+  EXPECT_EQ(agent.requestsSeen(), 1);
+}
+
+// The same at v3, where the PDU is encoded only once Engine Discovery has run.
+TEST(MessageIds, AV3RequestThatCannotBeEncodedSendsNothingAndLeavesNothingBehind) {
+  Fixture f;
+  f.expected = 2;
+  ScriptedV3Agent agent(f.io, credentials(), echoAnswer);
+  f.closeAgent = [&agent] { agent.close(); };
+
+  const Oid unencodable{7};
+  f.client.asyncGet(targetFor(agent, 1), credentials(), {unencodable},
+                    [&](net::ErrorCode ec, const Response&) {
+                      EXPECT_EQ(ec, make_error_code(Errc::OidNotEncodable)) << ec.message();
+                      EXPECT_EQ(agent.requestsSeen(), 2);  // Engine Discovery's two phases
+                      f.client.asyncGet(targetFor(agent, 1), credentials(), {sysDescr},
+                                        [&f](net::ErrorCode ec2, const Response& r) {
+                                          EXPECT_FALSE(ec2) << ec2.message();
+                                          EXPECT_EQ(r.varbinds.size(), 1U);
+                                          f.finish();
+                                        });
+                      f.finish();
+                    });
+  f.run();
+
+  EXPECT_EQ(agent.requestsSeen(), 3);
 }
 
 // Every request is held until the Agent has read them all, so that all of them are outstanding at

@@ -117,8 +117,8 @@ TEST(ClientGet, RetransmitsAndThenTimesOut) {
 
 TEST(ClientGet, IgnoresAResponseQuotingTheWrongCommunity) {
   Fixture f;
-  // The request-id is guessable and UDP is spoofable, so a Response that does not quote the
-  // Community we used is not ours -- it must be dropped, not delivered.
+  // The request-id is in the clear for anyone on the path and UDP is spoofable, so a Response that
+  // does not quote the Community we used is not ours -- it must be dropped, not delivered.
   ScriptedAgent agent(
       f.io, [](const V2cMessage&) { return respondWith({Varbind{sysDescr, TimeTicks{1}}}); });
   agent.setCommunityOverride("elsewhere");

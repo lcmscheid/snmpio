@@ -57,6 +57,14 @@ class ScriptedAgent {
   // request's request-id, goes to whoever sent the latest request, and goes out as one copy, at
   // once.
   void answerLate(const V2cMessage& request, Pdu reply) { send(request, std::move(reply), {}); }
+  // Answers a request from another socket: the right request-id and Community, from an address
+  // the Client did not send to.
+  void answerFrom(net::UdpSocket& elsewhere, const V2cMessage& request, Pdu reply) const {
+    reply.requestId = request.pdu.requestId;
+    net::ErrorCode ec;
+    const auto bytes = encodeV2cMessage(request.community, reply, ec);
+    if (!ec) elsewhere.send_to(net::asio::buffer(bytes), m_from, 0, ec);
+  }
 
   void close() {
     m_sender.cancel();

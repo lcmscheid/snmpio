@@ -67,6 +67,12 @@ std::optional<std::uint32_t> usmStatsCounter(const Pdu& report) {
   return *(name.begin() + static_cast<std::ptrdiff_t>(prefix.size()));
 }
 
+// Whether a reply claims protection its request did not ask for.
+bool exceedsLevel(SecurityLevel reply, SecurityLevel request) noexcept {
+  return (isAuthenticated(reply) && !isAuthenticated(request)) ||
+         (isEncrypted(reply) && !isEncrypted(request));
+}
+
 // The one Report that is about the Engine's clock, and so the one that may carry a pair we take.
 bool reportsNotInTimeWindows(const Pdu& pdu) {
   return pdu.type == PduType::Report && usmStatsCounter(pdu) == usmStatsNotInTimeWindows;
@@ -258,6 +264,14 @@ class Client::Impl {
     SecretOctets authKey;  // the Localized Key this exchange is authenticated with
     SecretOctets privKey;  // and the one it is encrypted with, at authPriv
     Octets engineId;       // the Authoritative Engine addressed; empty while discovering
+    // What the request went out under, which a Response must quote back exactly (RFC 3412 section
+    // 7.2 step 12). Written by v3Encoder's encoder from the very fields it encodes, as each
+    // transmission is built. Writing them once, in v3Encoder itself, trips the spurious GCC 16
+    // -Wmismatched-new-delete described in transact.
+    SecurityLevel level = SecurityLevel::NoAuthNoPriv;
+    std::string userName;
+    Octets contextEngineId;
+    std::string contextName;
     Pdu response;
     UsmParameters security;  // what the reply's security parameters said
     bool answered = false;
@@ -726,6 +740,19 @@ void Client::Impl::deliverV3(std::span<const std::byte> datagram, const net::Udp
   Pending& p = *it->second;
   if (from != p.from) return;
 
+  const bool encrypted = isEncrypted(msg->header.level);
+  // RFC 3412 section 7.2 step 12: a Response is at the request's own Security Level. Checked ahead
+  // of the digest, because the level decides what the digest can say: a reply below the request's
+  // level carries none to check, and refusing it there would record AuthFailed for a reply that
+  // says nothing about the Target -- an authPriv request answered in the clear, or a signed one
+  // answered unsigned. A silent drop, recording no reason (ADR-0008). A Report may come in below
+  // the request, which is how the unsigned one below gets this far, but never above it: it goes out
+  // at the level USM names, or noAuthNoPriv (RFC 3412 section 7.1 step 3(d)), and USM names one
+  // only for a notInTimeWindows Report to a signed request (RFC 3414 section 3.2 step 7). Past both
+  // checks, a reply that is encrypted answered an authPriv request, since nothing else may.
+  if (exceedsLevel(msg->header.level, p.level)) return;
+  if (!encrypted && msg->scoped.pdu.type != PduType::Report && msg->header.level != p.level) return;
+
   // The one message the protocol requires us to accept unauthenticated: an Engine that does not
   // recognise our engineID has no key to authenticate its complaint with (RFC 3414 section 3.2).
   // It is accepted only as a Report, only against an outstanding msgID, and only from the address
@@ -734,7 +761,6 @@ void Client::Impl::deliverV3(std::span<const std::byte> datagram, const net::Udp
   //
   // An encrypted message is never exempt and never has to be: privacy implies authentication, so
   // the PDU inside it cannot be read before the digest has been, which is the right order anyway.
-  const bool encrypted = isEncrypted(msg->header.level);
   const bool exemptFromAuth =
       !encrypted && !isAuthenticated(msg->header.level) && msg->scoped.pdu.type == PduType::Report;
   // Local rather than written straight into p: a verified reply can still be dropped below, and a
@@ -786,13 +812,22 @@ void Client::Impl::deliverV3(std::span<const std::byte> datagram, const net::Udp
     p.dropReason = make_error_code(Errc::NotInTimeWindow);
     return;
   }
-  // A Report is exempt from all three of the checks below. It may legitimately come from an Engine
+  // A Report is exempt from every check below. It may legitimately come from an Engine
   // other than the one we addressed -- that is what usmStatsUnknownEngineIDs means -- it carries no
   // request-id worth matching, and above all it is the message that *reports* a boots/time
   // disagreement, so checking it against the pair it is disagreeing with would discard every
   // resynchronisation the protocol has.
   if (!isReport) {
     if (!p.engineId.empty() && msg->security.engineId != p.engineId) return;
+    // The rest of step 12. Silent drops too: a Response for another user or another context is an
+    // answer to some other request, which tells us nothing about this one's Target. The identity
+    // phase is the exception, as it is for the engineID above: it names no user and no context, and
+    // its answer is read for the engineID alone and trusted with nothing (RFC 3414 section 4).
+    if (!p.engineId.empty() &&
+        (msg->security.userName != p.userName || msg->scoped.contextEngineId != p.contextEngineId ||
+         msg->scoped.contextName != p.contextName)) {
+      return;
+    }
     // Each transmission carries its Message ID as its request-id too, so a Response must quote
     // the pair one transmission went out with -- not one transmission's msgID and another's
     // request-id.
@@ -889,6 +924,10 @@ Client::Impl::Encoder Client::Impl::v3Encoder(V3Header header, UsmParameters usm
              std::int32_t id, net::ErrorCode& ec) mutable {
     header.msgId = id;
     scoped.pdu.requestId = id;
+    pending->level = header.level;
+    pending->userName = usm.userName;
+    pending->contextEngineId = scoped.contextEngineId;
+    pending->contextName = scoped.contextName;
     return encodeV3Message(header, usm, scoped, pending->authProtocol, pending->authKey, ec,
                            pending->privProtocol, pending->privKey);
   };

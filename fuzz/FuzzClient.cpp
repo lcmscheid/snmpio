@@ -8,6 +8,7 @@
 // completion is judged against the threat model (docs/threat-model.md):
 //
 //   L1  every Outstanding Request completes exactly once, and its handler is destroyed once;
+//   R4  a Response counts only at the request's Security Level, user name and context;
 //   R5  no reply the Client drops fails a request before its deadline;
 //   R6  at authNoPriv and authPriv, nothing unauthenticated completes or fails a request before its
 //       deadline, except an unsigned Report and the answer to Engine Discovery's identity phase;
@@ -191,6 +192,11 @@ class Ledger {
     }
 
     const bool isReport = msg->scoped.pdu.type == PduType::Report;
+    // R4: nothing above the request's level counts, a Report included.
+    if ((isAuthenticated(msg->header.level) && !authRequired) ||
+        (encrypted && !isEncrypted(seen->level))) {
+      return;
+    }
     // R6 (1): unsigned and unencrypted, or verified. At noAuthNoPriv, any Report (R8).
     const bool exempt = isReport && !encrypted && !isAuthenticated(msg->header.level);
     if (authRequired && !exempt && !verified) return;
@@ -222,6 +228,12 @@ class Ledger {
       if (msg->security.engineId != seen->engineId) return;
       if (msg->scoped.pdu.type != PduType::Response) return;
       if (msg->scoped.pdu.requestId != msg->header.msgId) return;
+      // R4: and the request's Security Level, user name and context, exactly.
+      if (msg->header.level != seen->level || msg->security.userName != seen->userName ||
+          msg->scoped.contextEngineId != seen->contextEngineId ||
+          msg->scoped.contextName != seen->contextName) {
+        return;
+      }
     }
     credit(*seen, [&](Entitlement& e) { e.responses.push_back(std::move(msg->scoped.pdu)); });
   }
@@ -302,7 +314,8 @@ void judge(std::size_t request, const Outcome& outcome, const Ledger& ledger,
   const char* rule = profile.mode == Mode::V2c || profile.mode == Mode::NoAuthNoPriv ? "R8" : "R6";
 
   // A completion with data, or with the Agent's error-status, must carry what some matching
-  // Response carried.
+  // Response carried. At v3 the oracle cannot tell which part of the match the Client skipped, so
+  // it names R4 beside the rule for the level.
   if (!code || code.category() == agentErrorCategory()) {
     for (const auto& pdu : entitled.responses) {
       const auto status = code ? code.value() : 0;
@@ -311,7 +324,10 @@ void judge(std::size_t request, const Outcome& outcome, const Ledger& ledger,
         return;
       }
     }
-    violated(rule, where + ", which no matching Response entitled it to");
+    const char* responseRule = profile.mode == Mode::V2c            ? rule
+                               : profile.mode == Mode::NoAuthNoPriv ? "R4 or R8"
+                                                                    : "R4 or R6";
+    violated(responseRule, where + ", which no matching Response entitled it to");
   }
 
   // A deadline cannot pass early, and every deadline is at least the Target's whole one: each

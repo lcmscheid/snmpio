@@ -1,6 +1,7 @@
 #ifndef SNMPIO_TESTS_SCRIPTEDV3AGENT_HPP
 #define SNMPIO_TESTS_SCRIPTEDV3AGENT_HPP
 
+#include <algorithm>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -16,6 +17,7 @@
 #include <snmpio/Usm.hpp>
 #include <snmpio/V3Message.hpp>
 #include <snmpio/Value.hpp>
+#include <snmpio/ber/Writer.hpp>
 #include <snmpio/detail/Net.hpp>
 
 #include "ReplyDelivery.hpp"
@@ -48,6 +50,13 @@ class ScriptedV3Agent {
     bool corruptDigest = false;
     // Encrypt with a key that is not the Agent's, so the reply cannot be opened.
     bool corruptPrivKey = false;
+    // Another user name than the Agent's own, signed with the Agent's key all the same.
+    std::optional<std::string> userName;
+    // A digest this many octets wide instead of the protocol's: the CVE-2008-0960 forgery. Its
+    // octets are the leading ones of the true digest over the message as sent, which is all that a
+    // verifier comparing only as many octets as arrived would check -- such a verifier accepts it.
+    // Unencrypted replies only.
+    std::optional<std::size_t> digestWidth;
   };
 
   // The data plane: what a well-formed, authenticated, timely request gets back.
@@ -211,7 +220,7 @@ class ScriptedV3Agent {
     usm.engineId = reply.engineId.value_or(m_engineId);
     usm.boots = reply.boots.value_or(m_boots);
     usm.time = reply.time.value_or(m_time);
-    usm.userName = m_creds.userName;
+    usm.userName = reply.userName.value_or(m_creds.userName);
 
     ScopedPdu scoped = std::move(reply.scoped);
     if (scoped.contextEngineId.empty()) scoped.contextEngineId = usm.engineId;
@@ -223,10 +232,51 @@ class ScriptedV3Agent {
     if (reply.corruptPrivKey && !privKey.empty()) privKey.front() ^= std::byte{0xff};
 
     net::ErrorCode ec;
-    m_out = encodeV3Message(header, usm, scoped, m_creds.authProtocol, key, ec,
-                            m_creds.privProtocol, privKey);
+    m_out = reply.digestWidth ? withShortDigest(header, usm, scoped, *reply.digestWidth, key, ec)
+                              : encodeV3Message(header, usm, scoped, m_creds.authProtocol, key, ec,
+                                                m_creds.privProtocol, privKey);
     if (ec) return;
     m_sender.send(m_out, m_from, delivery);
+  }
+
+  // encodeV3Message's layout, by hand, because it will only write a digest of the protocol's width.
+  std::vector<std::byte> withShortDigest(const V3Header& header, const UsmParameters& usm,
+                                         const ScopedPdu& scoped, std::size_t width,
+                                         std::span<const std::byte> key, net::ErrorCode& ec) const {
+    ber::Writer usmContent;
+    usmContent.octetString(usm.engineId);
+    usmContent.integer(usm.boots);
+    usmContent.integer(usm.time);
+    usmContent.octetString(usm.userName);
+    usmContent.octetString(Octets(width, std::byte{0}));
+    usmContent.octetString(Octets{});
+    ber::Writer usmParams;
+    usmParams.tlv(ber::tag::sequence, usmContent.bytes());
+
+    ber::Writer body;
+    body.integer(versionV3);
+    {
+      const auto scope = body.beginSequence();
+      body.integer(header.msgId);
+      body.integer(header.maxSize);
+      const auto flags = static_cast<std::byte>(header.level);
+      body.octetString(std::span(&flags, 1));
+      body.integer(header.securityModel);
+    }
+    body.octetString(usmParams.bytes());
+    encodeScopedPdu(body, scoped);
+    ber::Writer w;
+    w.tlv(ber::tag::sequence, body.bytes());
+    auto out = w.take();
+
+    // The field is blank, as RFC 3414 section 6.3.1 hashes it, so this is the true digest.
+    const auto msg = decodeV3Message(out, ec);
+    if (!msg) return {};
+    const auto digest = authDigest(m_creds.authProtocol, key, out, ec);
+    if (ec) return {};
+    std::copy_n(digest.begin(), std::min(width, digest.size()),
+                out.begin() + static_cast<std::ptrdiff_t>(msg->authParamsOffset));
+    return out;
   }
 
   static constexpr std::int32_t timeWindow = 150;

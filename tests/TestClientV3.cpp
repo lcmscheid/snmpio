@@ -1442,6 +1442,116 @@ TEST(ClientV3, SurfacesADecryptionErrorReport) {
 }
 
 // ---------------------------------------------------------------------------
+// Reply matching
+// ---------------------------------------------------------------------------
+
+// RFC 3412 section 7.2 step 12: a Response counts only if its Security Level, user name,
+// contextEngineID and contextName are the request's. Each row spoils one of them on an otherwise
+// genuine Response, signed with the right key wherever its level is signed: what is refused is the
+// mismatch, not the digest. A mismatch says nothing about the Target, so it is a silent drop and
+// the request reports Timeout (ADR-0008).
+struct MismatchedReply {
+  Credentials agent;   // what the Agent holds, and so what it can sign and encrypt with
+  Credentials client;  // what the request goes out under
+  std::function<void(ScriptedV3Agent::Reply&)> spoil;
+  const char* name;
+};
+
+class AMismatchedResponse : public testing::TestWithParam<MismatchedReply> {
+ protected:
+  AMismatchedResponse() { m_f.agent = &m_agent; }
+
+  // Every data-plane Response spoiled; with `thenTheGenuineOne`, each is followed by the genuine
+  // reply, so the request can only succeed if the spoiled one was refused.
+  void answerSpoiled(bool thenTheGenuineOne) {
+    m_agent.setResponder([this, thenTheGenuineOne](const ScriptedV3Agent::Request& req) {
+      auto reply = m_agent.behaveLikeACompliantAgent(req);
+      if (!reply || reply->scoped.pdu.type != PduType::Response) return reply;
+      auto spoiled = *reply;
+      GetParam().spoil(spoiled);
+      for (auto& vb : spoiled.scoped.pdu.varbinds) vb.val = std::int32_t{666};
+      if (!thenTheGenuineOne) return std::optional(spoiled);
+      m_agent.answerLate(req, std::move(spoiled));
+      return reply;
+    });
+  }
+
+  Fixture m_f;
+  ScriptedV3Agent m_agent{m_f.io, GetParam().agent, echoAnswer};
+};
+
+TEST_P(AMismatchedResponse, IsDroppedAndTheRequestTimesOut) {
+  answerSpoiled(false);
+
+  m_f.client.asyncGet(targetFor(m_agent, 1), GetParam().client, {sysDescr}, m_f.requestToken());
+  m_f.run();
+
+  EXPECT_EQ(m_f.ec, make_error_code(Errc::Timeout));
+}
+
+TEST_P(AMismatchedResponse, LeavesTheGenuineReplyToComplete) {
+  answerSpoiled(true);
+
+  m_f.client.asyncGet(targetFor(m_agent, 0), GetParam().client, {sysDescr}, m_f.requestToken());
+  m_f.run();
+
+  ASSERT_FALSE(m_f.ec) << m_f.ec.message();
+  ASSERT_EQ(m_f.response.varbinds.size(), 1U);
+  EXPECT_EQ(m_f.response.varbinds[0].val, Value(Octets{std::byte{'o'}, std::byte{'k'}}))
+      << "the spoiled reply was the one accepted";
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    ClientV3, AMismatchedResponse,
+    testing::Values(
+        // The bug this suite was written for: the data crossed the wire in the clear, and the
+        // caller was never told.
+        MismatchedReply{
+            privCredentials(PrivProtocol::Aes128), privCredentials(PrivProtocol::Aes128),
+            [](auto& r) { r.level = SecurityLevel::AuthNoPriv; }, "AuthNoPrivAnsweringAuthPriv"},
+        MismatchedReply{credentials(), credentials(),
+                        [](auto& r) { r.level = SecurityLevel::NoAuthNoPriv; },
+                        "NoAuthNoPrivAnsweringAuthNoPriv"},
+        // Higher is no better: nothing answers above the level it was asked at.
+        MismatchedReply{credentials(), credentials(AuthProtocol::None, SecurityLevel::NoAuthNoPriv),
+                        [](auto& r) { r.level = SecurityLevel::AuthNoPriv; },
+                        "AuthNoPrivAnsweringNoAuthNoPriv"},
+        MismatchedReply{credentials(), credentials(), [](auto& r) { r.userName = "ernie"; },
+                        "AnotherUserName"},
+        MismatchedReply{credentials(), credentials(),
+                        [](auto& r) {
+                          r.scoped.contextEngineId = {std::byte{0x80}, std::byte{0x00},
+                                                      std::byte{0x1f}, std::byte{0x88},
+                                                      std::byte{0x09}};
+                        },
+                        "AnotherContextEngineId"},
+        MismatchedReply{credentials(), credentials(),
+                        [](auto& r) { r.scoped.contextName = "elsewhere"; }, "AnotherContextName"}),
+    [](const testing::TestParamInfo<MismatchedReply>& row) { return std::string(row.param.name); });
+
+// CVE-2008-0960: a verifier that trusted the digest's width as sent compared only that many
+// octets, so a 1-octet digest was a 1-in-256 guess and an empty one no guess at all. These carry
+// the true digest's leading octets, which such a verifier accepts outright. The width must be the
+// protocol's exactly, and a digest that is not is a digest that does not verify (ADR-0008).
+TEST(ClientV3, RejectsADigestNarrowerThanTheProtocols) {
+  for (const std::size_t width : {std::size_t{1}, std::size_t{0}}) {
+    Fixture f;
+    ScriptedV3Agent agent(f.io, credentials(), echoAnswer);
+    f.agent = &agent;
+    agent.setResponder([&agent, width](const ScriptedV3Agent::Request& req) {
+      auto reply = agent.behaveLikeACompliantAgent(req);
+      if (reply && reply->scoped.pdu.type == PduType::Response) reply->digestWidth = width;
+      return reply;
+    });
+
+    f.client.asyncGet(targetFor(agent, 0), credentials(), {sysDescr}, f.requestToken());
+    f.run();
+
+    EXPECT_EQ(f.ec, make_error_code(Errc::AuthFailed)) << width << "-octet digest";
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Master Keys
 // ---------------------------------------------------------------------------
 

@@ -137,6 +137,11 @@ class HostileAgent {
     std::size_t requestIndex = 0;
     SecurityLevel level = SecurityLevel::NoAuthNoPriv;
     Octets engineId;
+    // What a Response must quote back (RFC 3412 section 7.2 step 12). The context is the request's
+    // own only where the Agent could read it.
+    std::string userName;
+    Octets contextEngineId;
+    std::string contextName;
   };
 
   using OnSent = std::function<void(std::span<const std::byte> datagram, bool fromTarget)>;
@@ -332,6 +337,9 @@ class HostileAgent {
     Seen seen = readable ? seenFrom(msg->scoped.pdu) : Seen{};
     seen.level = msg->header.level;
     seen.engineId = msg->security.engineId;
+    seen.userName = msg->security.userName;
+    seen.contextEngineId = msg->scoped.contextEngineId;
+    seen.contextName = msg->scoped.contextName;
     remember(msg->header.msgId, std::move(seen));
     if (!m_answering) return;
 
@@ -425,6 +433,16 @@ class HostileAgent {
         break;
     }
     if (m_script->pick(2) == 1) reply.usm.userName = "intruder";
+    switch (m_script->pick(3)) {
+      case 1:
+        reply.scoped.contextEngineId = m_script->bytes(m_script->pick(40));
+        break;
+      case 2:
+        reply.scoped.contextName = "elsewhere";
+        break;
+      default:
+        break;
+    }
     // Which key signs it. The Client verifies a reply with the key for the engineID its request
     // went to, which is the real one unless the identity phase was answered with another.
     switch (m_script->pick(4)) {

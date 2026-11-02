@@ -130,6 +130,25 @@ TEST(ClientGet, IgnoresAResponseQuotingTheWrongCommunity) {
   EXPECT_EQ(f.ec, Errc::Timeout);
 }
 
+TEST(ClientGet, IgnoresAResponseFromAnotherAddress) {
+  Fixture f;
+  // Right request-id, right Community, and sent from a port the Client never sent to. An off-path
+  // forger who knew both is stopped only by spoofing the address too (threat model R1).
+  net::UdpSocket elsewhere(f.io, net::UdpEndpoint(net::asio::ip::make_address("127.0.0.1"), 0));
+  ScriptedAgent* self = nullptr;
+  ScriptedAgent agent(f.io, [&](const V2cMessage& msg) -> std::optional<Pdu> {
+    self->answerFrom(elsewhere, msg, respondWith({Varbind{sysDescr, TimeTicks{1}}}));
+    return std::nullopt;
+  });
+  self = &agent;
+  f.agent = &agent;
+
+  f.client.asyncGet(targetFor(agent, 0), publicCommunity, {sysDescr}, f.requestToken());
+  f.run();
+
+  EXPECT_EQ(f.ec, Errc::Timeout);
+}
+
 TEST(ClientSet, SurfacesTheAgentsErrorStatusAndTheVarbindItNamed) {
   Fixture f;
   ScriptedAgent agent(f.io, [](const V2cMessage& msg) {

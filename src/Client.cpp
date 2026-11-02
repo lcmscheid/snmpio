@@ -751,7 +751,16 @@ void Client::Impl::deliverV3(std::span<const std::byte> datagram, const net::Udp
   // only for a notInTimeWindows Report to a signed request (RFC 3414 section 3.2 step 7). Past both
   // checks, a reply that is encrypted answered an authPriv request, since nothing else may.
   if (exceedsLevel(msg->header.level, p.level)) return;
-  if (!encrypted && msg->scoped.pdu.type != PduType::Report && msg->header.level != p.level) return;
+  // A Report readable before the digest: the only reply that may come in below the request.
+  const bool plainReport = !encrypted && msg->scoped.pdu.type == PduType::Report;
+  // The user name is in the clear too, and for the same reason it is compared before the digest: a
+  // reply for another user, signed with that user's key, fails ours, and AuthFailed would blame
+  // our Credentials for what was never an answer to them. The identity phase names no user (see
+  // the rest of step 12, below).
+  if (!plainReport && (msg->header.level != p.level ||
+                       (!p.engineId.empty() && msg->security.userName != p.userName))) {
+    return;
+  }
 
   // The one message the protocol requires us to accept unauthenticated: an Engine that does not
   // recognise our engineID has no key to authenticate its complaint with (RFC 3414 section 3.2).
@@ -819,10 +828,13 @@ void Client::Impl::deliverV3(std::span<const std::byte> datagram, const net::Udp
   // resynchronisation the protocol has.
   if (!isReport) {
     if (!p.engineId.empty() && msg->security.engineId != p.engineId) return;
-    // The rest of step 12. Silent drops too: a Response for another user or another context is an
-    // answer to some other request, which tells us nothing about this one's Target. The identity
-    // phase is the exception, as it is for the engineID above: it names no user and no context, and
-    // its answer is read for the engineID alone and trusted with nothing (RFC 3414 section 4).
+    // The rest of step 12. A silent drop too: a Response for another context is an answer to some
+    // other request, which tells us nothing about this one's Target. Only here, since at authPriv
+    // the context is inside the ciphertext. The identity phase is the exception, as it is for the
+    // engineID above: it names no user and no context, and its answer is read for the engineID
+    // alone and trusted with nothing (RFC 3414 section 4). The user name was settled before the
+    // digest and is compared again only for the compiler: without it here, GCC 16 raises the
+    // spurious -Wmismatched-new-delete described in transact.
     if (!p.engineId.empty() &&
         (msg->security.userName != p.userName || msg->scoped.contextEngineId != p.contextEngineId ||
          msg->scoped.contextName != p.contextName)) {

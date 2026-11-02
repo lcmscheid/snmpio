@@ -269,7 +269,8 @@ class ScriptedV3Agent {
     w.tlv(ber::tag::sequence, body.bytes());
     auto out = w.take();
 
-    // The field is blank, as RFC 3414 section 6.3.1 hashes it, so this is the true digest.
+    // The field is blank, as RFC 3414 section 6.3.1 has it blanked at the protocol's width, so
+    // this is the true digest over the message as sent.
     const auto msg = decodeV3Message(out, ec);
     if (!msg) return {};
     const auto digest = authDigest(m_creds.authProtocol, key, out, ec);

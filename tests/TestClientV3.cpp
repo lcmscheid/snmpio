@@ -1518,6 +1518,14 @@ INSTANTIATE_TEST_SUITE_P(
                         "AuthNoPrivAnsweringNoAuthNoPriv"},
         MismatchedReply{credentials(), credentials(), [](auto& r) { r.userName = "ernie"; },
                         "AnotherUserName"},
+        // Signed by that user, so under our key its digest is wrong. It is still a reply for
+        // someone else, and says nothing about our Credentials: silence, not AuthFailed.
+        MismatchedReply{credentials(), credentials(),
+                        [](auto& r) {
+                          r.userName = "ernie";
+                          r.corruptDigest = true;
+                        },
+                        "AnotherUserNameUnderItsOwnKey"},
         MismatchedReply{credentials(), credentials(),
                         [](auto& r) {
                           r.scoped.contextEngineId = {std::byte{0x80}, std::byte{0x00},

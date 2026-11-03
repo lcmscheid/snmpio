@@ -10,6 +10,7 @@ namespace snmpio::detail {
 // How many entries a Client's caches hold, and how often it has had to fill one, and nothing about
 // what is in them.
 struct CacheCounts {
+  std::size_t engines = 0;        // one per engineID that some Target maps to (threat model B2)
   std::size_t masterKeys = 0;     // derived from a password; one per (hash, password)
   std::size_t localizedKeys = 0;  // one per (engineID, hash, Master Key, privacy protocol)
   // Password-to-key runs that produced a Master Key, over the Client's life. A cache that worked
@@ -23,7 +24,9 @@ struct CacheCounts {
 // and nothing outside the tests calls it.
 //
 // It reads the caches directly rather than through the Client's strand, so it is only safe while
-// nothing is running that strand -- once io_context::run() has returned, say.
+// nothing else is running that strand: once io_context::run() has returned, or from a handler on
+// the same single-threaded io_context, as MessageIdView is. Asio calls the second an implicit
+// strand: one thread runs every handler, the Client's included, one at a time.
 struct CacheView {
   [[nodiscard]] static CacheCounts counts(const Client& client);
 };

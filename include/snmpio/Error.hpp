@@ -76,7 +76,8 @@ enum class Errc {
   // usmStatsUnsupportedSecLevels as UnsupportedSecurityLevel, because that is what they mean and a
   // second spelling of each would only be a second thing to check for.
   UnknownUserName,   // usmStatsUnknownUserNames: no such user on that Engine
-  UnknownEngineId,   // usmStatsUnknownEngineIDs, still, after re-discovering
+  UnknownEngineId,   // usmStatsUnknownEngineIDs, still, after re-discovering; or Engine
+                     // Discovery heard an engineID outside RFC 3411's 5..32 octets, or none
   NotInTimeWindow,   // usmStatsNotInTimeWindows, still, after resynchronising
   DecryptionError,   // usmStatsDecryptionErrors
   UnexpectedReport,  // a Report whose usmStats counter we do not recognise
@@ -97,7 +98,10 @@ enum class Errc {
 //     like a lost datagram is an infinite loop against a Target that is answering perfectly.
 //   * UnknownEngineId and NotInTimeWindow are Retriable even though the Client already
 //     re-discovered and resynchronised once before reporting them: they are what an Agent that
-//     rebooted mid-exchange produces, and the next request discovers the new boots/time.
+//     rebooted mid-exchange produces, and the next request discovers the new boots/time. An
+//     engineID outside 5..32 octets is UnknownEngineId too, and a retry cannot cure an Agent that
+//     always names one; classify() sees only the code, and a reboot is the commoner cause, so it
+//     stays Retriable, and a caller's retry policy bounds it as it bounds a silent Target.
 //   * CommitFailed and UndoFailed are Fatal rather than Retriable. The Agent is telling us it does
 //     not know what state the SET left behind, and replaying a half-applied SET is the one retry
 //     that can do damage.

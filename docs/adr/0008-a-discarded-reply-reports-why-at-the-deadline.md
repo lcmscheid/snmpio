@@ -66,7 +66,7 @@ about a request that no longer exists. `Client.hpp` states that rule for both ca
 One unauthenticated Report is dropped rather than admitted: an unsigned `notInTimeWindows` Report
 answering Engine Discovery's time-sync phase (issue #25). A genuine one is always signed there, so
 an unsigned one can only be a forgery racing the Engine. Admitting it either let it set the
-Engine's baseline clock — which is what it used to do, and which nothing afterwards could repair —
+Engine's Baseline — which is what it used to do, and which nothing afterwards could repair —
 or let it fail the discovery outright. Dropping it keeps the phase waiting for the signed Report,
 and reports `NotInTimeWindow` at the deadline if that never comes. The same `msgID` bar can
 therefore turn a silent Target's `Timeout` into `NotInTimeWindow` during discovery, which is the

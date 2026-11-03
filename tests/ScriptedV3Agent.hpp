@@ -234,8 +234,10 @@ class ScriptedV3Agent {
     net::ErrorCode ec;
     auto key = m_key;
     auto privKey = m_privKey;
+    // Localized at this Agent's engineID, as its own keys are, whatever engineID the reply names.
     if (reply.signer) {
       key = localizedAuthKey(signing, m_engineId, ec);
+      if (ec) return;
       privKey = signing.privProtocol == PrivProtocol::None
                     ? SecretOctets{}
                     : localizedPrivKey(signing, m_engineId, ec);
@@ -244,7 +246,8 @@ class ScriptedV3Agent {
     if (reply.corruptDigest && !key.empty()) key.front() ^= std::byte{0xff};
     if (reply.corruptPrivKey && !privKey.empty()) privKey.front() ^= std::byte{0xff};
 
-    m_out = reply.digestWidth ? withShortDigest(header, usm, scoped, *reply.digestWidth, key, ec)
+    m_out = reply.digestWidth ? withShortDigest(header, usm, scoped, *reply.digestWidth,
+                                                signing.authProtocol, key, ec)
                               : encodeV3Message(header, usm, scoped, signing.authProtocol, key, ec,
                                                 signing.privProtocol, privKey);
     if (ec) return;
@@ -254,7 +257,8 @@ class ScriptedV3Agent {
   // encodeV3Message's layout, by hand, because it will only write a digest of the protocol's width.
   std::vector<std::byte> withShortDigest(const V3Header& header, const UsmParameters& usm,
                                          const ScopedPdu& scoped, std::size_t width,
-                                         std::span<const std::byte> key, net::ErrorCode& ec) const {
+                                         AuthProtocol auth, std::span<const std::byte> key,
+                                         net::ErrorCode& ec) const {
     ber::Writer usmContent;
     usmContent.octetString(usm.engineId);
     usmContent.integer(usm.boots);
@@ -285,7 +289,7 @@ class ScriptedV3Agent {
     // this is the true digest over the message as sent.
     const auto msg = decodeV3Message(out, ec);
     if (!msg) return {};
-    const auto digest = authDigest(m_creds.authProtocol, key, out, ec);
+    const auto digest = authDigest(auth, key, out, ec);
     if (ec) return {};
     std::copy_n(digest.begin(), std::min(width, digest.size()),
                 out.begin() + static_cast<std::ptrdiff_t>(msg->authParamsOffset));

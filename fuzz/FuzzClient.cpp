@@ -230,7 +230,7 @@ class Ledger {
       if (msg->scoped.pdu.type != PduType::Response) return;
       if (msg->scoped.pdu.requestId != msg->header.msgId) return;
       // R4: and the request's Security Level, user name and context, exactly.
-      if (HostileAgent::matchOf(*msg) != seen->match) return;
+      if (HostileAgent::Seen::Match::of(*msg) != seen->match) return;
     }
     credit(*seen, [&](Entitlement& e) { e.responses.push_back(std::move(msg->scoped.pdu)); });
   }
@@ -299,12 +299,12 @@ bool isDropReason(const net::ErrorCode& ec) {
   return ec == Errc::AuthFailed || ec == Errc::DecryptionFailed || ec == Errc::NotInTimeWindow;
 }
 
-// The threat-model rules a completion can break in each mode: `level` for one nothing the Agent
-// sent explains, `response` for data no matching Response carried. At v3 the oracle cannot tell
-// which part of the match the Client skipped, so the second names R4 beside the rule for the level.
+// The threat-model rules a completion can break in each mode: `unexplained` for one nothing the
+// Agent sent explains, `unentitled` for data no matching Response carried. At v3 the oracle cannot
+// tell which part of the match the Client skipped, so the second names R4 beside the first.
 struct Rules {
-  const char* level;
-  const char* response;
+  const char* unexplained;
+  const char* unentitled;
 };
 
 Rules rulesFor(Mode mode) {
@@ -317,7 +317,7 @@ Rules rulesFor(Mode mode) {
     case Mode::AuthPriv:
       return {"R6", "R4 or R6"};
   }
-  return {"R6", "R4 or R6"};
+  return {"R6", "R4 or R6"};  // unreachable: the switch names every Mode
 }
 
 void judge(std::size_t request, const Outcome& outcome, const Ledger& ledger,

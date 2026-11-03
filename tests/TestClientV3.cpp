@@ -40,6 +40,15 @@ Credentials privCredentials(PrivProtocol priv, AuthProtocol protocol = AuthProto
   return Credentials{"bert", SecurityLevel::AuthPriv, protocol, "maplesyrup", priv, "privatepass"};
 }
 
+// The same Credentials for another user the Agent knows, with passwords of its own: whoever a reply
+// for someone other than bert is signed by.
+Credentials asErnie(Credentials creds) {
+  creds.userName = "ernie";
+  creds.authPassword = "butterscotch";
+  if (creds.privProtocol != PrivProtocol::None) creds.privPassword = "butterscotch-priv";
+  return creds;
+}
+
 // The data plane every well-behaved case here uses: echo the requested OIDs back with a value.
 Pdu echoAnswer(const Pdu& request) {
   Pdu p;
@@ -1519,14 +1528,15 @@ INSTANTIATE_TEST_SUITE_P(
         MismatchedReply{credentials(), credentials(), [](auto& r) { r.userName = "ernie"; },
                         "AnotherUserName"},
         // Signed with that user's own key, so under ours its digest is wrong. It is still a reply
-        // for someone else, and says nothing about our Credentials: silence, not AuthFailed.
+        // for someone else, and says nothing about our Credentials: silence, not AuthFailed. At
+        // authPriv it is encrypted with that user's privacy key as well.
         MismatchedReply{credentials(), credentials(),
-                        [](auto& r) {
-                          r.signer = Credentials{
-                              "ernie",        SecurityLevel::AuthNoPriv, AuthProtocol::Sha256,
-                              "butterscotch", PrivProtocol::None,        ""};
-                        },
+                        [](auto& r) { r.signer = asErnie(credentials()); },
                         "AnotherUserNameUnderItsOwnKey"},
+        MismatchedReply{privCredentials(PrivProtocol::Aes128),
+                        privCredentials(PrivProtocol::Aes128),
+                        [](auto& r) { r.signer = asErnie(privCredentials(PrivProtocol::Aes128)); },
+                        "AnotherUserNameUnderItsOwnKeys"},
         MismatchedReply{credentials(), credentials(),
                         [](auto& r) {
                           r.scoped.contextEngineId = {std::byte{0x80}, std::byte{0x00},

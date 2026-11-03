@@ -74,19 +74,29 @@ bool exceedsLevel(SecurityLevel reply, SecurityLevel request) noexcept {
 }
 
 // What a v3 request went out under, which its Response must quote back exactly: RFC 3412 section
-// 7.2 step 12. The rest of that step's list is matched elsewhere -- the msgID by the lookup, the
-// security model by the codec, the engineID in deliverV3 -- because each of those has exceptions
-// of its own.
+// 7.2 step 12's securityLevel, securityName (USM's user name), contextEngineID and contextName. The
+// rest of that step's list is matched elsewhere -- the msgID by the lookup, the security model by
+// the codec, the engineID in deliverV3 -- because each of those has exceptions of its own.
+//
+// In two halves, because they can be read at different times. The level and the user name are in
+// the clear and are compared before the digest; the context is inside the ciphertext at authPriv
+// and is compared once the reply is open.
 struct ResponseMatch {
   SecurityLevel level = SecurityLevel::NoAuthNoPriv;
   std::string userName;
   Octets contextEngineId;
   std::string contextName;
+  // Engine Discovery's identity phase, addressed to no engineID. It names no user and no context,
+  // and its answer is read for the engineID alone and trusted with nothing (RFC 3414 section 4),
+  // so it is matched on its level alone. An Agent that answers it with a Response quotes its own.
+  bool identityPhase = false;
 
-  [[nodiscard]] bool quotedBy(const V3Message& reply) const {
-    return reply.header.level == level && reply.security.userName == userName &&
-           reply.scoped.contextEngineId == contextEngineId &&
-           reply.scoped.contextName == contextName;
+  [[nodiscard]] bool securityQuotedBy(const V3Message& reply) const {
+    return reply.header.level == level && (identityPhase || reply.security.userName == userName);
+  }
+  [[nodiscard]] bool contextQuotedBy(const V3Message& reply) const {
+    return identityPhase || (reply.scoped.contextEngineId == contextEngineId &&
+                             reply.scoped.contextName == contextName);
   }
 };
 
@@ -765,12 +775,8 @@ void Client::Impl::deliverV3(std::span<const std::byte> datagram, const net::Udp
   const bool plainReport = !encrypted && msg->scoped.pdu.type == PduType::Report;
   // The user name is in the clear too, and for the same reason it is compared before the digest: a
   // reply for another user, signed with that user's key, fails ours, and AuthFailed would blame
-  // our Credentials for what was never an answer to them. The identity phase names no user (see
-  // the rest of step 12, below).
-  if (!plainReport && (msg->header.level != p.match.level ||
-                       (!p.engineId.empty() && msg->security.userName != p.match.userName))) {
-    return;
-  }
+  // our Credentials for what was never an answer to them.
+  if (!plainReport && !p.match.securityQuotedBy(*msg)) return;
 
   // The one message the protocol requires us to accept unauthenticated: an Engine that does not
   // recognise our engineID has no key to authenticate its complaint with (RFC 3414 section 3.2).
@@ -839,13 +845,8 @@ void Client::Impl::deliverV3(std::span<const std::byte> datagram, const net::Udp
   if (!isReport) {
     if (!p.engineId.empty() && msg->security.engineId != p.engineId) return;
     // The rest of step 12. A silent drop too: a Response for another context is an answer to some
-    // other request, which tells us nothing about this one's Target. Only here, since at authPriv
-    // the context is inside the ciphertext. The identity phase is the exception, as it is for the
-    // engineID above: it names no user and no context, and its answer is read for the engineID
-    // alone and trusted with nothing (RFC 3414 section 4). The level and the user name were
-    // settled before the digest; the match is taken whole here all the same, so that the four are
-    // one rule in one place rather than two halves of it.
-    if (!p.engineId.empty() && !p.match.quotedBy(*msg)) return;
+    // other request, which tells us nothing about this one's Target.
+    if (!p.match.contextQuotedBy(*msg)) return;
     // Each transmission carries its Message ID as its request-id too, so a Response must quote
     // the pair one transmission went out with -- not one transmission's msgID and another's
     // request-id.
@@ -942,6 +943,9 @@ Client::Impl::Encoder Client::Impl::v3Encoder(V3Header header, UsmParameters usm
                     .userName = usm.userName,
                     .contextEngineId = scoped.contextEngineId,
                     .contextName = scoped.contextName};
+  // A statement of its own: naming it in the initialiser above trips the spurious GCC 16
+  // -Wmismatched-new-delete described in transact.
+  pending->match.identityPhase = usm.engineId.empty();
   return [header, usm = std::move(usm), scoped = std::move(scoped), pending](
              std::int32_t id, net::ErrorCode& ec) mutable {
     header.msgId = id;

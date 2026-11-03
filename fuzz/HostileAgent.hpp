@@ -145,19 +145,20 @@ class HostileAgent {
       Octets contextEngineId;
       std::string contextName;
 
+      // What a message, request or reply, says on each of the four.
+      static Match of(const V3Message& msg) {
+        return {.level = msg.header.level,
+                .userName = msg.security.userName,
+                .contextEngineId = msg.scoped.contextEngineId,
+                .contextName = msg.scoped.contextName};
+      }
+
       bool operator==(const Match&) const = default;
     };
 
     Match match;
     Octets engineId;
   };
-  // What a message, request or reply, says on each of Seen::Match's four.
-  static Seen::Match matchOf(const V3Message& msg) {
-    return {.level = msg.header.level,
-            .userName = msg.security.userName,
-            .contextEngineId = msg.scoped.contextEngineId,
-            .contextName = msg.scoped.contextName};
-  }
 
   using OnSent = std::function<void(std::span<const std::byte> datagram, bool fromTarget)>;
 
@@ -350,7 +351,7 @@ class HostileAgent {
                           decryptScopedPdu(*msg, m_profile.creds.privProtocol, keys.priv, ec);
 
     Seen seen = readable ? seenFrom(msg->scoped.pdu) : Seen{};
-    seen.match = matchOf(*msg);
+    seen.match = Seen::Match::of(*msg);
     seen.engineId = msg->security.engineId;
     remember(msg->header.msgId, std::move(seen));
     if (!m_answering) return;

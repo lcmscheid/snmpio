@@ -18,10 +18,10 @@ completes moves — only what it says when it does.
 
 Three drops are named, and they are the ones a caller can act on: a digest that does not verify, an
 `encryptedPDU` we cannot open, and a reply that fails our own timeliness check. (A fourth was added
-later; see the amendment below.) Every other drop — a datagram that does not decode, a `request-id`
-that does not match, a Response from the wrong Engine — stays silent and still reports `Timeout`.
-Those say nothing about the Target beyond "this was not the reply we were waiting for", which is
-what `Timeout` already means. The useful distinction is between a Target that said nothing and a
+later, and a reply for someone else no longer reaches the first; see the amendments below.) Every
+other drop — a datagram that does not decode, a `request-id` that does not match, a Response from
+the wrong Engine — stays silent and still reports `Timeout`. Those say nothing about the Target
+beyond "this was not the reply we were waiting for", which is what `Timeout` already means. The useful distinction is between a Target that said nothing and a
 Target that said something we refused, not one enumerator per branch.
 
 ## Consequences
@@ -72,3 +72,47 @@ therefore turn a silent Target's `Timeout` into `NotInTimeWindow` during discove
 `AuthFailed` trade above again and accepted for the same reason.
 `ClientV3.AnUnsignedNotInTimeWindowsAloneFailsTheTimeSyncAtItsDeadline` pins both halves: every
 retransmission still goes out, and the deadline says why.
+
+## Amendment, 2026-11-03: a reply that answers someone else is silence
+
+RFC 3412 section 7.2 step 12 discards a Response unless its securityLevel, securityName,
+`contextEngineID` and `contextName` are its request's (issue #34). The discard is silent. A reply
+that matches another request, user or context says nothing about this request's Target, and saying
+nothing about the Target is what `Timeout` already means. net-snmp does the same:
+`snmpv3_verify_msg` rejects a mismatch without recording anything, and the request runs on to its timeout
+([`snmp_api.c`](https://github.com/net-snmp/net-snmp/blob/dd4d72e12adb081b07cab852f22fd465b3159653/snmplib/snmp_api.c#L2274-L2323)).
+
+**What changes.** The level and the user name travel in the clear, so they are compared before
+the digest. Some replies change outcome:
+
+- An unsigned reply to a signed request used to record `AuthFailed`. It is now silent.
+- A reply for another user, signed with that user's key, used to record `AuthFailed`. It is now
+  silent.
+- An `authNoPriv` reply to an `authPriv` request used to be accepted. That was the bug #34 fixed,
+  and it is now silent too.
+
+`AuthFailed` tells the caller to check their Credentials, and none of these replies answered them.
+
+**Reports.** A Report keeps its exemption from the rest of the match, as RFC 3412 section 7.2
+step 11 has it and as net-snmp does ("Reports don't have to match anything according to the
+spec"). There is one narrowing: no reply counts above its request's level, a Report included. This
+is stricter than net-snmp, which exempts Reports from the level check as well. No correct Agent is
+affected:
+
+- A Report goes out at `noAuthNoPriv`, or at the level USM names (RFC 3412 section 7.1 step 3).
+- USM names a level only for a `notInTimeWindows` Report to a signed request (RFC 3414 section 3.2
+  step 7(a)).
+
+Without the narrowing, a Report claiming more than its request asked for would be judged with keys
+that request never had. An encrypted one, answering a request with no privacy key, would record
+`DecryptionFailed`.
+
+**Engine Discovery's identity phase is matched on its level alone.** That request names no user and
+no context. Its answer is read for the engineID and trusted with nothing else (RFC 3414 section 4).
+
+**What stays.** The context is compared only after the digest and decryption, because at `authPriv`
+it is inside the ciphertext. A reply for another context that also fails either check still records
+that check's reason. That is the `msgID`-bar trade above, accepted again for the same reason.
+
+`ClientV3/AMismatchedResponse.*` pins each field alone, the context at both protected levels.
+`FuzzClient` holds the rule as threat-model R4.

@@ -180,7 +180,7 @@ class Ledger {
     if (seen == nullptr) return;
 
     const Credentials& creds = m_agent->profile().creds;
-    const bool authRequired = isAuthenticated(seen->level);
+    const bool authRequired = isAuthenticated(seen->match.level);
     const Keys keys = keysFor(creds, seen->engineId);
     const bool verified = authRequired && isAuthenticated(msg->header.level) &&
                           verifyAuth(datagram, *msg, creds.authProtocol, keys.auth, ec);
@@ -192,9 +192,10 @@ class Ledger {
     }
 
     const bool isReport = msg->scoped.pdu.type == PduType::Report;
-    // R4: nothing above the request's level counts, a Report included.
+    // R4: nothing above the request's level counts, a Report included. Spelled out here rather
+    // than borrowed from the Client, for the reason Seen::Match gives.
     if ((isAuthenticated(msg->header.level) && !authRequired) ||
-        (encrypted && !isEncrypted(seen->level))) {
+        (encrypted && !isEncrypted(seen->match.level))) {
       return;
     }
     // R6 (1): unsigned and unencrypted, or verified. At noAuthNoPriv, any Report (R8).
@@ -229,11 +230,7 @@ class Ledger {
       if (msg->scoped.pdu.type != PduType::Response) return;
       if (msg->scoped.pdu.requestId != msg->header.msgId) return;
       // R4: and the request's Security Level, user name and context, exactly.
-      if (msg->header.level != seen->level || msg->security.userName != seen->userName ||
-          msg->scoped.contextEngineId != seen->contextEngineId ||
-          msg->scoped.contextName != seen->contextName) {
-        return;
-      }
+      if (HostileAgent::matchOf(*msg) != seen->match) return;
     }
     credit(*seen, [&](Entitlement& e) { e.responses.push_back(std::move(msg->scoped.pdu)); });
   }
@@ -302,6 +299,27 @@ bool isDropReason(const net::ErrorCode& ec) {
   return ec == Errc::AuthFailed || ec == Errc::DecryptionFailed || ec == Errc::NotInTimeWindow;
 }
 
+// The threat-model rules a completion can break in each mode: `level` for one nothing the Agent
+// sent explains, `response` for data no matching Response carried. At v3 the oracle cannot tell
+// which part of the match the Client skipped, so the second names R4 beside the rule for the level.
+struct Rules {
+  const char* level;
+  const char* response;
+};
+
+Rules rulesFor(Mode mode) {
+  switch (mode) {
+    case Mode::V2c:
+      return {"R8", "R8"};
+    case Mode::NoAuthNoPriv:
+      return {"R8", "R4 or R8"};
+    case Mode::AuthNoPriv:
+    case Mode::AuthPriv:
+      return {"R6", "R4 or R6"};
+  }
+  return {"R6", "R4 or R6"};
+}
+
 void judge(std::size_t request, const Outcome& outcome, const Ledger& ledger,
            const Profile& profile, const Target& target) {
   const auto& code = outcome.code;
@@ -311,11 +329,10 @@ void judge(std::size_t request, const Outcome& outcome, const Ledger& ledger,
       std::to_string(
           std::chrono::duration_cast<std::chrono::microseconds>(outcome.elapsed).count()) +
       " us";
-  const char* rule = profile.mode == Mode::V2c || profile.mode == Mode::NoAuthNoPriv ? "R8" : "R6";
+  const auto [rule, responseRule] = rulesFor(profile.mode);
 
   // A completion with data, or with the Agent's error-status, must carry what some matching
-  // Response carried. At v3 the oracle cannot tell which part of the match the Client skipped, so
-  // it names R4 beside the rule for the level.
+  // Response carried.
   if (!code || code.category() == agentErrorCategory()) {
     for (const auto& pdu : entitled.responses) {
       const auto status = code ? code.value() : 0;
@@ -324,9 +341,6 @@ void judge(std::size_t request, const Outcome& outcome, const Ledger& ledger,
         return;
       }
     }
-    const char* responseRule = profile.mode == Mode::V2c            ? rule
-                               : profile.mode == Mode::NoAuthNoPriv ? "R4 or R8"
-                                                                    : "R4 or R6";
     violated(responseRule, where + ", which no matching Response entitled it to");
   }
 

@@ -135,14 +135,29 @@ class HostileAgent {
   struct Seen {
     Owner owner = Owner::Unknown;
     std::size_t requestIndex = 0;
-    SecurityLevel level = SecurityLevel::NoAuthNoPriv;
-    Octets engineId;
     // What a Response must quote back (RFC 3412 section 7.2 step 12). The context is the request's
-    // own only where the Agent could read it.
-    std::string userName;
-    Octets contextEngineId;
-    std::string contextName;
+    // own only where the Agent could read it. The oracle's own spelling of the Client's
+    // ResponseMatch, on purpose: an oracle that borrowed the Client's rule would agree with its
+    // bugs.
+    struct Match {
+      SecurityLevel level = SecurityLevel::NoAuthNoPriv;
+      std::string userName;
+      Octets contextEngineId;
+      std::string contextName;
+
+      bool operator==(const Match&) const = default;
+    };
+
+    Match match;
+    Octets engineId;
   };
+  // What a message, request or reply, says on each of Seen::Match's four.
+  static Seen::Match matchOf(const V3Message& msg) {
+    return {.level = msg.header.level,
+            .userName = msg.security.userName,
+            .contextEngineId = msg.scoped.contextEngineId,
+            .contextName = msg.scoped.contextName};
+  }
 
   using OnSent = std::function<void(std::span<const std::byte> datagram, bool fromTarget)>;
 
@@ -335,11 +350,8 @@ class HostileAgent {
                           decryptScopedPdu(*msg, m_profile.creds.privProtocol, keys.priv, ec);
 
     Seen seen = readable ? seenFrom(msg->scoped.pdu) : Seen{};
-    seen.level = msg->header.level;
+    seen.match = matchOf(*msg);
     seen.engineId = msg->security.engineId;
-    seen.userName = msg->security.userName;
-    seen.contextEngineId = msg->scoped.contextEngineId;
-    seen.contextName = msg->scoped.contextName;
     remember(msg->header.msgId, std::move(seen));
     if (!m_answering) return;
 

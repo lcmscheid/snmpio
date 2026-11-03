@@ -1518,12 +1518,13 @@ INSTANTIATE_TEST_SUITE_P(
                         "AuthNoPrivAnsweringNoAuthNoPriv"},
         MismatchedReply{credentials(), credentials(), [](auto& r) { r.userName = "ernie"; },
                         "AnotherUserName"},
-        // Signed by that user, so under our key its digest is wrong. It is still a reply for
-        // someone else, and says nothing about our Credentials: silence, not AuthFailed.
+        // Signed with that user's own key, so under ours its digest is wrong. It is still a reply
+        // for someone else, and says nothing about our Credentials: silence, not AuthFailed.
         MismatchedReply{credentials(), credentials(),
                         [](auto& r) {
-                          r.userName = "ernie";
-                          r.corruptDigest = true;
+                          r.signer = Credentials{
+                              "ernie",        SecurityLevel::AuthNoPriv, AuthProtocol::Sha256,
+                              "butterscotch", PrivProtocol::None,        ""};
                         },
                         "AnotherUserNameUnderItsOwnKey"},
         MismatchedReply{credentials(), credentials(),
@@ -1534,8 +1535,49 @@ INSTANTIATE_TEST_SUITE_P(
                         },
                         "AnotherContextEngineId"},
         MismatchedReply{credentials(), credentials(),
-                        [](auto& r) { r.scoped.contextName = "elsewhere"; }, "AnotherContextName"}),
+                        [](auto& r) { r.scoped.contextName = "elsewhere"; }, "AnotherContextName"},
+        // At authPriv the context is inside the ciphertext, so it is compared only once the reply
+        // has verified and opened. Encrypted with the right key, it gets that far and is silent.
+        MismatchedReply{
+            privCredentials(PrivProtocol::Aes128), privCredentials(PrivProtocol::Aes128),
+            [](auto& r) {
+              r.scoped.contextEngineId = {std::byte{0x80}, std::byte{0x00}, std::byte{0x1f},
+                                          std::byte{0x88}, std::byte{0x09}};
+            },
+            "AnotherContextEngineIdUnderEncryption"},
+        MismatchedReply{privCredentials(PrivProtocol::Aes128),
+                        privCredentials(PrivProtocol::Aes128),
+                        [](auto& r) { r.scoped.contextName = "elsewhere"; },
+                        "AnotherContextNameUnderEncryption"}),
     [](const testing::TestParamInfo<MismatchedReply>& row) { return std::string(row.param.name); });
+
+// The one Response matched on its level alone. Engine Discovery's identity phase names no user and
+// no context, and an Agent that answers it with a Response rather than a Report quotes its own
+// back: the user it knows and its own engineID as the contextEngineID. Its answer is read for the
+// engineID and trusted with nothing (RFC 3414 section 4), so neither is a mismatch there.
+TEST(ClientV3, AnIdentityPhaseAnsweredWithAResponseStillDiscovers) {
+  Fixture f;
+  ScriptedV3Agent agent(f.io, credentials(), echoAnswer);
+  f.agent = &agent;
+  int identityResponses = 0;
+  agent.setResponder(
+      [&](const ScriptedV3Agent::Request& req) -> std::optional<ScriptedV3Agent::Reply> {
+        if (!req.message.security.engineId.empty()) return agent.behaveLikeACompliantAgent(req);
+        ++identityResponses;
+        ScriptedV3Agent::Reply reply;
+        reply.level = SecurityLevel::NoAuthNoPriv;
+        reply.scoped.pdu = echoAnswer(req.message.scoped.pdu);
+        return reply;
+      });
+
+  f.client.asyncGet(targetFor(agent, 0), credentials(), {sysDescr}, f.requestToken());
+  f.run();
+
+  ASSERT_FALSE(f.ec) << f.ec.message();
+  EXPECT_EQ(identityResponses, 1);
+  ASSERT_EQ(f.response.varbinds.size(), 1U);
+  EXPECT_EQ(f.response.varbinds[0].name, sysDescr);
+}
 
 // CVE-2008-0960: a verifier that trusted the digest's width as sent compared only that many
 // octets, so a 1-octet digest was a 1-in-256 guess and an empty one no guess at all. These carry

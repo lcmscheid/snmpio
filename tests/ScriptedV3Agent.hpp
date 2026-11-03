@@ -52,6 +52,10 @@ class ScriptedV3Agent {
     bool corruptPrivKey = false;
     // Another user name than the Agent's own, signed with the Agent's key all the same.
     std::optional<std::string> userName;
+    // Another user altogether: signed, and encrypted at authPriv, with the keys these Credentials
+    // localize to at this Agent's engineID, under their user name. A reply the Agent really did
+    // send, for someone other than the request's user.
+    std::optional<Credentials> signer;
     // A digest this many octets wide instead of the protocol's: the CVE-2008-0960 forgery. Its
     // octets are the leading ones of the true digest over the message as sent, which is all that a
     // verifier comparing only as many octets as arrived would check -- such a verifier accepts it.
@@ -220,21 +224,29 @@ class ScriptedV3Agent {
     usm.engineId = reply.engineId.value_or(m_engineId);
     usm.boots = reply.boots.value_or(m_boots);
     usm.time = reply.time.value_or(m_time);
-    usm.userName = reply.userName.value_or(m_creds.userName);
+    const Credentials& signing = reply.signer ? *reply.signer : m_creds;
+    usm.userName = reply.userName.value_or(signing.userName);
 
     ScopedPdu scoped = std::move(reply.scoped);
     if (scoped.contextEngineId.empty()) scoped.contextEngineId = usm.engineId;
     if (scoped.pdu.type == PduType::Response) scoped.pdu.requestId = requestId;
 
+    net::ErrorCode ec;
     auto key = m_key;
-    if (reply.corruptDigest && !key.empty()) key.front() ^= std::byte{0xff};
     auto privKey = m_privKey;
+    if (reply.signer) {
+      key = localizedAuthKey(signing, m_engineId, ec);
+      privKey = signing.privProtocol == PrivProtocol::None
+                    ? SecretOctets{}
+                    : localizedPrivKey(signing, m_engineId, ec);
+      if (ec) return;
+    }
+    if (reply.corruptDigest && !key.empty()) key.front() ^= std::byte{0xff};
     if (reply.corruptPrivKey && !privKey.empty()) privKey.front() ^= std::byte{0xff};
 
-    net::ErrorCode ec;
     m_out = reply.digestWidth ? withShortDigest(header, usm, scoped, *reply.digestWidth, key, ec)
-                              : encodeV3Message(header, usm, scoped, m_creds.authProtocol, key, ec,
-                                                m_creds.privProtocol, privKey);
+                              : encodeV3Message(header, usm, scoped, signing.authProtocol, key, ec,
+                                                signing.privProtocol, privKey);
     if (ec) return;
     m_sender.send(m_out, m_from, delivery);
   }

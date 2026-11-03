@@ -135,7 +135,28 @@ class HostileAgent {
   struct Seen {
     Owner owner = Owner::Unknown;
     std::size_t requestIndex = 0;
-    SecurityLevel level = SecurityLevel::NoAuthNoPriv;
+    // What a Response must quote back (RFC 3412 section 7.2 step 12). The context is the request's
+    // own only where the Agent could read it. The oracle's own spelling of the Client's
+    // ResponseMatch, on purpose: an oracle that borrowed the Client's rule would agree with its
+    // bugs.
+    struct Match {
+      SecurityLevel level = SecurityLevel::NoAuthNoPriv;
+      std::string userName;
+      Octets contextEngineId;
+      std::string contextName;
+
+      // What a message, request or reply, says on each of the four.
+      static Match of(const V3Message& msg) {
+        return {.level = msg.header.level,
+                .userName = msg.security.userName,
+                .contextEngineId = msg.scoped.contextEngineId,
+                .contextName = msg.scoped.contextName};
+      }
+
+      bool operator==(const Match&) const = default;
+    };
+
+    Match match;
     Octets engineId;
   };
 
@@ -330,7 +351,7 @@ class HostileAgent {
                           decryptScopedPdu(*msg, m_profile.creds.privProtocol, keys.priv, ec);
 
     Seen seen = readable ? seenFrom(msg->scoped.pdu) : Seen{};
-    seen.level = msg->header.level;
+    seen.match = Seen::Match::of(*msg);
     seen.engineId = msg->security.engineId;
     remember(msg->header.msgId, std::move(seen));
     if (!m_answering) return;
@@ -425,6 +446,16 @@ class HostileAgent {
         break;
     }
     if (m_script->pick(2) == 1) reply.usm.userName = "intruder";
+    switch (m_script->pick(3)) {
+      case 1:
+        reply.scoped.contextEngineId = m_script->bytes(m_script->pick(40));
+        break;
+      case 2:
+        reply.scoped.contextName = "elsewhere";
+        break;
+      default:
+        break;
+    }
     // Which key signs it. The Client verifies a reply with the key for the engineID its request
     // went to, which is the real one unless the identity phase was answered with another.
     switch (m_script->pick(4)) {

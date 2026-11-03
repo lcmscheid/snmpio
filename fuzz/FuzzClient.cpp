@@ -8,6 +8,7 @@
 // completion is judged against the threat model (docs/threat-model.md):
 //
 //   L1  every Outstanding Request completes exactly once, and its handler is destroyed once;
+//   R4  a Response counts only at the request's Security Level, user name and context;
 //   R5  no reply the Client drops fails a request before its deadline;
 //   R6  at authNoPriv and authPriv, nothing unauthenticated completes or fails a request before its
 //       deadline, except an unsigned Report and the answer to Engine Discovery's identity phase;
@@ -179,7 +180,7 @@ class Ledger {
     if (seen == nullptr) return;
 
     const Credentials& creds = m_agent->profile().creds;
-    const bool authRequired = isAuthenticated(seen->level);
+    const bool authRequired = isAuthenticated(seen->match.level);
     const Keys keys = keysFor(creds, seen->engineId);
     const bool verified = authRequired && isAuthenticated(msg->header.level) &&
                           verifyAuth(datagram, *msg, creds.authProtocol, keys.auth, ec);
@@ -191,6 +192,12 @@ class Ledger {
     }
 
     const bool isReport = msg->scoped.pdu.type == PduType::Report;
+    // R4: nothing above the request's level counts, a Report included. Spelled out here rather
+    // than borrowed from the Client, for the reason Seen::Match gives.
+    if ((isAuthenticated(msg->header.level) && !authRequired) ||
+        (encrypted && !isEncrypted(seen->match.level))) {
+      return;
+    }
     // R6 (1): unsigned and unencrypted, or verified. At noAuthNoPriv, any Report (R8).
     const bool exempt = isReport && !encrypted && !isAuthenticated(msg->header.level);
     if (authRequired && !exempt && !verified) return;
@@ -222,6 +229,8 @@ class Ledger {
       if (msg->security.engineId != seen->engineId) return;
       if (msg->scoped.pdu.type != PduType::Response) return;
       if (msg->scoped.pdu.requestId != msg->header.msgId) return;
+      // R4: and the request's Security Level, user name and context, exactly.
+      if (HostileAgent::Seen::Match::of(*msg) != seen->match) return;
     }
     credit(*seen, [&](Entitlement& e) { e.responses.push_back(std::move(msg->scoped.pdu)); });
   }
@@ -290,6 +299,27 @@ bool isDropReason(const net::ErrorCode& ec) {
   return ec == Errc::AuthFailed || ec == Errc::DecryptionFailed || ec == Errc::NotInTimeWindow;
 }
 
+// The threat-model rules a completion can break in each mode: `unexplained` for one nothing the
+// Agent sent explains, `unentitled` for data no matching Response carried. At v3 the oracle cannot
+// tell which part of the match the Client skipped, so the second names R4 beside the first.
+struct Rules {
+  const char* unexplained;
+  const char* unentitled;
+};
+
+Rules rulesFor(Mode mode) {
+  switch (mode) {
+    case Mode::V2c:
+      return {"R8", "R8"};
+    case Mode::NoAuthNoPriv:
+      return {"R8", "R4 or R8"};
+    case Mode::AuthNoPriv:
+    case Mode::AuthPriv:
+      return {"R6", "R4 or R6"};
+  }
+  return {"R6", "R4 or R6"};  // unreachable: the switch names every Mode
+}
+
 void judge(std::size_t request, const Outcome& outcome, const Ledger& ledger,
            const Profile& profile, const Target& target) {
   const auto& code = outcome.code;
@@ -299,7 +329,7 @@ void judge(std::size_t request, const Outcome& outcome, const Ledger& ledger,
       std::to_string(
           std::chrono::duration_cast<std::chrono::microseconds>(outcome.elapsed).count()) +
       " us";
-  const char* rule = profile.mode == Mode::V2c || profile.mode == Mode::NoAuthNoPriv ? "R8" : "R6";
+  const auto [rule, responseRule] = rulesFor(profile.mode);
 
   // A completion with data, or with the Agent's error-status, must carry what some matching
   // Response carried.
@@ -311,7 +341,7 @@ void judge(std::size_t request, const Outcome& outcome, const Ledger& ledger,
         return;
       }
     }
-    violated(rule, where + ", which no matching Response entitled it to");
+    violated(responseRule, where + ", which no matching Response entitled it to");
   }
 
   // A deadline cannot pass early, and every deadline is at least the Target's whole one: each

@@ -597,6 +597,11 @@ though RFC 3414 §2.6 makes localisation a single short hash over the Master Key
    codec), eviction of unreferenced Engines and their keys, and a cap.
 8. **Full RFC 3412 §7.2 step 12 matching (1.1.5):** securityLevel, userName, contextEngineID and
    contextName.
+   *Added 2026-11-03, after this snapshot: fixed by #34, with the tests
+   `ClientV3/AMismatchedResponse.*`, and held by `FuzzClient` as threat-model R4. A mismatch is a
+   silent drop that reports `Timeout`, as the table's first option has it. Reports do not stay
+   wholly exempt, as the table suggests: none counts above its request's level. ADR-0008's
+   2026-11-03 amendment records both.*
 9. **A TSan preset and the stress test (4.2)**, using clang. Use Asio ≥ 1.38.2, or define
    `ASIO_DISABLE_FENCED_BLOCK` in the TSan build. Define the Asio recycling-disable macros in
    every sanitizer build (4.1).
@@ -617,6 +622,9 @@ though RFC 3414 §2.6 makes localisation a single short hash over the Master Key
     dictionary, and corpus replay in `ctest`. ClusterFuzzLite in the meantime.
 16. **Missing regression tests:** a 1-octet digest (CVE-2008-0960, 1.5.3), and a v2c Response
     from the wrong source address (1.1.1).
+    *Added 2026-11-03, after this snapshot: both added by #34, at the Client rather than in
+    `tests/TestV3Message.cpp`: `ClientV3.RejectsADigestNarrowerThanTheProtocols`, for a 1-octet
+    and an empty digest, and `ClientGet.IgnoresAResponseFromAnotherAddress`.*
 17. **Optional engineID pinning per Target (1.1.6).**
 18. **Documentation:** completion handlers outlive `~Client` (3.1 rule 6); bind tokens to your
     own executor (3.2); exactly-once holds only while the executor runs (3.1 rule 4); SET

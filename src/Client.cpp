@@ -67,6 +67,39 @@ std::optional<std::uint32_t> usmStatsCounter(const Pdu& report) {
   return *(name.begin() + static_cast<std::ptrdiff_t>(prefix.size()));
 }
 
+// Whether a reply claims protection its request did not ask for.
+bool exceedsLevel(SecurityLevel reply, SecurityLevel request) noexcept {
+  return (isAuthenticated(reply) && !isAuthenticated(request)) ||
+         (isEncrypted(reply) && !isEncrypted(request));
+}
+
+// What a v3 request went out under, which its Response must quote back exactly: RFC 3412 section
+// 7.2 step 12's securityLevel, securityName (USM's user name), contextEngineID and contextName. The
+// rest of that step's list is matched elsewhere -- the msgID by the lookup, the security model by
+// the codec, the engineID in deliverV3 -- because each of those has exceptions of its own.
+//
+// In two halves, because they can be read at different times. The level and the user name are in
+// the clear and are compared before the digest; the context is inside the ciphertext at authPriv
+// and is compared once the reply is open.
+struct ResponseMatch {
+  SecurityLevel level = SecurityLevel::NoAuthNoPriv;
+  std::string userName;
+  Octets contextEngineId;
+  std::string contextName;
+  // Engine Discovery's identity phase, addressed to no engineID. It names no user and no context,
+  // and its answer is read for the engineID alone and trusted with nothing (RFC 3414 section 4),
+  // so it is matched on its level alone. An Agent that answers it with a Response quotes its own.
+  bool identityPhase = false;
+
+  [[nodiscard]] bool securityQuotedBy(const V3Message& reply) const {
+    return reply.header.level == level && (identityPhase || reply.security.userName == userName);
+  }
+  [[nodiscard]] bool contextQuotedBy(const V3Message& reply) const {
+    return identityPhase || (reply.scoped.contextEngineId == contextEngineId &&
+                             reply.scoped.contextName == contextName);
+  }
+};
+
 // The one Report that is about the Engine's clock, and so the one that may carry a pair we take.
 bool reportsNotInTimeWindows(const Pdu& pdu) {
   return pdu.type == PduType::Report && usmStatsCounter(pdu) == usmStatsNotInTimeWindows;
@@ -258,6 +291,7 @@ class Client::Impl {
     SecretOctets authKey;  // the Localized Key this exchange is authenticated with
     SecretOctets privKey;  // and the one it is encrypted with, at authPriv
     Octets engineId;       // the Authoritative Engine addressed; empty while discovering
+    ResponseMatch match;   // v3: written by v3Encoder, from the very fields it encodes
     Pdu response;
     UsmParameters security;  // what the reply's security parameters said
     bool answered = false;
@@ -726,6 +760,24 @@ void Client::Impl::deliverV3(std::span<const std::byte> datagram, const net::Udp
   Pending& p = *it->second;
   if (from != p.from) return;
 
+  const bool encrypted = isEncrypted(msg->header.level);
+  // RFC 3412 section 7.2 step 12: a Response is at the request's own Security Level. Checked ahead
+  // of the digest, because the level decides what the digest can say: a reply below the request's
+  // level carries none to check, and refusing it there would record AuthFailed for a reply that
+  // says nothing about the Target -- an authPriv request answered in the clear, or a signed one
+  // answered unsigned. A silent drop, recording no reason (ADR-0008). A Report may come in below
+  // the request, which is how the unsigned one below gets this far, but never above it: it goes out
+  // at the level USM names, or noAuthNoPriv (RFC 3412 section 7.1 step 3(d)), and USM names one
+  // only for a notInTimeWindows Report to a signed request (RFC 3414 section 3.2 step 7). Past both
+  // checks, a reply that is encrypted answered an authPriv request, since nothing else may.
+  if (exceedsLevel(msg->header.level, p.match.level)) return;
+  // A Report readable before the digest: the only reply that may come in below the request.
+  const bool plainReport = !encrypted && msg->scoped.pdu.type == PduType::Report;
+  // The user name is in the clear too, and for the same reason it is compared before the digest: a
+  // reply for another user, signed with that user's key, fails ours, and AuthFailed would blame
+  // our Credentials for what was never an answer to them.
+  if (!plainReport && !p.match.securityQuotedBy(*msg)) return;
+
   // The one message the protocol requires us to accept unauthenticated: an Engine that does not
   // recognise our engineID has no key to authenticate its complaint with (RFC 3414 section 3.2).
   // It is accepted only as a Report, only against an outstanding msgID, and only from the address
@@ -734,7 +786,6 @@ void Client::Impl::deliverV3(std::span<const std::byte> datagram, const net::Udp
   //
   // An encrypted message is never exempt and never has to be: privacy implies authentication, so
   // the PDU inside it cannot be read before the digest has been, which is the right order anyway.
-  const bool encrypted = isEncrypted(msg->header.level);
   const bool exemptFromAuth =
       !encrypted && !isAuthenticated(msg->header.level) && msg->scoped.pdu.type == PduType::Report;
   // Local rather than written straight into p: a verified reply can still be dropped below, and a
@@ -786,13 +837,16 @@ void Client::Impl::deliverV3(std::span<const std::byte> datagram, const net::Udp
     p.dropReason = make_error_code(Errc::NotInTimeWindow);
     return;
   }
-  // A Report is exempt from all three of the checks below. It may legitimately come from an Engine
+  // A Report is exempt from every check below. It may legitimately come from an Engine
   // other than the one we addressed -- that is what usmStatsUnknownEngineIDs means -- it carries no
   // request-id worth matching, and above all it is the message that *reports* a boots/time
   // disagreement, so checking it against the pair it is disagreeing with would discard every
   // resynchronisation the protocol has.
   if (!isReport) {
     if (!p.engineId.empty() && msg->security.engineId != p.engineId) return;
+    // The rest of step 12. A silent drop too: a Response for another context is an answer to some
+    // other request, which tells us nothing about this one's Target.
+    if (!p.match.contextQuotedBy(*msg)) return;
     // Each transmission carries its Message ID as its request-id too, so a Response must quote
     // the pair one transmission went out with -- not one transmission's msgID and another's
     // request-id.
@@ -885,6 +939,13 @@ Client::Impl::Encoder Client::Impl::v2cEncoder(Community community, Pdu pdu) {
 
 Client::Impl::Encoder Client::Impl::v3Encoder(V3Header header, UsmParameters usm, ScopedPdu scoped,
                                               const std::shared_ptr<Pending>& pending) {
+  pending->match = {.level = header.level,
+                    .userName = usm.userName,
+                    .contextEngineId = scoped.contextEngineId,
+                    .contextName = scoped.contextName};
+  // A statement of its own: naming it in the initialiser above trips the spurious GCC 16
+  // -Wmismatched-new-delete described in transact.
+  pending->match.identityPhase = usm.engineId.empty();
   return [header, usm = std::move(usm), scoped = std::move(scoped), pending](
              std::int32_t id, net::ErrorCode& ec) mutable {
     header.msgId = id;

@@ -476,6 +476,7 @@ class Client::Impl {
   // still counts as mapped from here, so that forgetting costs one Engine Discovery and no more
   // (threat model E1), and the rediscovery can still evict it if the Engine there has changed.
   void forgetEngineAt(const net::UdpEndpoint& endpoint);
+  // Drops an Engine and its Localized Keys if no endpoint maps to it, forgotten ones included.
   void evictIfUnmapped(const Octets& engineId);
 
   // The Master Key for one secret: the one the Credentials carry, or the one this Client derived
@@ -912,7 +913,8 @@ void Client::Impl::evictIfUnmapped(const Octets& engineId) {
 }
 
 void Client::Impl::forgetEngineAt(const net::UdpEndpoint& endpoint) {
-  // Never a collision: mapEngine clears the endpoint's row there whenever it maps one here.
+  // Never a collision: an endpoint is in at most one of the two maps, since mapEngine takes it out
+  // of m_forgottenEngineAt whenever it puts it in m_engineAt.
   m_forgottenEngineAt.insert(m_engineAt.extract(endpoint));
 }
 

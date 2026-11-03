@@ -2141,6 +2141,46 @@ TEST(ClientV3Cache, AnEngineReplacedAtItsOnlyTargetIsEvicted) {
   EXPECT_EQ(counts.localizedKeys, 1U);
 }
 
+// The other side of forgetting: an unsigned unknownEngineIDs Report about an Engine that has not
+// changed. The rediscovery finds the one that was kept, synchronised clock and keys, so it costs
+// the identity phase and nothing more (E1).
+TEST(ClientV3Cache, AForgottenEngineThatComesBackUnchangedIsKept) {
+  Fixture f;
+  f.expectedCompletions = 2;
+  ScriptedV3Agent agent(f.io, credentials(), echoAnswer);
+  f.agent = &agent;
+
+  bool settled = false;
+  bool reported = false;
+  int timeSyncPhases = 0;
+  agent.setResponder(
+      [&](const ScriptedV3Agent::Request& req) -> std::optional<ScriptedV3Agent::Reply> {
+        if (isTimeSyncPhase(req)) ++timeSyncPhases;
+        if (settled && !reported && !req.message.security.engineId.empty()) {
+          reported = true;
+          return ScriptedV3Agent::report(ScriptedV3Agent::unknownEngineIds,
+                                         SecurityLevel::NoAuthNoPriv);
+        }
+        return agent.behaveLikeACompliantAgent(req);
+      });
+
+  const auto target = targetFor(agent);
+  f.client.asyncGet(target, credentials(), {sysDescr}, [&](net::ErrorCode e, const Response&) {
+    EXPECT_FALSE(e) << e.message();
+    settled = true;
+    f.client.asyncGet(target, credentials(), {sysUpTime}, f.requestToken());
+    f.finish();
+  });
+  f.run();
+
+  EXPECT_FALSE(f.ec) << f.ec.message();
+  EXPECT_TRUE(reported);
+  EXPECT_EQ(timeSyncPhases, 1) << "the forgotten Engine was evicted, clock and all";
+  const auto counts = detail::CacheView::counts(f.client);
+  EXPECT_EQ(counts.engines, 1U);
+  EXPECT_EQ(counts.localizedKeys, 1U);
+}
+
 // ADR-0003: one Engine behind two Targets is one entry. When one Target's Engine changes, the
 // shared one stays for the other -- which then needs no rediscovery -- and goes only once neither
 // maps to it.

@@ -76,7 +76,8 @@ enum class Errc {
   // usmStatsUnsupportedSecLevels as UnsupportedSecurityLevel, because that is what they mean and a
   // second spelling of each would only be a second thing to check for.
   UnknownUserName,   // usmStatsUnknownUserNames: no such user on that Engine
-  UnknownEngineId,   // usmStatsUnknownEngineIDs, still, after re-discovering
+  UnknownEngineId,   // usmStatsUnknownEngineIDs, still, after re-discovering; or Engine
+                     // Discovery heard an engineID outside RFC 3411's 5..32 octets, or none
   NotInTimeWindow,   // usmStatsNotInTimeWindows, still, after resynchronising
   DecryptionError,   // usmStatsDecryptionErrors
   UnexpectedReport,  // a Report whose usmStats counter we do not recognise

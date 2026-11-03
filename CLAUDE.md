@@ -1,9 +1,10 @@
 # snmpio
 
 An async C++20 SNMPv2c/SNMPv3 Command Generator built directly on Asio. No Agent side, no
-net-snmp dependency. Currently at **stage 4 of 7** — v2c and v3 both work end to end over UDP at
-all three Security Levels, discovery, Reports and privacy included. Interop is stage 5, whose
-automated half is done; the hardware checklist remains.
+net-snmp dependency. Stages 0–4 and 6 of 7 are done — v2c and v3 both work end to end over UDP at
+all three Security Levels, discovery, Reports and privacy included, and stage 6 made it safe to
+depend on (`docs/threat-model.md`). Interop is stage 5, whose automated half is done; the
+hardware checklist remains. Stage 7 is docs, packaging and release.
 `README.md` has the stage table.
 
 ## Read before changing anything

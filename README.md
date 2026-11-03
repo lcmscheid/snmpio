@@ -16,9 +16,9 @@ Blumenthal and the Reeder key extension. Stage 5's automated half is done too: e
 reaches `snmpd` and both Simulator images in CI, and what stage 5 still needs is a run of the
 hardware checklist.
 
-Stage 6 has begun. Its sanitizer builds, the stateful Client fuzzer and the
-[soak](#the-deployment-it-is-tested-in) are done, and the rest of it is measured against the
-[threat model](docs/threat-model.md).
+Stage 6 is done. The sanitizer builds, the stateful Client fuzzer, the
+[soak](#the-deployment-it-is-tested-in), safe destruction and the hardening against a hostile
+network are all in, each measured against the [threat model](docs/threat-model.md).
 
 | Stage | Deliverable | State |
 |---|---|---|
@@ -28,7 +28,7 @@ Stage 6 has begun. Its sanitizer builds, the stateful Client fuzzer and the
 | 3 | Async Engine Discovery, time sync, Report handling | **done** |
 | 4 | Privacy: AES-128, then AES-192/256 under both key extensions, DES behind the legacy provider | **done** |
 | 5 | Interop matrix vs the Simulator, `snmpd`, and real vendor gear | automated half **done**; the [hardware checklist](#pre-release-hardware-checklist) remains |
-| 6 | Safe to depend on: the [threat model](docs/threat-model.md), sanitizer and stress harness, destroying a Client stops it, hardening against a hostile network | sanitizer builds, Client fuzzer, safe destruction and the soak **done**; the rest in progress |
+| 6 | Safe to depend on: the [threat model](docs/threat-model.md), sanitizer and stress harness, destroying a Client stops it, hardening against a hostile network | **done** |
 | 7 | Docs, packaging and release | |
 
 ## Using it

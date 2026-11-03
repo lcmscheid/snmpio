@@ -454,8 +454,10 @@ enum class ReleasePoint {
   // Just ahead of the rediscovery's identity phase's answer, while the rediscovery is owed (#43).
   DuringTheRediscovery,
   // Right behind the time-sync phase's answer, before the reported request's retry can go out: the
-  // order #84 names, on the wire. Whether the Client reads it before or after it encodes the retry
-  // is its executor's choice, and no datagram can land in between. The check holds either way.
+  // order #84 names, on the wire. On one thread, as here, the Client still encodes the retry
+  // before it reads the held Response, so this lands where BeforeTheRetryIsAnswered does. The
+  // other order, where the retry would go out at boots 3, is the executor's to choose and no test
+  // can schedule it, but the same check covers it: the retry must carry boots 1.
   BeforeTheRetry,
   // Once the retry is on the wire at the rediscovered boots, just ahead of its answer.
   BeforeTheRetryIsAnswered,

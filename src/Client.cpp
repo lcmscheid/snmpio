@@ -282,7 +282,7 @@ class Client::Impl {
                                               WalkOptions options);
 
  private:
-  // Which Baseline an Engine's cached pair stands on (CONTEXT.md), numbered across the Client so
+  // Which Baseline an Engine's cached pair is (CONTEXT.md), numbered across the Client so
   // that an Engine evicted and discovered again never repeats one. Its own type, as std::byte and
   // std::align_val_t are, so that it cannot be mixed up with the boots and time it sits beside.
   // Zero is no Baseline yet. One is used per completed time-sync phase, so 64 bits never wrap.
@@ -302,7 +302,7 @@ class Client::Impl {
     SecretOctets authKey;  // the Localized Key this exchange is authenticated with
     SecretOctets privKey;  // and the one it is encrypted with, at authPriv
     Octets engineId;       // the Authoritative Engine addressed; empty while discovering
-    // The Baseline that Engine's cached pair stood on when this request was encoded. A reply to it
+    // Which Baseline that Engine's cached pair was when this request was encoded. A reply to it
     // moves the cache only while that is still the Engine's Baseline (EngineState::baselineId).
     BaselineId baselineId{};
     ResponseMatch match;  // v3: written by v3Encoder, from the very fields it encodes
@@ -341,7 +341,7 @@ class Client::Impl {
     // rediscovered since. Had it set the flag, the rediscovery that clearing it asked for would
     // skip its time-sync phase, and the retry would go out at the old boots.
     bool timeSynced = false;
-    // The Baseline the pair above stands on: which time-sync phase set it. A reply to a request
+    // Which Baseline the pair above is: which time-sync phase set it. A reply to a request
     // sent under an earlier Baseline still answers its request, but its clock is dropped
     // (ADR-0010's amendment, #84). The Engine may have signed it before the rediscovery that set
     // this Baseline, and nothing in the message tells a boots it has since abandoned from a

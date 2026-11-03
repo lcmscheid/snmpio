@@ -101,9 +101,10 @@ twice in a row. The other is a different Engine now being cached at the Target (
 threat model E4, or an eviction, B2). The Report is from the Engine the request was sent to, but
 its boots is compared against the Engine cached there now. Either way it costs one more time-sync
 phase, bounded as before by the one forced resync a request may have, and fails nothing. Ignoring
-the Report instead would cost more: if the Engine really has gone backwards again, the retry meets
-the same Report on its second attempt, with no forced resync left, and fails. So the Report path
-is left as it was.
+the Report would save that phase in the second case and fail a request in the first: if the Engine
+really has gone backwards again, the retry meets the same Report on its second attempt, with no
+forced resync left. The Report alone does not say which case it is, so the Report path is left as
+it was.
 
 Numbered across the Client rather than per Engine, so that an Engine evicted and discovered again
 (threat model B2) never repeats a Baseline a request from before the eviction still holds.
@@ -119,5 +120,9 @@ The Baseline rule refuses nothing a request sent under the current Baseline sees
 `ClientV3/ALateSignedResponseAtTheOldBoots.NeitherFailsARequestNorCostsASecondRediscovery` pins
 the places the held Response can land: during the rediscovery (#43), right behind the time-sync
 phase's answer and so before the retry can go out, ahead of the retry's answer, and after the
-reported request has completed. `ClientV3.AcceptsAReplyFromAnEngineThatRestartedSinceWeCachedIt`
+reported request has completed. The second is the order #84 names, on the wire. On one thread the
+Client still encodes the retry before it reads the held Response, so the retry going out at the
+abandoned boots is never run. No test can schedule that order, but every case checks that the retry
+carries the rediscovered boots, which is what it would break.
+`ClientV3.AcceptsAReplyFromAnEngineThatRestartedSinceWeCachedIt`
 pins what the rule must not refuse.

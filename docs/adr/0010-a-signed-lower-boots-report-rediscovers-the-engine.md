@@ -46,9 +46,8 @@ until the rediscovery completes. That is the same window the first discovery ope
 Discovery's time-sync phase marks an Engine synced again. A signed Response arriving late at the
 old pair is still adopted, as step 7(b)(1) allows, but it cannot stand in for the rediscovery. An
 earlier version let it, which failed the request whose Report had forced the rediscovery (#43). The
-same Response arriving *after* the rediscovery is still adopted, because its higher boots looks
-like a restart. A request then fails if that happens before its retry goes out. That window is
-open (#84).
+same Response arriving *after* the rediscovery answers its request but no longer moves the clock:
+see the amendment below.
 
 A captured Report is useful to an attacker only if its `msgID` matches a request still waiting for
 an answer, and `msgID`s do not repeat within one Client. A recording from an earlier process costs
@@ -65,3 +64,41 @@ itself and that only an Engine breaking the RFC can cause.
 `InteropFaults.RediscoversAnEngineWhoseBootsWentBackwards` runs this path against the Simulator
 release, which signs the Report. `InteropFaults.RefusesABootsRegression` keeps pinning the refusal
 of a lower-boots *Response*, against the older image that sends one.
+
+## Amendment, 2026-11-03: a reply from before the rediscovery keeps its answer and loses its clock
+
+Two requests go out at the cached boots N. The Engine signs a Response to one, then resets to
+boots M < N. The other meets a signed lower-boots Report and its retry rediscovers the Engine at M.
+If the held Response lands after that, step 7(b)(1) reads its boots N as a restart, and section
+2.2.3 adopts it. The cache is back at N, the boots the Engine was rediscovered for abandoning. The
+retry's answer at M is now behind the cache and is dropped, and a request on its second attempt
+that reads N fails with `Errc::NotInTimeWindow` (#84).
+
+So each time Engine Discovery's time-sync phase sets a pair, it numbers that pair as a new
+**baseline**, from a counter the Client keeps across Engines. Each request records the baseline
+it was sent under. A signed reply to a request sent under an earlier baseline still answers that
+request, and still has to be timely to do so. Only its clock is dropped, and it never reaches the
+cache.
+
+Step 7(b) still holds for every message, so this rule is stricter than the RFC, not looser. The
+RFC has the non-authoritative engine adopt a later pair because that is the only evidence it has
+of where the Engine's clock has got to. Here it has better evidence: a time-sync phase answered
+after the request went out. A reply the Engine signed before that answer cannot tell us anything
+newer about its clock. Section 2.2.3 does not cover this case at all: it assumes boots never goes
+down, and the Engine that ADR-0010 is about broke that assumption.
+
+Numbered across the Client rather than per Engine, so that an Engine evicted and discovered again
+(threat model B2) never repeats a baseline a request from before the eviction still holds.
+
+**Refuse the abandoned boots itself.** This was the other option. When a Report forces the
+resync from N down to M, it would record N, and refuse every pair at boots ≤ N until the Engine is
+seen above N. The rule keys on the value rather than on when the request was sent, so it also
+refuses a genuine restart that lands between M and N. After a reset from 9 to 3, an Engine that
+restarts to 4 is refused. Its Reports name a higher boots, not a lower one, so none of them forces
+the resync that would lift the rule, and the Engine is locked out. Threat model E2 forbids that.
+The baseline rule refuses nothing a request sent under the current baseline sees.
+
+`ClientV3.ALateSignedResponseAfterARediscoveryDoesNotFailTheRetry` and
+`ClientV3.ALateSignedResponseAfterARediscoveryCostsTheNextRequestNothing` pin the two places the
+held Response can land. `ClientV3.AdoptsARestartSeenInAReplyToARequestSentUnderTheCurrentBaseline`
+pins what the rule must not refuse.

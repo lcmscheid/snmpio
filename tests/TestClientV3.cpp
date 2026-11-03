@@ -499,6 +499,142 @@ TEST(ClientV3, ALateSignedResponseDoesNotCancelAPendingRediscovery) {
   EXPECT_EQ(bootsTheReportedRequestCarried, (std::vector<std::int32_t>{oldBoots, resetBoots}));
 }
 
+// When #84's held Response is let go, once the rediscovery #43 protects has finished.
+enum class LateRelease {
+  // After the reported request's retry is on the wire at the rediscovered boots, and just ahead of
+  // its answer.
+  BeforeTheRetryIsAnswered,
+  // Once the reported request has completed, so that only the next request can be hurt.
+  AfterTheReportedRequestCompletes,
+};
+
+// #84. #43's interleaving, with the held Response let go after the rediscovery rather than during
+// it. It was signed at boots 3 before the Engine reset to boots 1, so it reads as a restart from
+// boots 1. It still answers its own request, which went out at boots 3, but it says nothing about
+// the Engine since the rediscovery set boots 1 as the baseline. Had it moved the cache back to
+// boots 3, the reported request's answer at boots 1 would be dropped, and the next request would
+// go out at boots 3 and pay a third time-sync phase. A third GET, after both, shows which boots the
+// cache holds.
+void releaseTheLateResponseAfterTheRediscovery(LateRelease when) {
+  constexpr std::int32_t oldBoots = 3;
+  constexpr std::int32_t oldTime = 1000;
+  constexpr std::int32_t resetBoots = 1;
+  constexpr std::int32_t resetTime = 50;
+  const Oid sysContact{1, 3, 6, 1, 2, 1, 1, 4, 0};
+
+  Fixture f;
+  f.expectedCompletions = 3;
+  ScriptedV3Agent agent(f.io, credentials(), echoAnswer);
+  f.agent = &agent;
+  test::CompletionOracle reported(f.io);  // asks for sysDescr, and meets the lower-boots Report
+  test::CompletionOracle late(f.io);      // asks for sysUpTime, and its Response is held back
+  test::CompletionOracle next(f.io);      // asks for sysContact, once both have completed
+
+  std::optional<ScriptedV3Agent::Request> reportedRequest;
+  std::optional<ScriptedV3Agent::Request> lateRequest;
+  std::optional<ScriptedV3Agent::Reply> lateResponse;
+  bool reset = false;
+  bool released = false;
+  int timeSyncPhases = 0;
+  std::vector<std::int32_t> bootsTheReportedRequestCarried;
+  std::vector<std::int32_t> bootsTheNextRequestCarried;
+
+  const auto release = [&] {
+    if (!lateResponse) return;
+    agent.answerLate(*lateRequest, *std::exchange(lateResponse, std::nullopt));
+    released = true;
+  };
+
+  agent.setBoots(oldBoots);
+  agent.setTime(oldTime);
+  agent.setResponder(
+      [&](const ScriptedV3Agent::Request& req) -> std::optional<ScriptedV3Agent::Reply> {
+        if (isTimeSyncPhase(req)) ++timeSyncPhases;
+        const bool isReported = asksFor(req, sysDescr);
+        const bool isLate = asksFor(req, sysUpTime);
+        if (isReported) bootsTheReportedRequestCarried.push_back(req.message.security.boots);
+        if (asksFor(req, sysContact)) {
+          bootsTheNextRequestCarried.push_back(req.message.security.boots);
+        }
+
+        if (!reset && (isReported || isLate)) {
+          (isReported ? reportedRequest : lateRequest) = req;
+          if (!reportedRequest || !lateRequest) return std::nullopt;
+          lateResponse = agent.behaveLikeACompliantAgent(*lateRequest);
+          lateResponse->boots = oldBoots;
+          lateResponse->time = oldTime;
+          reset = true;
+          agent.setBoots(resetBoots);
+          agent.setTime(resetTime);
+          agent.answerLate(*reportedRequest, *agent.behaveLikeACompliantAgent(*reportedRequest));
+          return std::nullopt;
+        }
+        // The reported request's retry, after the rediscovery has synced at boots 1.
+        if (when == LateRelease::BeforeTheRetryIsAnswered && reset && isReported &&
+            req.message.security.boots == resetBoots) {
+          release();
+        }
+        return agent.behaveLikeACompliantAgent(req);
+      });
+
+  // Long enough that nothing is retransmitted, and no retransmission if it were: every datagram
+  // here is one the test chose.
+  Target target = targetFor(agent);
+  target.timeout = std::chrono::seconds(5);
+  target.retries = 0;
+  int bothDone = 0;
+  const auto thenTheNext = [&] {
+    f.finish();
+    if (++bothDone < 2) return;
+    f.client.asyncGet(target, credentials(), {sysContact},
+                      next.handler([&f](net::ErrorCode, const Response&) { f.finish(); }));
+  };
+  f.client.asyncGet(target, credentials(), {sysDescr},
+                    reported.handler([&](net::ErrorCode, const Response&) {
+                      if (when == LateRelease::AfterTheReportedRequestCompletes) release();
+                      thenTheNext();
+                    }));
+  f.client.asyncGet(target, credentials(), {sysUpTime},
+                    late.handler([&](net::ErrorCode, const Response&) { thenTheNext(); }));
+  f.run();
+
+  ASSERT_TRUE(released) << "the held Response was never let go";
+  EXPECT_TRUE(late.completedExactlyOnce({net::ErrorCode{}}));
+  EXPECT_TRUE(reported.completedExactlyOnce({net::ErrorCode{}}))
+      << "the late Response moved the clock back to the abandoned boots";
+  EXPECT_TRUE(next.completedExactlyOnce({net::ErrorCode{}}));
+  // The first discovery's, and the rediscovery's. Not a third.
+  EXPECT_EQ(timeSyncPhases, 2);
+  EXPECT_EQ(bootsTheReportedRequestCarried, (std::vector<std::int32_t>{oldBoots, resetBoots}));
+  EXPECT_EQ(bootsTheNextRequestCarried, (std::vector<std::int32_t>{resetBoots}));
+}
+
+TEST(ClientV3, ALateSignedResponseAfterARediscoveryDoesNotFailTheRetry) {
+  releaseTheLateResponseAfterTheRediscovery(LateRelease::BeforeTheRetryIsAnswered);
+}
+
+TEST(ClientV3, ALateSignedResponseAfterARediscoveryCostsTheNextRequestNothing) {
+  releaseTheLateResponseAfterTheRediscovery(LateRelease::AfterTheReportedRequestCompletes);
+}
+
+// What the rule above must not cost (threat model E2): a restart seen in a reply to a request sent
+// under the baseline the cache holds is adopted, and the next request carries it.
+TEST(ClientV3, AdoptsARestartSeenInAReplyToARequestSentUnderTheCurrentBaseline) {
+  std::vector<std::int32_t> bootsCarried;
+  const auto r = afterTheCacheIsSettled([&](ScriptedV3Agent& agent) {
+    agent.setResponder([&](const ScriptedV3Agent::Request& req) {
+      if (!req.message.security.engineId.empty()) {
+        bootsCarried.push_back(req.message.security.boots);
+      }
+      return answersWith(9, 20)(req);
+    });
+  });
+
+  EXPECT_FALSE(r.second) << r.second.message();
+  EXPECT_FALSE(r.third) << r.third.message();
+  EXPECT_EQ(bootsCarried, (std::vector<std::int32_t>{3, 9}));
+}
+
 // The direction that was always right stays as it was: a signed Report naming a *higher* boots is
 // adopted and the request retried, with no rediscovery.
 TEST(ClientV3, ASignedHigherBootsReportIsAdoptedWithoutRediscovery) {

@@ -296,7 +296,10 @@ class Client::Impl {
     SecretOctets authKey;  // the Localized Key this exchange is authenticated with
     SecretOctets privKey;  // and the one it is encrypted with, at authPriv
     Octets engineId;       // the Authoritative Engine addressed; empty while discovering
-    ResponseMatch match;   // v3: written by v3Encoder, from the very fields it encodes
+    // The baseline that Engine's cached pair stood on when this request was encoded
+    // (EngineState::baseline). A reply to it moves the cache only while that is still the baseline.
+    std::uint64_t baseline = 0;
+    ResponseMatch match;  // v3: written by v3Encoder, from the very fields it encodes
     Pdu response;
     UsmParameters security;  // what the reply's security parameters said
     bool answered = false;
@@ -332,6 +335,12 @@ class Client::Impl {
     // rediscovered since. Had it set the flag, the rediscovery that clearing it asked for would
     // skip its time-sync phase, and the retry would go out at the old boots.
     bool timeSynced = false;
+    // Which time-sync phase set the pair above, numbered across the Client (m_baselines) so that an
+    // Engine evicted and discovered again never repeats one. Zero until the first. A reply to a
+    // request sent under an earlier baseline still answers its request, but its clock is dropped
+    // (ADR-0010, #84). The Engine signed it before the rediscovery that set this baseline, and
+    // nothing in the message tells a boots it has since abandoned from a restart.
+    std::uint64_t baseline = 0;
   };
 
   // A discovery in flight. The timer is an event, not a deadline: waiters park on it and the
@@ -432,7 +441,8 @@ class Client::Impl {
   void deliverV2c(std::span<const std::byte> datagram, const net::UdpEndpoint& from);
   void deliverV3(std::span<const std::byte> datagram, const net::UdpEndpoint& from);
   [[nodiscard]] bool timely(const net::UdpEndpoint& from, const UsmParameters& security) const;
-  void observeEngineTime(const net::UdpEndpoint& from, const UsmParameters& security);
+  void observeEngineTime(const net::UdpEndpoint& from, const UsmParameters& security,
+                         std::uint64_t baseline);
   static RequestResult toResult(const Pdu& response);
 
   // One transmission of an exchange, built afresh for each: the datagram that carries this ID as
@@ -600,6 +610,8 @@ class Client::Impl {
   // reachable at two Targets is one cache entry, discovered once. The in-flight map below is keyed
   // on the endpoint of necessity -- learning which Engine is there is what discovery is for.
   std::map<Octets, EngineState> m_engines;
+  // The last EngineState::baseline handed out.
+  std::uint64_t m_baselines = 0;
   // A forgotten mapping names no Engine at its endpoint, but still holds its Engine in the cache
   // until a rediscovery replaces it (forgetEngineAt).
   struct EngineMapping {
@@ -964,9 +976,14 @@ bool Client::Impl::timely(const net::UdpEndpoint& from, const UsmParameters& sec
   return static_cast<std::int64_t>(security.time) >= projected - timeWindowSeconds;
 }
 
-void Client::Impl::observeEngineTime(const net::UdpEndpoint& from, const UsmParameters& security) {
+void Client::Impl::observeEngineTime(const net::UdpEndpoint& from, const UsmParameters& security,
+                                     std::uint64_t baseline) {
   EngineState* engine = engineAt(from);
   if (engine == nullptr) return;
+  // A reply to a request sent before a rediscovery set the current baseline: see
+  // EngineState::baseline. Section 2.2.3 would adopt a higher boots from it, and the boots it
+  // carries may be the very one the Engine was rediscovered for abandoning (#84).
+  if (baseline != engine->baseline) return;
   // An Engine at the boots ceiling can never be timely again, so recording one is a state we could
   // not leave. Refusing it means a spoofed pair cannot wedge this endpoint permanently, and a real
   // Engine that has genuinely reached it fails its own requests rather than poisoning the cache.
@@ -1415,6 +1432,7 @@ net::Awaitable<net::ErrorCode> Client::Impl::discoverEngine(
   discovered.time = sync->security.time;
   discovered.at = std::chrono::steady_clock::now();
   discovered.timeSynced = true;
+  discovered.baseline = ++m_baselines;
   co_return net::ErrorCode{};
 }
 
@@ -1477,7 +1495,7 @@ std::optional<net::ErrorCode> Client::Impl::handleReport(const net::UdpEndpoint&
     engine->timeSynced = false;
     return retryOrAbort;
   }
-  observeEngineTime(from, pending.security);
+  observeEngineTime(from, pending.security, pending.baseline);
   return retryOrAbort;
 }
 
@@ -1536,6 +1554,7 @@ net::Awaitable<Client::RequestResult> Client::Impl::doRequestV3(Ref self, Target
     if (key != nullptr) pending->authKey = *key;
     if (privKey != nullptr) pending->privKey = *privKey;
     pending->engineId = engine->engineId;
+    pending->baseline = engine->baseline;
 
     ec = co_await transact(self, target,
                            v3Encoder(header, std::move(usm), std::move(scoped), pending), pending);
@@ -1549,7 +1568,9 @@ net::Awaitable<Client::RequestResult> Client::Impl::doRequestV3(Ref self, Target
       co_return RequestResult{*failure, Response{}};
     }
 
-    if (pending->replyAuthenticated) observeEngineTime(target.endpoint, pending->security);
+    if (pending->replyAuthenticated) {
+      observeEngineTime(target.endpoint, pending->security, pending->baseline);
+    }
     co_return toResult(pending->response);
   }
 

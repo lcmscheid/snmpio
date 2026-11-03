@@ -55,6 +55,10 @@ constexpr std::int32_t timeWindowSeconds = 150;
 // RFC 3414 section 2.2.3: an Engine that has booted this many times can no longer be trusted for
 // timeliness at all. It is also the ceiling on the time field, which shares the range.
 constexpr std::int32_t bootsCeiling = std::numeric_limits<std::int32_t>::max();
+// RFC 3411's SnmpEngineID is SIZE(5..32). The codec decodes any length; the Client caches only
+// these (threat model B2).
+constexpr std::size_t minEngineIdOctets = 5;
+constexpr std::size_t maxEngineIdOctets = 32;
 constexpr std::int64_t timeCeiling = std::numeric_limits<std::int32_t>::max();
 
 // A Report's first Varbind names the counter it is reporting. Returns the leaf, or nothing if this
@@ -244,7 +248,8 @@ class Client::Impl {
 
   // detail::CacheView's, and only safe where it says.
   [[nodiscard]] detail::CacheCounts cacheCounts() const noexcept {
-    return {.masterKeys = m_masterKeys.size(),
+    return {.engines = m_engines.size(),
+            .masterKeys = m_masterKeys.size(),
             .localizedKeys = m_keys.size(),
             .masterKeyDerivations = m_masterKeyDerivations};
   }
@@ -464,6 +469,14 @@ class Client::Impl {
       const Credentials& creds);  // NOLINT(cppcoreguidelines-avoid-reference-coroutine-parameters)
   // The Engine currently believed to answer at this endpoint, or nullptr if none is known.
   EngineState* engineAt(const net::UdpEndpoint& endpoint);
+  // Records which Engine answers at an endpoint. The Engine it replaces there goes, with its
+  // Localized Keys, unless another endpoint still maps to it (threat model B2).
+  void mapEngine(const net::UdpEndpoint& endpoint, const Octets& engineId);
+  // No Engine is known at the endpoint until it is rediscovered. The one that was is kept, and
+  // still counts as mapped from here, so that forgetting costs one Engine Discovery and no more
+  // (threat model E1), and the rediscovery can still evict it if the Engine there has changed.
+  void forgetEngineAt(const net::UdpEndpoint& endpoint);
+  void evictIfUnmapped(const Octets& engineId);
 
   // The Master Key for one secret: the one the Credentials carry, or the one this Client derived
   // from the password -- once, the first time it met it, since the derivation is a megabyte hash
@@ -584,6 +597,8 @@ class Client::Impl {
   // on the endpoint of necessity -- learning which Engine is there is what discovery is for.
   std::map<Octets, EngineState> m_engines;
   std::map<net::UdpEndpoint, Octets> m_engineAt;
+  // What each endpoint mapped to before forgetEngineAt; never an endpoint m_engineAt also holds.
+  std::map<net::UdpEndpoint, Octets> m_forgottenEngineAt;
   std::map<net::UdpEndpoint, std::shared_ptr<Discovery>> m_discovering;
   // Master Keys this Client derived, per (hash, password) -- the password as a passwordDigest
   // under m_digestKey rather than in plaintext, so that no password outlives the Credentials that
@@ -870,6 +885,35 @@ Client::Impl::EngineState* Client::Impl::engineAt(const net::UdpEndpoint& endpoi
   if (indexed == m_engineAt.end()) return nullptr;
   const auto engine = m_engines.find(indexed->second);
   return engine == m_engines.end() ? nullptr : &engine->second;
+}
+
+void Client::Impl::mapEngine(const net::UdpEndpoint& endpoint, const Octets& engineId) {
+  // Empty for none: no engineID that short is ever cached.
+  Octets previous;
+  if (const auto forgotten = m_forgottenEngineAt.extract(endpoint)) {
+    previous = std::move(forgotten.mapped());
+  }
+  auto [it, inserted] = m_engineAt.try_emplace(endpoint, engineId);
+  if (!inserted) previous = std::exchange(it->second, engineId);
+  if (!previous.empty() && previous != engineId) evictIfUnmapped(previous);
+}
+
+void Client::Impl::evictIfUnmapped(const Octets& engineId) {
+  // ADR-0003's one Engine at two Targets: it stays while either maps to it.
+  for (const auto& [endpoint, mapped] : m_engineAt) {
+    if (mapped == engineId) return;
+  }
+  for (const auto& [endpoint, mapped] : m_forgottenEngineAt) {
+    if (mapped == engineId) return;
+  }
+  m_engines.erase(engineId);
+  std::erase_if(m_keys,
+                [&engineId](const auto& row) { return std::get<0>(row.first) == engineId; });
+}
+
+void Client::Impl::forgetEngineAt(const net::UdpEndpoint& endpoint) {
+  // Never a collision: mapEngine clears the endpoint's row there whenever it maps one here.
+  m_forgottenEngineAt.insert(m_engineAt.extract(endpoint));
 }
 
 // RFC 3414 section 3.2 step 7(b), which is the non-authoritative side's rule and not the
@@ -1284,11 +1328,16 @@ net::Awaitable<net::ErrorCode> Client::Impl::discoverEngine(
   auto ec = co_await transact(self, target, std::move(identifyEncoder), identify);
   if (ec) co_return ec;
   // Some Agents answer with a Report and some with an ordinary Response; either way the engineID
-  // is in the security parameters, and that is the only part of the reply this phase wanted.
-  if (identify->security.engineId.empty()) co_return make_error_code(Errc::UnknownEngineId);
+  // is in the security parameters, and that is the only part of the reply this phase wanted. One
+  // of an illegal size, none included, is unknown (RFC 3414 section 3.2 step 3) and never cached:
+  // an Agent that names a fresh engineID each time must not be able to grow the caches with it.
+  const auto idOctets = identify->security.engineId.size();
+  if (idOctets < minEngineIdOctets || idOctets > maxEngineIdOctets) {
+    co_return make_error_code(Errc::UnknownEngineId);
+  }
 
   const Octets engineId = identify->security.engineId;
-  m_engineAt[target.endpoint] = engineId;
+  mapEngine(target.endpoint, engineId);
   EngineState& engine = m_engines[engineId];
   engine.engineId = engineId;
   if (!engine.timeSynced) {
@@ -1381,7 +1430,7 @@ std::optional<net::ErrorCode> Client::Impl::handleReport(const net::UdpEndpoint&
   // never enough to write into the cache, because the answer to the re-discovery is authenticated
   // and this is not.
   if (!pending.replyAuthenticated || *counter == usmStatsUnknownEngineIds) {
-    m_engineAt.erase(from);
+    forgetEngineAt(from);
     return retryOrAbort;
   }
   // A signed Report naming a boots *lower* than the one we hold is the one pair observeEngineTime

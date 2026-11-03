@@ -203,9 +203,11 @@ class Ledger {
     if (authRequired && !exempt && !verified) return;
 
     if (seen->owner == HostileAgent::Owner::Discovery) {
-      // The identity phase reads only the engineID, and fails without one.
+      // The identity phase reads only the engineID, and fails without one, or with one outside
+      // RFC 3411's 5..32 octets, which the Client never caches (B2).
       if (seen->engineId.empty()) {
-        if (msg->security.engineId.empty()) grantDiscovery(Errc::UnknownEngineId);
+        const auto octets = msg->security.engineId.size();
+        if (octets < 5 || octets > 32) grantDiscovery(Errc::UnknownEngineId);
         return;
       }
       // The time-sync phase fails on a signed pair at the boots ceiling, or with an unsigned

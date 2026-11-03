@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -2030,6 +2031,172 @@ TEST(ClientV3Password, AStoppedClientSaysSoAheadOfAShortPassword) {
   f.run();
 
   EXPECT_EQ(f.ec, Errc::ClientStopped) << f.ec.message();
+}
+
+// ---------------------------------------------------------------------------
+// Bounded caches (threat model B2)
+// ---------------------------------------------------------------------------
+
+// RFC 3411's SnmpEngineID is SIZE(5..32), and RFC 3414 section 3.2 step 3 treats any other size as
+// unknown. The codec still decodes one (CLAUDE.md's codec posture); the Client refuses to cache it.
+struct EngineIdLength {
+  std::size_t octets;
+  SecurityLevel level;
+  bool accepted;
+};
+
+class AnEngineIdOfLength : public testing::TestWithParam<EngineIdLength> {};
+
+TEST_P(AnEngineIdOfLength, IsCachedOnlyWithinFiveToThirtyTwoOctets) {
+  const auto [octets, level, accepted] = GetParam();
+  Fixture f;
+  const auto creds = credentials(AuthProtocol::Sha256, level);
+  ScriptedV3Agent agent(f.io, creds, echoAnswer);
+  f.agent = &agent;
+  agent.setEngineId(Octets(octets, std::byte{0x2a}));
+
+  f.client.asyncGet(targetFor(agent, 0), creds, {sysDescr}, f.requestToken());
+  f.run();
+
+  const auto counts = detail::CacheView::counts(f.client);
+  if (accepted) {
+    EXPECT_FALSE(f.ec) << f.ec.message();
+    EXPECT_EQ(counts.engines, 1U);
+    return;
+  }
+  EXPECT_EQ(f.ec, make_error_code(Errc::UnknownEngineId)) << f.ec.message();
+  EXPECT_EQ(counts.engines, 0U);
+  EXPECT_EQ(counts.localizedKeys, 0U);
+  EXPECT_EQ(counts.masterKeys, 0U);
+  EXPECT_EQ(agent.requestsSeen(), 1) << "nothing goes out under an engineID refused";
+}
+
+INSTANTIATE_TEST_SUITE_P(ClientV3Cache, AnEngineIdOfLength,
+                         testing::Values(EngineIdLength{4, SecurityLevel::AuthNoPriv, false},
+                                         EngineIdLength{33, SecurityLevel::AuthNoPriv, false},
+                                         EngineIdLength{4, SecurityLevel::NoAuthNoPriv, false},
+                                         EngineIdLength{33, SecurityLevel::NoAuthNoPriv, false},
+                                         EngineIdLength{5, SecurityLevel::AuthNoPriv, true},
+                                         EngineIdLength{32, SecurityLevel::AuthNoPriv, true}),
+                         [](const testing::TestParamInfo<EngineIdLength>& param) {
+                           return std::to_string(param.param.octets) + "Octets" +
+                                  (param.param.level == SecurityLevel::NoAuthNoPriv ? "NoAuthNoPriv"
+                                                                                    : "AuthNoPriv");
+                         });
+
+// research section 1.4.1: an Agent that answers every Engine Discovery with a fresh engineID. Each
+// change reaches the Client as an unknownEngineIDs Report, which forgets the Engine at the Target,
+// and the rediscovery after it maps the Target to the new one. The old one goes, keys and all.
+TEST(ClientV3Cache, AFreshEngineIdOnEveryRediscoveryLeavesTheCachesBounded) {
+  Fixture f;
+  constexpr int rediscoveries = 16;
+  f.expectedCompletions = rediscoveries + 1;
+  const auto creds = privCredentials(PrivProtocol::Aes128);
+  ScriptedV3Agent agent(f.io, creds, echoAnswer);
+  f.agent = &agent;
+
+  const auto target = targetFor(agent);
+  std::vector<detail::CacheCounts> seen;
+  std::function<void()> ask = [&] {
+    f.client.asyncGet(target, creds, {sysDescr}, [&](net::ErrorCode e, const Response&) {
+      EXPECT_FALSE(e) << "request " << seen.size() << ": " << e.message();
+      seen.push_back(detail::CacheView::counts(f.client));
+      agent.setEngineId(engineIdNumbered(static_cast<std::uint8_t>(seen.size())));
+      if (f.completions + 1 < f.expectedCompletions) ask();
+      f.finish();
+    });
+  };
+  ask();
+  f.run();
+
+  ASSERT_EQ(seen.size(), static_cast<std::size_t>(rediscoveries + 1));
+  for (std::size_t i = 0; i < seen.size(); ++i) {
+    EXPECT_EQ(seen[i].engines, 1U) << "after request " << i;
+    EXPECT_EQ(seen[i].localizedKeys, 2U) << "after request " << i << ": one per secret";
+  }
+  EXPECT_EQ(seen.back().masterKeys, 2U) << "Master Keys are per password, not per Engine";
+}
+
+// The other way a Target's Engine is replaced: still mapped, not forgotten, when a request that
+// authenticates finds the Engine a noAuthNoPriv discovery left unsynchronised and discovers again.
+TEST(ClientV3Cache, AnEngineReplacedAtItsOnlyTargetIsEvicted) {
+  Fixture f;
+  f.expectedCompletions = 2;
+  ScriptedV3Agent agent(f.io, credentials(), echoAnswer);
+  f.agent = &agent;
+
+  const auto target = targetFor(agent);
+  const auto plain = credentials(AuthProtocol::Sha256, SecurityLevel::NoAuthNoPriv);
+  f.client.asyncGet(target, plain, {sysDescr}, [&](net::ErrorCode e, const Response&) {
+    EXPECT_FALSE(e) << e.message();
+    agent.setEngineId(engineIdNumbered(9));
+    f.client.asyncGet(target, credentials(), {sysDescr}, f.requestToken());
+    f.finish();
+  });
+  f.run();
+
+  EXPECT_FALSE(f.ec) << f.ec.message();
+  const auto counts = detail::CacheView::counts(f.client);
+  EXPECT_EQ(counts.engines, 1U);
+  EXPECT_EQ(counts.localizedKeys, 1U);
+}
+
+// ADR-0003: one Engine behind two Targets is one entry. When one Target's Engine changes, the
+// shared one stays for the other -- which then needs no rediscovery -- and goes only once neither
+// maps to it.
+TEST(ClientV3Cache, OneEngineAtTwoTargetsIsOneEntryUntilNeitherMapsToIt) {
+  net::IoContext io;
+  Client client{io.get_executor()};
+  const auto creds = credentials();
+  ScriptedV3Agent first(io, creds, echoAnswer);
+  ScriptedV3Agent second(io, creds, echoAnswer);  // the same engineID: the same Engine
+  ASSERT_EQ(first.engineId(), second.engineId());
+
+  const auto expectCounts = [&client](std::size_t engines, const char* when) {
+    const auto counts = detail::CacheView::counts(client);
+    EXPECT_EQ(counts.engines, engines) << when;
+    EXPECT_EQ(counts.localizedKeys, engines) << when;
+  };
+  int secondSeen = 0;
+  struct Step {
+    ScriptedV3Agent* agent;
+    std::function<void()> before;
+    std::function<void()> after;
+  };
+  const std::vector<Step> steps = {
+      {&first, {}, {}},
+      {&second, {}, [&] { expectCounts(1, "one Engine, two Targets"); }},
+      {&first, [&] { first.setEngineId(engineIdNumbered(2)); },
+       [&] { expectCounts(2, "the shared Engine stays for the second Target"); }},
+      {&second, [&] { secondSeen = second.requestsSeen(); },
+       [&] {
+         EXPECT_EQ(second.requestsSeen() - secondSeen, 1) << "no rediscovery: still cached";
+         expectCounts(2, "still mapped from the second Target");
+       }},
+      {&second, [&] { second.setEngineId(engineIdNumbered(3)); },
+       [&] { expectCounts(2, "the shared Engine is gone once neither Target maps to it"); }},
+  };
+
+  std::size_t done = 0;
+  std::function<void()> next = [&] {
+    const Step& step = steps[done];
+    if (step.before) step.before();
+    client.asyncGet(targetFor(*step.agent), creds, {sysDescr},
+                    [&](net::ErrorCode e, const Response&) {
+                      EXPECT_FALSE(e) << "step " << done << ": " << e.message();
+                      if (steps[done].after) steps[done].after();
+                      if (++done < steps.size()) {
+                        next();
+                        return;
+                      }
+                      client.stop();
+                      first.close();
+                      second.close();
+                    });
+  };
+  next();
+  io.run();
+  EXPECT_EQ(done, steps.size());
 }
 
 }  // namespace

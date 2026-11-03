@@ -198,8 +198,9 @@ class ScriptedV3Agent {
     // not open is a usmStatsDecryptionErrors Report rather than silence. A real Agent checks
     // timeliness in between (step 7); this one checks it in behave(), below, which only means an
     // untimely message is decrypted before being refused for a reason that has nothing to do with
-    // its ciphertext.
-    if (isEncrypted(decoded->header.level) &&
+    // its ciphertext. An engineID not its own is refused before either (step 3), so that is left to
+    // behave(), as an unknownEngineIDs Report, rather than tried against a key for another Engine.
+    if (isEncrypted(decoded->header.level) && decoded->security.engineId == m_engineId &&
         !decryptScopedPdu(*decoded, m_creds.privProtocol, m_privKey, ec)) {
       send(report(decryptionErrors, SecurityLevel::AuthNoPriv), decoded->header.msgId, 0, {});
       return;

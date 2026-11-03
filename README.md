@@ -874,7 +874,10 @@ against that ADR rather than a decision against it -- and IDEA, which ADR-0005 e
   that ADR requires: the Authoritative Engine on its **engineID**, with a separate endpoint→engineID
   index, and the Localized Key on (engineID, protocol, secret). One Engine reachable at two Targets
   is therefore one cache entry and one megabyte-hash derivation, which is the whole reason there is
-  no session type.
+  no session type. The caches are bounded without a cap: an Engine stays only while some Target
+  maps to it, and goes with its Localized Keys when it does not. An Agent whose engineID is shorter
+  than 5 octets or longer than 32, outside RFC 3411's `SnmpEngineID`, fails Engine Discovery with
+  `UnknownEngineId`, where net-snmp would talk to it.
 - **Report routing.** The six `usmStats` counters map to outcomes in one table: `notInTimeWindows`
   and `unknownEngineIDs` resynchronise and retry exactly once, the rest fail the request with an
   `ErrorCode` naming which. No Report ever reaches a completion handler.

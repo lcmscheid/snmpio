@@ -25,7 +25,8 @@ struct CacheCounts {
 //
 // It reads the caches directly rather than through the Client's strand, so it is only safe while
 // nothing else is running that strand: once io_context::run() has returned, or from a handler on
-// the same single-threaded io_context, as MessageIdView is.
+// the same single-threaded io_context, as MessageIdView is. Asio calls the second an implicit
+// strand: one thread runs every handler, the Client's included, one at a time.
 struct CacheView {
   [[nodiscard]] static CacheCounts counts(const Client& client);
 };

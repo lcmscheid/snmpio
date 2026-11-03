@@ -80,3 +80,34 @@ One megabyte hash is left on the strand whatever the caller supplies: a Reeder p
 (`Aes192C`, `Aes256C`), whose Key Extension reruns password-to-key over the Localized Key, costs one
 per Engine. Moving it, and a password's derivation, off the strand is #80. Both caches stay the
 Client's own and on its strand, so nothing else here changes.
+
+## Amendment, 2026-11-03: an Engine no Target maps to is evicted
+
+The caches above were append-only, so an Agent that named a fresh engineID at every Engine
+Discovery grew them without limit, a localising hash per secret each time (#35, threat model B2).
+They now keep an Engine only while some Target maps to it. When a discovery maps a Target to an
+engineID other than the one it last did, the old Engine goes, with its Localized Keys, unless
+another Target still maps to it. One Engine at two Targets is still one entry, which is this ADR's
+point, and it lasts as long as either Target names it. Master Keys are per password, not per Engine,
+and stay. An engineID outside RFC 3411's `SnmpEngineID` size, 5 to 32 octets, fails its discovery
+with `UnknownEngineId` and is never cached; RFC 3414 section 3.2 step 3 treats it as unknown. The
+codec still decodes one, so its posture is unchanged.
+
+net-snmp is no precedent here. Its Command Generator adds a user row per engineID a session meets,
+accepts engineIDs of up to 1024 octets (`USM_MAX_ID_LENGTH`), and removes neither the row nor the
+Engine's boots and time when a session's engineID changes. The bound is RFC 3411's, and the
+eviction this ADR's own: the cache keys on engineID, and an engineID nobody addresses is dead
+weight.
+
+Two costs follow, and the threat model's B2 and E1 rows carry them. The identity phase is
+unauthenticated by design (RFC 3414 section 4), so a forged answer that names another engineID now
+evicts the real Engine's synchronised clock and Localized Keys. It used to cost an Engine Discovery
+and a localising hash for the forged engineID, and leave the real Engine cached; now the real
+Engine's next request pays a time-sync phase and a localising hash per secret as well. And a Target that really fronts several Engines in turn (CONTEXT.md) pays the same
+at each change, where the cache used to remember every one of them. Neither cost is unbounded, and
+the first was already the attacker's to impose at the price of a discovery.
+
+A Target forgotten on an unsigned `unknownEngineIDs` Report is not unmapped: it names no Engine
+until it is rediscovered, but still holds its old one, so forgetting evicts nothing and the
+rediscovery can still evict what it replaces. The cache is still the Client's own and on its
+strand; nothing else in this ADR changes.

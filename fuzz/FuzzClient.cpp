@@ -57,6 +57,12 @@ using Clock = std::chrono::steady_clock;
 // most 50 ms here. Two orders of magnitude above that leaves room for a slow sanitizer build.
 constexpr auto strandedAfter = std::chrono::seconds(10);
 
+// RFC 3411's SnmpEngineID is SIZE(5..32), and the Client caches no other (threat model B2).
+// Taken from the RFC, not from the Client's own constants -- the Report mapping below is restated
+// the same way -- so that a change to either is a disagreement.
+constexpr std::size_t minEngineIdOctets = 5;
+constexpr std::size_t maxEngineIdOctets = 32;
+
 [[noreturn]] void violated(const char* invariant, const std::string& what) {
   std::cerr << "\n*** " << invariant << " violated: " << what << "\n\n" << std::flush;
   std::abort();
@@ -203,11 +209,12 @@ class Ledger {
     if (authRequired && !exempt && !verified) return;
 
     if (seen->owner == HostileAgent::Owner::Discovery) {
-      // The identity phase reads only the engineID, and fails without one, or with one outside
-      // RFC 3411's 5..32 octets, which the Client never caches (B2).
+      // The identity phase reads only the engineID, and fails without one, or with one of a size
+      // the Client never caches (B2).
       if (seen->engineId.empty()) {
         const auto octets = msg->security.engineId.size();
-        if (octets < 5 || octets > 32) grantDiscovery(Errc::UnknownEngineId);
+        if (octets < minEngineIdOctets || octets > maxEngineIdOctets)
+          grantDiscovery(Errc::UnknownEngineId);
         return;
       }
       // The time-sync phase fails on a signed pair at the boots ceiling, or with an unsigned

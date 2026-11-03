@@ -577,8 +577,7 @@ void releaseTheLateResponseAfterTheRediscovery(LateRelease when) {
         return agent.behaveLikeACompliantAgent(req);
       });
 
-  // Long enough that nothing is retransmitted, and no retransmission if it were: every datagram
-  // here is one the test chose.
+  // No retransmission, and long enough to answer: every datagram here is one the test chose.
   Target target = targetFor(agent);
   target.timeout = std::chrono::seconds(5);
   target.retries = 0;

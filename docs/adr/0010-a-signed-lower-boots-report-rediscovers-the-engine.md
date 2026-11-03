@@ -74,8 +74,8 @@ If the held Response lands after that, step 7(b)(1) reads its boots N as a resta
 retry's answer at M is now behind the cache and is dropped, and a request on its second attempt
 that reads N fails with `Errc::NotInTimeWindow` (#84).
 
-So each time Engine Discovery's time-sync phase sets a pair, it numbers that pair as a new
-**baseline**, from a counter the Client keeps across Engines. Each request records the baseline
+So each time Engine Discovery's time-sync phase sets a pair, it starts a new **Baseline**, numbered
+from a counter the Client keeps across Engines. Each request records the baseline
 it was sent under. A signed reply to a request sent under an earlier baseline still answers that
 request, and still has to be timely to do so. Only its clock is dropped, and it never reaches the
 cache.
@@ -83,9 +83,22 @@ cache.
 Step 7(b) still holds for every message, so this rule is stricter than the RFC, not looser. The
 RFC has the non-authoritative engine adopt a later pair because that is the only evidence it has
 of where the Engine's clock has got to. Here it has better evidence: a time-sync phase answered
-after the request went out. A reply the Engine signed before that answer cannot tell us anything
-newer about its clock. Section 2.2.3 does not cover this case at all: it assumes boots never goes
-down, and the Engine that ADR-0010 is about broke that assumption.
+after the request went out. From the message alone, a reply the Engine signed before its boots went
+backwards looks the same as one from an Engine that has since restarted. What separates them is when
+the request was sent, so that is what the rule asks. Section 2.2.3 does not cover this case at all:
+it assumes boots never goes down, and the Engine that ADR-0010 is about broke that assumption.
+
+The rule keys on when the request was sent, not on when the reply was signed, and those can differ.
+A request delayed on its way out can reach the Engine after the time-sync phase. Its reply's clock is
+then genuinely newer, and it is dropped all the same. Nothing is lost unless the Engine also
+restarted in that gap. If it did, the next request goes out at the Baseline's boots and meets a
+signed higher-boots Report, which is adopted, so the request costs one retry. It fails only if it
+was already on its second attempt.
+
+A signed Report to a request from an earlier Baseline can still force a rediscovery, if it names a
+boots below the current one. That takes the Engine's boots going backwards twice in a row. It costs
+one more time-sync phase, bounded as before by the one forced resync a request may have, and fails
+nothing, so the Report path is left as it was.
 
 Numbered across the Client rather than per Engine, so that an Engine evicted and discovered again
 (threat model B2) never repeats a baseline a request from before the eviction still holds.

@@ -335,8 +335,8 @@ class Client::Impl {
     // rediscovered since. Had it set the flag, the rediscovery that clearing it asked for would
     // skip its time-sync phase, and the retry would go out at the old boots.
     bool timeSynced = false;
-    // Which time-sync phase set the pair above, numbered across the Client (m_baselines) so that an
-    // Engine evicted and discovered again never repeats one. Zero until the first. A reply to a
+    // Which time-sync phase set the pair above, numbered across the Client (m_lastBaseline) so that
+    // an Engine evicted and discovered again never repeats one. Zero until the first. A reply to a
     // request sent under an earlier baseline still answers its request, but its clock is dropped
     // (ADR-0010, #84). The Engine signed it before the rediscovery that set this baseline, and
     // nothing in the message tells a boots it has since abandoned from a restart.
@@ -611,7 +611,7 @@ class Client::Impl {
   // on the endpoint of necessity -- learning which Engine is there is what discovery is for.
   std::map<Octets, EngineState> m_engines;
   // The last EngineState::baseline handed out.
-  std::uint64_t m_baselines = 0;
+  std::uint64_t m_lastBaseline = 0;
   // A forgotten mapping names no Engine at its endpoint, but still holds its Engine in the cache
   // until a rediscovery replaces it (forgetEngineAt).
   struct EngineMapping {
@@ -980,9 +980,7 @@ void Client::Impl::observeEngineTime(const net::UdpEndpoint& from, const UsmPara
                                      std::uint64_t baseline) {
   EngineState* engine = engineAt(from);
   if (engine == nullptr) return;
-  // A reply to a request sent before a rediscovery set the current baseline: see
-  // EngineState::baseline. Section 2.2.3 would adopt a higher boots from it, and the boots it
-  // carries may be the very one the Engine was rediscovered for abandoning (#84).
+  // A reply to a request sent under an earlier baseline: see EngineState::baseline.
   if (baseline != engine->baseline) return;
   // An Engine at the boots ceiling can never be timely again, so recording one is a state we could
   // not leave. Refusing it means a spoofed pair cannot wedge this endpoint permanently, and a real
@@ -1432,7 +1430,7 @@ net::Awaitable<net::ErrorCode> Client::Impl::discoverEngine(
   discovered.time = sync->security.time;
   discovered.at = std::chrono::steady_clock::now();
   discovered.timeSynced = true;
-  discovered.baseline = ++m_baselines;
+  discovered.baseline = ++m_lastBaseline;
   co_return net::ErrorCode{};
 }
 

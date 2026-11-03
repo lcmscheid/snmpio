@@ -102,10 +102,11 @@ was stepped, and is adopted (RFC 3414 section 3.2 step 7b). It is adopted only f
 request sent under the current Baseline.
 
 **Baseline**:
-The boots/time pair an Engine Discovery's time-sync phase took from the Engine's signed answer, and
-which later comparisons are made against. Each one is numbered, and each request records the
+What each Engine Discovery time-sync phase starts, numbered by the Client: the cached boots/time pair
+as that phase set it, and as signed replies have kept it current since. Each request records the
 Baseline it was sent under. A reply to a request sent under an earlier Baseline answers that request
 but never moves the cached clock (ADR-0010's amendment).
+_Avoid_: generation, epoch
 
 **Master Key**:
 The Credentials' secret material expanded by the password-to-key algorithm, before it is bound to any

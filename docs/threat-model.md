@@ -54,12 +54,25 @@ attacker comes in three positions:
 - How many requests are outstanding at once. Nothing applies backpressure: the table of
   Outstanding Requests grows with the caller's concurrency, by design, and bounding it is the
   caller's job (research §1.4.2).
-- A retransmitted SET being applied twice. Ordering SETs is the caller's policy, through
-  `snmpSetSerialNo` (RFC 3414 §11.1; research §1.2.4). That, and the other rules only the caller
-  can keep, such as binding completion tokens to their own executor, are to be documented: #48.
+- The rules only the caller can keep (research §6 item 18), each documented where the caller
+  meets it:
+  - A retransmitted SET can be applied twice. Ordering SETs is the caller's policy, through
+    `snmpSetSerialNo` (RFC 3414 §11.1; research §1.2.4): `asyncSet` in
+    [`Client.hpp`](../include/snmpio/Client.hpp).
+  - Completion tokens are bound to the caller's own executor, or their completions run on the
+    Client's strand and hold up every Target (research §3.2): the class comment in
+    [`Client.hpp`](../include/snmpio/Client.hpp).
+  - Exactly-once completion holds only while the executor runs (research §3.1, rule 4): the
+    lifetime paragraph in [`Client.hpp`](../include/snmpio/Client.hpp), and **Outstanding
+    Request** in [`CONTEXT.md`](../CONTEXT.md).
+  - Completion handlers can run after `~Client` has returned, so they must not reach back into it
+    (research §3.1, rule 6; ADR-0009, Consequences): the lifetime paragraph in
+    [`Client.hpp`](../include/snmpio/Client.hpp), and [Using it](../README.md#using-it) in the
+    README.
 - OSS-Fuzz integration (research §4.4), which the stage 6 spec leaves out.
 - Callers breaking the API's preconditions, such as destroying the `io_context` while it still
-  has work for a Client.
+  has work for a Client, against Asio's rule that it outlive that work: the lifetime paragraph in
+  [`Client.hpp`](../include/snmpio/Client.hpp).
 
 ## What the attacker can reach
 

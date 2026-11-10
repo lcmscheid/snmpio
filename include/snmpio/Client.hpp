@@ -47,6 +47,12 @@ struct Response {
 // faults; snmpio's, for timeouts and malformed Responses; and snmp-agent's, for an error-status
 // the Agent itself returned.
 //
+// Bind each completion token to an executor of your own: bind_executor, or a token that carries
+// one, as use_awaitable does. A completion runs on the token's associated executor, and a token
+// with none has it run on the Client's strand instead, where every Target the Client serves waits
+// until it returns. A BatchHandler runs on the strand whatever the token, so it must not block or
+// do slow work either.
+//
 // Cancellation means one thing for a request, whichever wait it happens to be sitting in --
 // awaiting a reply, between retransmissions, or queued behind an Engine Discovery. A `terminal`
 // signal drops it at once, reply in hand or not; a `total` one stops it cleanly, retransmitting no
@@ -67,8 +73,9 @@ struct Response {
 //
 // Two consequences follow, the same ones a socket has. Completion handlers run *after* the
 // destructor has returned, so a handler must not reach back into the Client or into an owner that
-// went with it. And "exactly once" holds while the io_context runs: one destroyed without being
-// run destroys the handlers it holds instead of invoking them.
+// went with it. And "exactly once" holds only while the executors run -- the Client's, and the
+// one each completion is bound to, which may belong to another io_context: an io_context
+// destroyed without being run destroys the handlers it holds instead of invoking them.
 class Client {
  public:
   // Receives each Batch of a streaming Walk. Returning false stops the Walk, which then completes
@@ -151,6 +158,16 @@ class Client {
 
   // SET. Completion: void(ErrorCode, Response); on rejection the ErrorCode is the Agent's
   // error-status and Response::errorIndex names the Varbind it objected to.
+  //
+  // A SET is retransmitted like any other request, so the Agent can apply it twice: once for a
+  // datagram whose Response was lost, again for the retransmission. Nor does the Client order one
+  // SET after another. A caller who needs a SET applied at most once, or in order -- RFC 3414
+  // §11.1 asks that a state-changing message wait until the one before it is acknowledged or
+  // expired -- includes snmpSetSerialNo (SNMPv2-MIB, 1.3.6.1.6.3.1.1.6.1.0) in the SET, with the
+  // value it last read. The Agent applies a SET only while that value is current, and advances it
+  // when it does, so a duplicate or a SET overtaken by another is refused with
+  // ErrorStatus::InconsistentValue. A retransmission can bring that refusal back even though its
+  // first copy took effect; read the objects again to tell the two apart.
   template <typename Token>
   auto asyncSet(Target target, Community community, std::vector<Varbind> varbinds, Token&& token) {
     return spawn<void(net::ErrorCode, Response)>(
@@ -232,6 +249,7 @@ class Client {
         std::forward<Token>(token));
   }
 
+  // A retransmitted SET can be applied twice here too; see the v2c asyncSet for snmpSetSerialNo.
   template <typename Token>
   auto asyncSet(Target target, Credentials credentials, std::vector<Varbind> varbinds,
                 Token&& token) {

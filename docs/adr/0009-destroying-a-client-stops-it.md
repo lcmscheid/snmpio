@@ -152,3 +152,10 @@ strand is stuck in Asio, and nothing outside it can unstick it. Making `stop()` 
 it terminates as `~Client` does, was the other option. It would trade an exception the caller can
 log and act on, by tearing down the `io_context`, for the end of the process. That is the right
 trade in a destructor, which cannot report anything, and not in a function that can.
+
+## Amendment, 2026-11-10: "the caller's executor" is the token's
+
+The Consequences say completion handlers run "on the caller's executor". Precisely, they run on the
+executor associated with the completion token, and a token with none completes on the Client's
+strand, as `spawn` has always done. Nothing changes; `Client.hpp` now asks callers to bind their
+tokens to an executor of their own (#48).

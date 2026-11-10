@@ -114,6 +114,9 @@ class Client {
   // BatchHandler). An operation initiated afterwards completes with Errc::ClientStopped too.
   // The Client also stops itself when a receive loop throws, before the exception leaves
   // io_context::run(): that loop serves every Target on its socket (ADR-0009's amendment).
+  // If scheduling the cleanup on the strand throws, stop() lets the exception out, and the Client
+  // is unusable: its strand runs nothing again, so no operation, outstanding or initiated
+  // afterwards, ever completes (ADR-0009's amendment, #66).
   void stop();
 
   // GET: fetch each named instance. Completion: void(ErrorCode, Response).

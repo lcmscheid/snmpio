@@ -141,15 +141,17 @@ _Avoid_: key expansion, key stretching, "Cisco AES" as a protocol name
 An operation the Command Generator has initiated and not yet completed, whichever wait it is in —
 awaiting a reply, between retransmissions, or queued behind an Engine Discovery. Every Outstanding
 Request completes exactly once, whatever ends it: a reply, its deadline, a cancellation, or
-Stopping.
+Stopping. The one exception is a caller's stop that throws scheduling its cleanup: none completes
+after that, and the exception is how the caller learns it (ADR-0009's amendment).
 _Avoid_: pending request, in-flight request (in flight is one of its waits, not all of them)
 
 **Stopping**:
 The Command Generator refusing new work and completing every Outstanding Request with
 `ClientStopped`. It begins at the caller's stop, at destruction, or at a fault in the Command
 Generator itself that no single Target owns. Destroying the Command Generator stops it, so a
-forgotten stop is never a dangling request. Distinct from cancellation, which ends one request at
-its caller's asking and completes with `operation_aborted`.
+forgotten stop is never a dangling request. A stop that throws scheduling its cleanup leaves the
+Command Generator unusable instead (ADR-0009's amendment). Distinct from cancellation, which ends
+one request at its caller's asking and completes with `operation_aborted`.
 _Avoid_: shutdown, close, abort
 
 ### Errors

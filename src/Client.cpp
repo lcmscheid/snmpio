@@ -271,7 +271,8 @@ class Client::Impl {
       net::asio::dispatch(self->m_strand, [self] { self->finishStopping(); });
     }
     // Every call waits, not just the first: a second thread stopping while the first is still
-    // waiting is owed the same guarantee.
+    // waiting is owed the same guarantee. A dispatch that throws skips the wait, which is safe: it
+    // throws only from an idle strand, so no Batch is being delivered (ADR-0009's amendment).
     self->awaitBatchDelivery();
   }
 

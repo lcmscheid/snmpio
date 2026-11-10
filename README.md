@@ -123,8 +123,11 @@ Three things the compiler will not tell you:
   work. Three things end it: `stop()`, destroying the Client (ADR-0009), and an exception escaping
   the receive loop, which then leaves `run()`. Each stops the Client: every Outstanding Request
   completes with `Errc::ClientStopped`, exactly once while the `io_context` runs, on its own
-  executor. A stopped Client stays stopped, so after catching that exception, make a new one. An
-  exception from an Engine Discovery is different: it belongs to one Target, so it stops nothing.
+  executor. A stopped Client stays stopped, so after catching that exception, make a new one. A
+  `stop()` that throws, because its cleanup cannot be scheduled on the Client's executor, is the
+  one case where none of this holds: nothing completes, the Client is unusable, and `run()` will
+  not return on its own (ADR-0009's amendment). An exception from an Engine Discovery is
+  different: it belongs to one Target, so it stops nothing.
   It leaves `run()` once for the discovery and once for each request waiting on it, and those
   requests never complete. A later request to that Target starts a fresh discovery. Like a socket, a
   Client can be destroyed with requests outstanding, from any thread, even from inside one of its

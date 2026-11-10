@@ -113,3 +113,42 @@ the handler call would also close it, but would hold a lock across the caller's 
 
 The id is a second atomic outside the strand, beside the flag; ADR-0003 carries the matching
 amendment.
+
+## Amendment, 2026-11-10: a `stop()` that cannot schedule its cleanup leaves the Client unusable
+
+`~Client` terminates when scheduling its cleanup throws; that is in its comment, and it stands.
+An explicit `stop()` lets the same exception out to its caller instead, and until now what it
+left behind was a claim made by inspection. #66 wrote it down as the outcome to pin: the Stopping
+flag stays set, the sockets stay open, every Outstanding Request still completes exactly once at
+its deadline, and a request issued afterwards completes with `ClientStopped` without being sent.
+A test with an executor that throws from `execute()` checked it, and found most of it wrong. The
+sockets stay open, but the strand is gone too. Asio queues the cleanup on the strand and marks the
+strand busy before it calls the executor underneath, and nothing clears the mark once that call
+throws. The strand never runs another handler, so nothing the Client owns completes again: not its
+Outstanding Requests, not at their deadlines, and not a request issued afterwards, which is not
+sent either. The handlers are not dropped; they stay queued on the strand until the `io_context` is
+destroyed.
+
+So the exception from `stop()` leaves the Client unusable, and that is the contract. The wedged
+strand is Asio's behaviour, undocumented but plain in its source, and the Client inherits it by
+running its cleanup on the strand, which it has to, since the cleanup touches state only the strand
+may touch. Nothing outside Asio can clear the mark, so no Client-side recovery is possible, only a
+different way of failing. The SNMP RFCs have nothing to say about it: they define abstract service
+interfaces, not a local API. The caller learns of it, which is more than `~Client` could offer, and
+has to treat the Client as unusable. The `io_context` keeps running everything else. The test stops
+it by hand; since the Client's sockets stay open with receives pending on them, `run()` is not
+expected to return on its own.
+
+Whether the flag stays set, which #66 held to by decision, can no longer be seen, and no longer
+matters. Everything that reads it runs on the strand, apart from `stop()` and `~Client` themselves,
+and a second cleanup would only queue behind the first. The wait for a Batch being delivered on
+another thread is skipped too, and nothing is lost: the throw can only come from an idle strand,
+since a busy one queues the cleanup without calling the executor, so no Batch is being delivered,
+and none follows.
+
+Rolling the flag back stays rejected, for the reason #31's review gave: it races a concurrent
+`stop()` or `~Client` that has already seen the flag and returned. It would not help anyway. The
+strand is stuck in Asio, and nothing outside it can unstick it. Making `stop()` `noexcept`, so that
+it terminates as `~Client` does, was the other option. It would trade an exception the caller can
+log and act on, by tearing down the `io_context`, for the end of the process. That is the right
+trade in a destructor, which cannot report anything, and not in a function that can.

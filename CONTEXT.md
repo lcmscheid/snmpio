@@ -142,7 +142,9 @@ An operation the Command Generator has initiated and not yet completed, whicheve
 awaiting a reply, between retransmissions, or queued behind an Engine Discovery. Every Outstanding
 Request completes exactly once, whatever ends it: a reply, its deadline, a cancellation, or
 Stopping. The one exception is a caller's stop that throws scheduling its cleanup: none completes
-after that, and the exception is how the caller learns it (ADR-0009's amendment).
+after that, and the exception is how the caller learns it (ADR-0009's amendment). "Exactly once"
+also holds only while the executors involved run, the caller's as well as the Command Generator's:
+a completion still queued when its `io_context` is destroyed is never invoked (`Client.hpp`).
 _Avoid_: pending request, in-flight request (in flight is one of its waits, not all of them)
 
 **Stopping**:

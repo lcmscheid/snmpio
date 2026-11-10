@@ -98,7 +98,16 @@ The 150-second interval outside which a message's boots/time pair is rejected as
 one-sided on the Command Generator's side of the exchange. A pair *behind* the one cached for that
 Engine is never adopted, even when the Engine signed it, because from a compliant Engine it can only
 be a replay. A later boots count or a later time is the Engine saying it restarted or that its clock
-was stepped, and is adopted (RFC 3414 section 3.2 step 7b).
+was stepped, and is adopted (RFC 3414 section 3.2 step 7b). It is adopted only from a reply to a
+request sent under the current Baseline.
+
+**Baseline**:
+The boots/time pair an Engine Discovery time-sync phase sets for an Engine, as signed replies have
+kept it current since. Every time-sync phase starts a new one, and the Client numbers them so that
+no two are confused, even across Engines. Each request records the Baseline it was sent under. A
+reply to a request sent under an earlier Baseline answers that request but never moves the cached
+pair.
+_Avoid_: generation, epoch
 
 **Master Key**:
 The Credentials' secret material expanded by the password-to-key algorithm, before it is bound to any

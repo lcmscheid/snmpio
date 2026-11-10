@@ -248,62 +248,9 @@ ScriptedV3Agent::Responder answersWith(std::int32_t boots, std::int32_t time) {
   };
 }
 
-// What a second GET makes of a reply carrying `boots`/`time`, the first having settled the cache
-// on the Agent's own pair. One Client throughout, because the cache is the Client's (ADR-0003).
-net::ErrorCode secondGetAnsweredWith(std::int32_t boots, std::int32_t time) {
-  Fixture f;
-  ScriptedV3Agent agent(f.io, credentials(), echoAnswer);
-  f.agent = &agent;
-  f.expectedCompletions = 2;
-
-  const auto target = targetFor(agent);
-  net::ErrorCode second;
-  f.client.asyncGet(target, credentials(), {sysDescr}, [&](net::ErrorCode first, const Response&) {
-    EXPECT_FALSE(first) << "the GET that settles the cache: " << first.message();
-    agent.setResponder(answersWith(boots, time));
-    f.client.asyncGet(target, credentials(), {sysDescr}, [&](net::ErrorCode ec, const Response&) {
-      second = ec;
-      f.finish();
-    });
-    f.finish();
-  });
-  f.run();
-  return second;
-}
-
-// Criterion: a reply from an Engine that has restarted since we cached it is timely. RFC 3414
-// section 3.2 step 7(b) makes only an *older* pair untimely from the non-authoritative side; a
-// higher boots count is the Engine saying where it has got to, and it resets the cache rather than
-// being dropped.
-//
-// Requiring the pair to match instead costs a Target that is answering: every reply from a
-// restarted Engine is discarded, and the caller is told Timeout until the cache is thrown away.
-TEST(ClientV3, AcceptsAReplyFromAnEngineThatRestartedSinceWeCachedIt) {
-  const auto ec = secondGetAnsweredWith(9, 20);
-  EXPECT_FALSE(ec) << "a restarted Engine's reply was dropped: " << ec.message();
-}
-
-// The other half of the same rule, and the ordinary one of the two: a clock stepped forward within
-// one boot needs nothing more than NTP. Only a time *behind* our projection by more than the
-// Window is untimely, so this is a Response to be answered from, not one to drop.
-TEST(ClientV3, AcceptsAReplyWhoseClockSteppedForwardWithinOneBoot) {
-  const auto ec = secondGetAnsweredWith(3, 4000);
-  EXPECT_FALSE(ec) << "a clock step forward was read as untimely: " << ec.message();
-}
-
-// And the direction that must stay refused, which is what the rule is for: a pair older than the
-// one we hold is a replay, and RFC 3414 section 2.2.3 never lets a cached boots count go down.
-// Dropped rather than failed, like every other unusable datagram -- the request stays outstanding
-// and retransmits. At the deadline it says why it dropped them rather than Timeout (ADR-0008).
-TEST(ClientV3, DropsAReplyClaimingAnOlderBootsCount) {
-  const auto ec = secondGetAnsweredWith(2, 1000);
-  EXPECT_EQ(ec, make_error_code(Errc::NotInTimeWindow))
-      << "a boots regression was accepted: " << ec.message();
-}
-
 // One GET settles the cache at the Engine's boots 3, then `changeTheAgent` runs, then two more
-// GETs go out one after the other. The Agent change the tests below care about is an Engine
-// whose boots counter went backwards -- a factory reset, a replaced line card, firmware that lost
+// GETs go out one after the other. The Agent change most tests here care about is an Engine whose
+// boots counter went backwards -- a factory reset, a replaced line card, firmware that lost
 // snmpEngineBoots -- and the cases either side of it.
 struct LaterGetResults {
   net::ErrorCode second;
@@ -340,6 +287,75 @@ LaterGetResults afterTheCacheIsSettled(
   });
   f.run();
   return result;
+}
+
+// What a second GET makes of a reply carrying `boots`/`time`, the first having settled the cache
+// on the Agent's own pair. One Client throughout, because the cache is the Client's (ADR-0003).
+net::ErrorCode secondGetAnsweredWith(std::int32_t boots, std::int32_t time) {
+  Fixture f;
+  ScriptedV3Agent agent(f.io, credentials(), echoAnswer);
+  f.agent = &agent;
+  f.expectedCompletions = 2;
+
+  const auto target = targetFor(agent);
+  net::ErrorCode second;
+  f.client.asyncGet(target, credentials(), {sysDescr}, [&](net::ErrorCode first, const Response&) {
+    EXPECT_FALSE(first) << "the GET that settles the cache: " << first.message();
+    agent.setResponder(answersWith(boots, time));
+    f.client.asyncGet(target, credentials(), {sysDescr}, [&](net::ErrorCode ec, const Response&) {
+      second = ec;
+      f.finish();
+    });
+    f.finish();
+  });
+  f.run();
+  return second;
+}
+
+// Criterion: a reply from an Engine that has restarted since we cached it is timely. RFC 3414
+// section 3.2 step 7(b) makes only an *older* pair untimely from the non-authoritative side; a
+// higher boots count is the Engine saying where it has got to, and it resets the cache rather than
+// being dropped.
+//
+// Requiring the pair to match instead costs a Target that is answering: every reply from a
+// restarted Engine is discarded, and the caller is told Timeout until the cache is thrown away.
+//
+// The reply answers a request sent under the Baseline the cache holds, so ADR-0010's amendment,
+// which drops the clock from a reply to a request sent under an earlier one, must not refuse it:
+// the next request carries the restarted boots.
+TEST(ClientV3, AcceptsAReplyFromAnEngineThatRestartedSinceWeCachedIt) {
+  std::vector<std::int32_t> bootsCarried;
+  const auto r = afterTheCacheIsSettled([&](ScriptedV3Agent& agent) {
+    agent.setResponder([&](const ScriptedV3Agent::Request& req) {
+      if (!req.message.security.engineId.empty()) {
+        bootsCarried.push_back(req.message.security.boots);
+      }
+      return answersWith(9, 20)(req);
+    });
+  });
+
+  EXPECT_FALSE(r.second) << "a restarted Engine's reply was dropped: " << r.second.message();
+  EXPECT_FALSE(r.third) << r.third.message();
+  EXPECT_EQ(bootsCarried, (std::vector<std::int32_t>{3, 9}))
+      << "the restarted boots was not adopted";
+}
+
+// The other half of the same rule, and the ordinary one of the two: a clock stepped forward within
+// one boot needs nothing more than NTP. Only a time *behind* our projection by more than the
+// Window is untimely, so this is a Response to be answered from, not one to drop.
+TEST(ClientV3, AcceptsAReplyWhoseClockSteppedForwardWithinOneBoot) {
+  const auto ec = secondGetAnsweredWith(3, 4000);
+  EXPECT_FALSE(ec) << "a clock step forward was read as untimely: " << ec.message();
+}
+
+// And the direction that must stay refused, which is what the rule is for: a pair older than the
+// one we hold is a replay, and RFC 3414 section 2.2.3 never lets a cached boots count go down.
+// Dropped rather than failed, like every other unusable datagram -- the request stays outstanding
+// and retransmits. At the deadline it says why it dropped them rather than Timeout (ADR-0008).
+TEST(ClientV3, DropsAReplyClaimingAnOlderBootsCount) {
+  const auto ec = secondGetAnsweredWith(2, 1000);
+  EXPECT_EQ(ec, make_error_code(Errc::NotInTimeWindow))
+      << "a boots regression was accepted: " << ec.message();
 }
 
 bool isTimeSyncPhase(const ScriptedV3Agent::Request& req) {
@@ -423,33 +439,70 @@ TEST(ClientV3, AForcedResyncHappensAtMostOncePerRequest) {
   EXPECT_EQ(r.requestsAfterTheSecondGet, 4);
 }
 
-// #43. Two Outstanding Requests sent at the cached boots 3, and the Engine resets to boots 1
-// between signing a Response to one and answering the other. The other request's signed lower-boots
-// Report forgets the clock, and its retry starts a rediscovery. The signed Response is held back
-// until that rediscovery's identity phase is on the wire. It is authenticated and not behind the
-// pair we held, so RFC 3414 section 3.2 step 7(b)(1) lets it update the cache, but it must not
-// stand in for the time-sync phase the rediscovery owes. Had it done so, the retry would go out at
-// boots 3 and fail, since no request gets a second forced resync.
-TEST(ClientV3, ALateSignedResponseDoesNotCancelAPendingRediscovery) {
+// #43 and #84. Two Outstanding Requests sent at the cached boots 3, and the Engine resets to boots
+// 1 between signing a Response to one and answering the other. The other request's signed
+// lower-boots Report forgets the clock, and its retry rediscovers the Engine at boots 1. The signed
+// Response is held back and let go at one of the points below. It is authenticated and ahead of
+// the boots the rediscovery set, so RFC 3414 section 3.2 step 7(b)(1) reads it as a restart, and it
+// still answers its own request. It must neither stand in for the rediscovery's time-sync phase
+// (#43) nor move the cache back to the boots the rediscovery abandoned (#84, ADR-0010's amendment).
+// Had it done either, the reported request would fail: its retry would go out at boots 3 with no
+// forced resync left, or the retry's answer at boots 1 would be dropped as behind the cache. The
+// next request would go out at boots 3 and cost a third time-sync phase. A third GET, after both,
+// shows which boots the cache holds.
+enum class ReleasePoint {
+  // Just ahead of the rediscovery's identity phase's answer, while the rediscovery is owed (#43).
+  DuringTheRediscovery,
+  // Right behind the time-sync phase's answer, before the reported request's retry can go out: the
+  // order #84 names, on the wire. On one thread, as here, the Client still encodes the retry
+  // before it reads the held Response, so this lands where BeforeTheRetryIsAnswered does. The
+  // other order, where the retry would go out at boots 3, is the executor's to choose and no test
+  // can schedule it, but the same check covers it: the retry must carry boots 1.
+  BeforeTheRetry,
+  // Once the retry is on the wire at the rediscovered boots, just ahead of its answer.
+  BeforeTheRetryIsAnswered,
+  // Once the reported request has completed, so that only the next request can be hurt.
+  AfterTheReportedRequestCompletes,
+};
+
+struct LateRelease {
+  ReleasePoint at;
+  const char* name;
+};
+
+class ALateSignedResponseAtTheOldBoots : public testing::TestWithParam<LateRelease> {};
+
+TEST_P(ALateSignedResponseAtTheOldBoots, NeitherFailsARequestNorCostsASecondRediscovery) {
   // The Engine's clock as the cache settled it, and as it is after the reset.
   constexpr std::int32_t oldBoots = 3;
   constexpr std::int32_t oldTime = 1000;
   constexpr std::int32_t resetBoots = 1;
   constexpr std::int32_t resetTime = 50;
+  const Oid sysContact{1, 3, 6, 1, 2, 1, 1, 4, 0};
+  const ReleasePoint at = GetParam().at;
 
   Fixture f;
-  f.expectedCompletions = 2;
+  f.expectedCompletions = 3;
   ScriptedV3Agent agent(f.io, credentials(), echoAnswer);
   f.agent = &agent;
   test::CompletionOracle reported(f.io);  // asks for sysDescr, and meets the lower-boots Report
   test::CompletionOracle late(f.io);      // asks for sysUpTime, and its Response is held back
+  test::CompletionOracle next(f.io);      // asks for sysContact, once both have completed
 
   std::optional<ScriptedV3Agent::Request> reportedRequest;
   std::optional<ScriptedV3Agent::Request> lateRequest;
   std::optional<ScriptedV3Agent::Reply> lateResponse;
   bool reset = false;
+  bool released = false;
   int timeSyncPhases = 0;
   std::vector<std::int32_t> bootsTheReportedRequestCarried;
+  std::vector<std::int32_t> bootsTheNextRequestCarried;
+
+  const auto release = [&] {
+    if (!lateResponse) return;
+    agent.answerLate(*lateRequest, *std::exchange(lateResponse, std::nullopt));
+    released = true;
+  };
 
   agent.setBoots(oldBoots);
   agent.setTime(oldTime);
@@ -459,6 +512,9 @@ TEST(ClientV3, ALateSignedResponseDoesNotCancelAPendingRediscovery) {
         const bool isReported = asksFor(req, sysDescr);
         const bool isLate = asksFor(req, sysUpTime);
         if (isReported) bootsTheReportedRequestCarried.push_back(req.message.security.boots);
+        if (asksFor(req, sysContact)) {
+          bootsTheNextRequestCarried.push_back(req.message.security.boots);
+        }
 
         if (!reset && (isReported || isLate)) {
           // Hold whichever arrives first, so that both were sent at the old boots before the reset.
@@ -474,30 +530,65 @@ TEST(ClientV3, ALateSignedResponseDoesNotCancelAPendingRediscovery) {
           agent.answerLate(*reportedRequest, *agent.behaveLikeACompliantAgent(*reportedRequest));
           return std::nullopt;
         }
-        // The rediscovery's identity phase. The held Response goes out just ahead of its answer.
-        if (reset && lateResponse && req.message.security.engineId.empty()) {
-          agent.answerLate(*lateRequest, *std::exchange(lateResponse, std::nullopt));
+        if (!reset) return agent.behaveLikeACompliantAgent(req);
+
+        if (at == ReleasePoint::DuringTheRediscovery && req.message.security.engineId.empty()) {
+          release();
+        }
+        // Both datagrams are on the wire before the Client has read either, so the held Response
+        // cannot arrive behind the retry.
+        if (at == ReleasePoint::BeforeTheRetry && isTimeSyncPhase(req) && lateResponse) {
+          agent.answerLate(req, *agent.behaveLikeACompliantAgent(req));
+          release();
+          return std::nullopt;
+        }
+        if (at == ReleasePoint::BeforeTheRetryIsAnswered && isReported &&
+            req.message.security.boots == resetBoots) {
+          release();
         }
         return agent.behaveLikeACompliantAgent(req);
       });
 
-  // Long enough that nothing is retransmitted: every datagram here is one the test chose.
+  // No retransmission, and long enough to answer: every datagram here is one the test chose.
   Target target = targetFor(agent);
   target.timeout = std::chrono::seconds(5);
-  const auto finish = [&f](net::ErrorCode, const Response&) { f.finish(); };
-  f.client.asyncGet(target, credentials(), {sysDescr}, reported.handler(finish));
-  f.client.asyncGet(target, credentials(), {sysUpTime}, late.handler(finish));
+  target.retries = 0;
+  int bothDone = 0;
+  const auto thenTheNext = [&] {
+    f.finish();
+    if (++bothDone < 2) return;
+    f.client.asyncGet(target, credentials(), {sysContact},
+                      next.handler([&f](net::ErrorCode, const Response&) { f.finish(); }));
+  };
+  f.client.asyncGet(target, credentials(), {sysDescr},
+                    reported.handler([&](net::ErrorCode, const Response&) {
+                      if (at == ReleasePoint::AfterTheReportedRequestCompletes) release();
+                      thenTheNext();
+                    }));
+  f.client.asyncGet(target, credentials(), {sysUpTime},
+                    late.handler([&](net::ErrorCode, const Response&) { thenTheNext(); }));
   f.run();
 
-  ASSERT_TRUE(reset) << "the Agent never saw both requests";
+  ASSERT_TRUE(released) << "the held Response was never let go";
   EXPECT_TRUE(late.completedExactlyOnce({net::ErrorCode{}}));
   EXPECT_TRUE(reported.completedExactlyOnce({net::ErrorCode{}}))
-      << "the late Response stood in for the rediscovery's time-sync phase";
-  // The first discovery's, and the rediscovery's.
+      << "the late Response undid the rediscovery";
+  EXPECT_TRUE(next.completedExactlyOnce({net::ErrorCode{}}));
+  // The first discovery's, and the rediscovery's. Not a third.
   EXPECT_EQ(timeSyncPhases, 2);
   // The request at the old boots, and its retry at the rediscovered one.
   EXPECT_EQ(bootsTheReportedRequestCarried, (std::vector<std::int32_t>{oldBoots, resetBoots}));
+  EXPECT_EQ(bootsTheNextRequestCarried, (std::vector<std::int32_t>{resetBoots}));
 }
+
+INSTANTIATE_TEST_SUITE_P(
+    ClientV3, ALateSignedResponseAtTheOldBoots,
+    testing::Values(LateRelease{ReleasePoint::DuringTheRediscovery, "DuringTheRediscovery"},
+                    LateRelease{ReleasePoint::BeforeTheRetry, "BeforeTheRetry"},
+                    LateRelease{ReleasePoint::BeforeTheRetryIsAnswered, "BeforeTheRetryIsAnswered"},
+                    LateRelease{ReleasePoint::AfterTheReportedRequestCompletes,
+                                "AfterTheReportedRequestCompletes"}),
+    [](const testing::TestParamInfo<LateRelease>& param) { return std::string(param.param.name); });
 
 // The direction that was always right stays as it was: a signed Report naming a *higher* boots is
 // adopted and the request retried, with no rediscovery.
@@ -771,7 +862,7 @@ TEST(ClientV3, AnUnauthenticatedReportNeverResynchronisesTheCache) {
 }
 
 // The same property in the one exchange that does not go through handleReport: discovery's
-// time-sync phase. Had the forged pair become the baseline, every request after it would carry a
+// time-sync phase. Had the forged pair become the Baseline, every request after it would carry a
 // boots count the Engine is nowhere near, and since boots never go backwards, the Engine's signed
 // corrections could not repair it.
 TEST(ClientV3, AnUnauthenticatedReportNeverSetsTheDiscoveredClock) {
@@ -898,7 +989,7 @@ TEST(ClientV3, AdoptsTheClockFromASignedResponseToTheTimeSyncPhase) {
   EXPECT_EQ(agent.requestsSeen(), 3);
 }
 
-// The identity phase is unsigned by design, so the pair it carries is never a baseline: nothing is
+// The identity phase is unsigned by design, so the pair it carries is never a Baseline: nothing is
 // timely or untimely against it. Had it been, a forged identity reply would get the Engine's own
 // signed Response to the time-sync phase dropped as a replay.
 TEST(ClientV3, TheIdentityPhasesClockIsNotABaseline) {

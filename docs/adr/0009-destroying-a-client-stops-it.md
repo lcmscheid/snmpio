@@ -113,3 +113,26 @@ the handler call would also close it, but would hold a lock across the caller's 
 
 The id is a second atomic outside the strand, beside the flag; ADR-0003 carries the matching
 amendment.
+
+## Amendment, 2026-11-10: a `stop()` that cannot schedule its cleanup leaves the Client dead
+
+`~Client` terminates when scheduling its cleanup throws; that is in its comment, and it stands.
+An explicit `stop()` lets the same exception out to its caller instead, and until now what it
+left behind was a claim made by inspection: the Stopping flag set, the sockets open. A test with an
+executor that throws from `execute()` checked it (#66). The flag and the sockets are as claimed,
+but the strand is gone too. Asio queues the cleanup on the strand and marks the strand busy before
+it calls the executor underneath, and nothing clears the mark once that call throws. The strand
+never runs another handler, so nothing the Client owns completes again: not its Outstanding
+Requests, not at their deadlines, and not a request issued afterwards, which is not sent either.
+
+So the exception from `stop()` is fatal to the Client, and that is the contract. The caller learns
+of it, which is more than `~Client` could offer, and has to treat the Client as unusable. The
+`io_context` keeps running everything else. The test stops it by hand; since the Client's sockets
+stay open with receives pending on them, `run()` is not expected to return on its own.
+
+Rolling the flag back stays rejected, for the reason b3eab6d gave: it races a concurrent `stop()`
+or `~Client` that has already seen the flag and returned. It would not help anyway. The strand is
+stuck in Asio, and nothing outside it can unstick it. Making `stop()` `noexcept`, so that it
+terminates as `~Client` does, was the other option. It would trade an exception the caller can
+log and act on, by tearing down the `io_context`, for the end of the process. That is the right
+trade in a destructor, which cannot report anything, and not in a function that can.

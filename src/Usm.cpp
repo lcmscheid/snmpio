@@ -9,11 +9,13 @@
 #include <atomic>
 #include <random>
 #include <string>
+#include <tuple>
 #include <vector>
 
+#include <openssl/core_names.h>
 #include <openssl/crypto.h>
 #include <openssl/evp.h>
-#include <openssl/hmac.h>
+#include <openssl/params.h>
 #include <openssl/provider.h>
 #include <openssl/rand.h>
 
@@ -29,24 +31,110 @@ namespace {
 constexpr std::size_t expandedPasswordSize = 1048576;
 constexpr std::size_t targetRepeatedSize = 16384;
 
-const EVP_MD* digestFor(AuthProtocol p) noexcept {
+// One algorithm, fetched explicitly from the default library context once and held for the
+// process's life. OpenSSL's guide asks for exactly this of anything that runs the same algorithm
+// many times: "it is recommended to use a single explicit fetch" (ossl-guide-libcrypto-
+// introduction(7), Performance). EVP_md5() and its siblings instead fetch implicitly on every use,
+// and so does HMAC() -- twice, the MAC and then its digest. Each is a function-local static, so
+// C++ makes its one fetch thread-safe, and later calls touch none of OpenSSL's lazy state (#47,
+// #90). A fetch that fails holds nullptr, and every caller reports that as it would any failure.
+template <typename T, T* (*Fetch)(OSSL_LIB_CTX*, const char*, const char*), void (*Free)(T*)>
+class Fetched {
+ public:
+  explicit Fetched(const char* name) noexcept
+      : m_algorithm(name == nullptr ? nullptr : Fetch(nullptr, name, nullptr)) {}
+  ~Fetched() { Free(m_algorithm); }
+
+  Fetched(const Fetched&) = delete;
+  Fetched& operator=(const Fetched&) = delete;
+  Fetched(Fetched&&) = delete;
+  Fetched& operator=(Fetched&&) = delete;
+
+  [[nodiscard]] const T* get() const noexcept { return m_algorithm; }
+
+ private:
+  T* m_algorithm;
+};
+
+using FetchedDigest = Fetched<EVP_MD, EVP_MD_fetch, EVP_MD_free>;
+using FetchedCipher = Fetched<EVP_CIPHER, EVP_CIPHER_fetch, EVP_CIPHER_free>;
+
+// HMAC under one digest, keyless: a template each HMAC duplicates and keys. Setting the digest is
+// what fetches it, so it is set here once; a duplicate shares the fetched digest, and keying it
+// fetches nothing.
+class HmacTemplate {
+ public:
+  explicit HmacTemplate(const char* digestName) noexcept {
+    EVP_MAC* mac = EVP_MAC_fetch(nullptr, "HMAC", nullptr);
+    m_ctx = mac == nullptr ? nullptr : EVP_MAC_CTX_new(mac);
+    EVP_MAC_free(mac);  // the context keeps its own reference
+    // OSSL_PARAM's constructors take char* for every string, though a parameter being set is only
+    // read; a copy gives it one without casting the constness off the name.
+    std::string name(digestName);
+    std::array<OSSL_PARAM, 2> params = {
+        OSSL_PARAM_construct_utf8_string(OSSL_MAC_PARAM_DIGEST, name.data(), 0),
+        OSSL_PARAM_construct_end()};
+    if (m_ctx != nullptr && EVP_MAC_CTX_set_params(m_ctx, params.data()) != 1) {
+      EVP_MAC_CTX_free(m_ctx);
+      m_ctx = nullptr;
+    }
+  }
+  ~HmacTemplate() { EVP_MAC_CTX_free(m_ctx); }
+
+  HmacTemplate(const HmacTemplate&) = delete;
+  HmacTemplate& operator=(const HmacTemplate&) = delete;
+  HmacTemplate(HmacTemplate&&) = delete;
+  HmacTemplate& operator=(HmacTemplate&&) = delete;
+
+  [[nodiscard]] const EVP_MAC_CTX* get() const noexcept { return m_ctx; }
+
+ private:
+  EVP_MAC_CTX* m_ctx = nullptr;
+};
+
+// What one authentication protocol needs from OpenSSL: its hash, and HMAC under it.
+struct AuthAlgorithms {
+  explicit AuthAlgorithms(const char* name) noexcept : digest(name), hmac(name) {}
+  FetchedDigest digest;
+  HmacTemplate hmac;
+};
+
+// Each protocol's, fetched the first time it is asked for and never again; nullptr for None.
+const AuthAlgorithms* authAlgorithms(AuthProtocol p) noexcept {
   switch (p) {
     case AuthProtocol::None:
       return nullptr;
-    case AuthProtocol::Md5:
-      return EVP_md5();
-    case AuthProtocol::Sha1:
-      return EVP_sha1();
-    case AuthProtocol::Sha224:
-      return EVP_sha224();
-    case AuthProtocol::Sha256:
-      return EVP_sha256();
-    case AuthProtocol::Sha384:
-      return EVP_sha384();
-    case AuthProtocol::Sha512:
-      return EVP_sha512();
+    case AuthProtocol::Md5: {
+      static const AuthAlgorithms md5("MD5");
+      return &md5;
+    }
+    case AuthProtocol::Sha1: {
+      static const AuthAlgorithms sha1("SHA1");
+      return &sha1;
+    }
+    case AuthProtocol::Sha224: {
+      static const AuthAlgorithms sha224("SHA2-224");
+      return &sha224;
+    }
+    case AuthProtocol::Sha256: {
+      static const AuthAlgorithms sha256("SHA2-256");
+      return &sha256;
+    }
+    case AuthProtocol::Sha384: {
+      static const AuthAlgorithms sha384("SHA2-384");
+      return &sha384;
+    }
+    case AuthProtocol::Sha512: {
+      static const AuthAlgorithms sha512("SHA2-512");
+      return &sha512;
+    }
   }
   return nullptr;
+}
+
+const EVP_MD* digestFor(AuthProtocol p) noexcept {
+  const auto* algorithms = authAlgorithms(p);
+  return algorithms == nullptr ? nullptr : algorithms->digest.get();
 }
 
 // EVP_MD_CTX is a C handle with a free function; this is the whole reason to own it.
@@ -112,16 +200,43 @@ SecretOctets finish(const DigestContext& ctx, net::ErrorCode& ec) {
   return out.first(len);
 }
 
-// An HMAC under md at the hash's full width; callers truncate where the protocol says to. Held as
+// One HMAC's own context, duplicated from a protocol's template and freed -- which wipes the key
+// schedule it holds -- however its scope is left.
+class MacContext {
+ public:
+  explicit MacContext(const EVP_MAC_CTX* tmpl) noexcept
+      : m_ctx(tmpl == nullptr ? nullptr : EVP_MAC_CTX_dup(tmpl)) {}
+  ~MacContext() { EVP_MAC_CTX_free(m_ctx); }
+
+  MacContext(const MacContext&) = delete;
+  MacContext& operator=(const MacContext&) = delete;
+  MacContext(MacContext&&) = delete;
+  MacContext& operator=(MacContext&&) = delete;
+
+  [[nodiscard]] EVP_MAC_CTX* get() const noexcept { return m_ctx; }
+
+ private:
+  EVP_MAC_CTX* m_ctx;
+};
+
+// An HMAC under p's hash at its full width; callers truncate where the protocol says to. Held as
 // a secret, and its stack array wiped, because one caller's is: passwordDigest's stands in for a
 // password.
-SecretOctets hmacOf(const EVP_MD* md, std::span<const std::byte> key,
+SecretOctets hmacOf(AuthProtocol p, std::span<const std::byte> key,
                     std::span<const std::byte> message, net::ErrorCode& ec) {
+  const auto* algorithms = authAlgorithms(p);
+  const MacContext ctx(algorithms == nullptr ? nullptr : algorithms->hmac.get());
   WipedStackArray<EVP_MAX_MD_SIZE> mac;
-  unsigned int len = 0;
-  if (HMAC(md, key.data(), static_cast<int>(key.size()),
-           reinterpret_cast<const unsigned char*>(message.data()), message.size(), mac.data(),
-           &len) == nullptr) {
+  std::size_t len = 0;
+  // A null key means "keep the last one" to EVP_MAC_init, and a duplicate of the template has none,
+  // so an empty key -- whose data() may be null -- is pointed somewhere, as HMAC() used to.
+  static constexpr unsigned char emptyKey = 0;
+  const auto* keyBytes =
+      key.empty() ? &emptyKey : reinterpret_cast<const unsigned char*>(key.data());
+  if (ctx.get() == nullptr || EVP_MAC_init(ctx.get(), keyBytes, key.size(), nullptr) != 1 ||
+      EVP_MAC_update(ctx.get(), reinterpret_cast<const unsigned char*>(message.data()),
+                     message.size()) != 1 ||
+      EVP_MAC_final(ctx.get(), mac.data(), &len, mac.size()) != 1) {
     ec = make_error_code(Errc::CryptoFailure);
     return {};
   }
@@ -166,16 +281,19 @@ void putBigEndian32(std::span<std::byte> out, std::uint32_t v) noexcept {
 // DES lives in OpenSSL 3.x's legacy provider, which is not loaded by default (ADR-0005). Loading
 // any provider explicitly stops the default one from being activated implicitly, so both are
 // loaded here or the very next SHA-256 would fail. Lazy, and never on the path of a build or a
-// Client that only ever speaks AES.
+// Client that only ever speaks AES. A Client loads it as a DES request is initiated, on the
+// caller's thread (detail::fetchAlgorithms), rather than on its strand mid-request.
 class LegacyProvider {
  public:
   LegacyProvider() noexcept
       : m_legacy(OSSL_PROVIDER_load(nullptr, "legacy")),
         m_default(OSSL_PROVIDER_load(nullptr, "default")) {}
-  // Unloaded rather than left to the process: this balances exactly the two loads above and
-  // nothing outlives it, since every EVP handle is fetched and freed inside one call. A provider
-  // left loaded is a leak every sanitizer reports, and refusing to tidy up after ourselves in a
-  // library is not a decision a library gets to make.
+  // Unloaded rather than left to the process: this balances exactly the two loads above. Every
+  // algorithm static fetched once it is loaded -- DES's cipher always, any other that happens to
+  // come later -- is constructed after it and so destroyed before it, and holds a reference to its
+  // provider besides. A provider left loaded is a leak every
+  // sanitizer reports, and refusing to tidy up after ourselves in a library is not a decision a
+  // library gets to make.
   ~LegacyProvider() {
     if (m_default != nullptr) OSSL_PROVIDER_unload(m_default);
     if (m_legacy != nullptr) OSSL_PROVIDER_unload(m_legacy);
@@ -198,42 +316,36 @@ bool ensureLegacyProvider() {
   return provider.loaded();
 }
 
-// The OpenSSL name of the cipher, or nullptr for a protocol that has none.
-const char* cipherName(PrivProtocol p) noexcept {
+// Each protocol's cipher, fetched once as the digests are; nullptr for None, and for DES where the
+// legacy provider will not load. "AES-128-CFB" is CFB-128 in OpenSSL's spelling -- the feedback
+// width RFC 3826 section 3.1.1 requires, and the one the -CFB1 and -CFB8 names exist to
+// distinguish themselves from.
+const EVP_CIPHER* cipherFor(PrivProtocol p) noexcept {
   switch (p) {
     case PrivProtocol::None:
       return nullptr;
-    case PrivProtocol::Des:
-      return "DES-CBC";
-    case PrivProtocol::Aes128:
-      return "AES-128-CFB";
+    case PrivProtocol::Des: {
+      // Fetched after the provider is loaded, so destroyed before it is unloaded.
+      static const FetchedCipher des(ensureLegacyProvider() ? "DES-CBC" : nullptr);
+      return des.get();
+    }
+    case PrivProtocol::Aes128: {
+      static const FetchedCipher aes128("AES-128-CFB");
+      return aes128.get();
+    }
     case PrivProtocol::Aes192:
-    case PrivProtocol::Aes192C:
-      return "AES-192-CFB";
+    case PrivProtocol::Aes192C: {
+      static const FetchedCipher aes192("AES-192-CFB");
+      return aes192.get();
+    }
     case PrivProtocol::Aes256:
-    case PrivProtocol::Aes256C:
-      return "AES-256-CFB";
+    case PrivProtocol::Aes256C: {
+      static const FetchedCipher aes256("AES-256-CFB");
+      return aes256.get();
+    }
   }
   return nullptr;
 }
-
-// "AES-128-CFB" is CFB-128 in OpenSSL's spelling -- the feedback width RFC 3826 section 3.1.1
-// requires, and the one the -CFB1 and -CFB8 names exist to distinguish themselves from.
-class Cipher {
- public:
-  explicit Cipher(PrivProtocol p) : m_cipher(EVP_CIPHER_fetch(nullptr, cipherName(p), nullptr)) {}
-  ~Cipher() { EVP_CIPHER_free(m_cipher); }
-
-  Cipher(const Cipher&) = delete;
-  Cipher& operator=(const Cipher&) = delete;
-  Cipher(Cipher&&) = delete;
-  Cipher& operator=(Cipher&&) = delete;
-
-  [[nodiscard]] const EVP_CIPHER* get() const noexcept { return m_cipher; }
-
- private:
-  EVP_CIPHER* m_cipher;
-};
 
 class CipherContext {
  public:
@@ -282,19 +394,20 @@ SecretOctets makeIv(PrivProtocol p, std::span<const std::byte> privKey, std::int
 // because RFC 3414 section 8.1.1.2's pad is not PKCS#7 and must not be stripped on the way back.
 Octets crypt(PrivProtocol p, std::span<const std::byte> privKey, std::span<const std::byte> iv,
              std::span<const std::byte> in, bool encrypt, net::ErrorCode& ec) {
+  // The provider is asked first, so that a DES cipher that will not fetch from a loaded provider is
+  // still the CryptoFailure it always was.
   if (p == PrivProtocol::Des && !ensureLegacyProvider()) {
     ec = make_error_code(Errc::LegacyProviderUnavailable);
     return {};
   }
-  const Cipher cipher(p);
-  if (cipher.get() == nullptr) {
-    ec = make_error_code(p == PrivProtocol::Des ? Errc::LegacyProviderUnavailable
-                                                : Errc::CryptoFailure);
+  const EVP_CIPHER* cipher = cipherFor(p);
+  if (cipher == nullptr) {
+    ec = make_error_code(Errc::CryptoFailure);
     return {};
   }
   const CipherContext ctx;
   if (ctx.get() == nullptr ||
-      EVP_CipherInit_ex(ctx.get(), cipher.get(), nullptr,
+      EVP_CipherInit_ex(ctx.get(), cipher, nullptr,
                         reinterpret_cast<const unsigned char*>(privKey.data()),
                         reinterpret_cast<const unsigned char*>(iv.data()), encrypt ? 1 : 0) != 1 ||
       EVP_CIPHER_CTX_set_padding(ctx.get(), 0) != 1) {
@@ -528,7 +641,16 @@ SecretOctets detail::randomDigestKey(net::ErrorCode& ec) {
 
 SecretOctets detail::passwordDigest(std::span<const std::byte> key, std::string_view password,
                                     net::ErrorCode& ec) {
-  return hmacOf(EVP_sha256(), key, std::as_bytes(std::span(password)), ec);
+  return hmacOf(AuthProtocol::Sha256, key, std::as_bytes(std::span(password)), ec);
+}
+
+void detail::fetchAlgorithms(const Credentials& creds) noexcept {
+  if (!isAuthenticated(creds.level)) return;
+  std::ignore = authAlgorithms(creds.authProtocol);
+  // A Client caches a password's Master Key under its passwordDigest. Fetched whether or not the
+  // Credentials carry passwords: it is once per process either way, and one branch fewer.
+  std::ignore = authAlgorithms(AuthProtocol::Sha256);
+  if (isEncrypted(creds.level)) std::ignore = cipherFor(creds.privProtocol);
 }
 
 Octets privEncrypt(PrivProtocol p, std::span<const std::byte> privKey, std::int32_t boots,
@@ -584,13 +706,12 @@ Octets privDecrypt(PrivProtocol p, std::span<const std::byte> privKey, std::int3
 
 Octets authDigest(AuthProtocol p, std::span<const std::byte> localizedKey,
                   std::span<const std::byte> message, net::ErrorCode& ec) {
-  const auto* md = digestFor(p);
-  if (md == nullptr) {
+  if (authAlgorithms(p) == nullptr) {
     ec = make_error_code(Errc::UnsupportedAuthProtocol);
     return {};
   }
 
-  const auto mac = hmacOf(md, localizedKey, message, ec);
+  const auto mac = hmacOf(p, localizedKey, message, ec);
   if (ec) return {};
 
   const auto width = authParamsSize(p);

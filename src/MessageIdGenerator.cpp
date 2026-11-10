@@ -5,6 +5,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <memory>
+#include <tuple>
 #include <utility>
 
 #include <snmpio/Error.hpp>
@@ -54,7 +56,23 @@ bool encryptBlock(evp_cipher_ctx_st* ctx, const Block& in, Block& out) {
          std::cmp_equal(written, aesBlockBytes);
 }
 
+// AES-128-ECB from the default library context, fetched once per process and held, as Usm.cpp
+// holds its algorithms (#47). A function-local static, so the one fetch is thread-safe: every
+// Client's generator shares it, where each used to fetch its own, on its strand, as two Clients'
+// strands raced into OpenSSL's lazy initialisation (#90).
+const EVP_CIPHER* defaultAes128Ecb() noexcept {
+  static const std::unique_ptr<EVP_CIPHER, void (*)(EVP_CIPHER*)> cipher(
+      EVP_CIPHER_fetch(nullptr, "AES-128-ECB", nullptr), EVP_CIPHER_free);
+  return cipher.get();
+}
+
 }  // namespace
+
+MessageIdGenerator::MessageIdGenerator() noexcept {
+  // Fetched as the Client that owns this is constructed, on the caller's thread rather than the
+  // strand's first draw.
+  std::ignore = defaultAes128Ecb();
+}
 
 MessageIdGenerator::MessageIdGenerator(std::span<const std::byte, keyBytes> key,
                                        std::uint32_t counter)
@@ -68,7 +86,13 @@ MessageIdGenerator::~MessageIdGenerator() {
 bool MessageIdGenerator::ensureKeyed(net::ErrorCode& ec) {
   if (m_ctx != nullptr) return true;
   SecretOctets key = m_fixedKey;
-  EVP_CIPHER* cipher = EVP_CIPHER_fetch(m_libctx, "AES-128-ECB", nullptr);
+  // The default library context's cipher is shared; a test's own context is fetched from afresh.
+  EVP_CIPHER* ownCipher = nullptr;
+  const EVP_CIPHER* cipher = defaultAes128Ecb();
+  if (m_libctx != nullptr) {
+    ownCipher = EVP_CIPHER_fetch(m_libctx, "AES-128-ECB", nullptr);
+    cipher = ownCipher;
+  }
   EVP_CIPHER_CTX* ctx = EVP_CIPHER_CTX_new();
   bool ok = cipher != nullptr && ctx != nullptr;
   if (ok && key.empty()) {
@@ -79,7 +103,7 @@ bool MessageIdGenerator::ensureKeyed(net::ErrorCode& ec) {
        EVP_EncryptInit_ex2(ctx, cipher, reinterpret_cast<const unsigned char*>(key.data()), nullptr,
                            nullptr) == 1 &&
        EVP_CIPHER_CTX_set_padding(ctx, 0) == 1 && encryptBlock(ctx, p, m_encryptedP);
-  EVP_CIPHER_free(cipher);  // the context keeps its own reference
+  EVP_CIPHER_free(ownCipher);  // the context keeps its own reference
   if (!ok) {
     EVP_CIPHER_CTX_free(ctx);
     ec = make_error_code(Errc::CryptoFailure);

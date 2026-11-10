@@ -19,7 +19,10 @@
 #include "CompletionOracle.hpp"
 #include "Deadlines.hpp"
 #include "MasterKeys.hpp"
+#include "RefusedFetches.hpp"
 #include "ScriptedV3Agent.hpp"
+
+#include <openssl/rand.h>
 
 namespace snmpio {
 namespace {
@@ -1457,6 +1460,33 @@ TEST(ClientV3, AuthPrivRoundTripsUnderEveryPrivacyProtocol) {
     EXPECT_FALSE(f.ec) << "privacy protocol " << static_cast<int>(priv) << ": " << f.ec.message();
     ASSERT_EQ(f.response.varbinds.size(), 1U);
     EXPECT_EQ(f.response.varbinds[0].name, sysDescr);
+  }
+}
+
+// A request fetches the OpenSSL algorithms its Credentials need, and loads the legacy provider for
+// DES, as it is initiated on the caller's thread, so neither happens on the strand mid-request
+// (#47). With fetching refused from just after initiation, every privacy protocol still
+// round-trips. Each runs in a process of its own (gtest_discover_tests), so nothing earlier fetched
+// for it; the Agent derives its keys when it is constructed, which fetches the digest but neither
+// the cipher, the HMAC, nor the legacy provider. OpenSSL's CSPRNG is drawn from first, outside the
+// refusal: it fetches its generator on a thread's first draw, which is OpenSSL's per-thread state
+// and no algorithm the Client could hold (threat model B7).
+TEST(ClientV3, ARequestFetchesItsAlgorithmsAsItIsInitiated) {
+  std::array<unsigned char, 16> firstDraw{};
+  ASSERT_EQ(RAND_bytes(firstDraw.data(), static_cast<int>(firstDraw.size())), 1);
+  for (const auto priv : {PrivProtocol::Des, PrivProtocol::Aes128, PrivProtocol::Aes192,
+                          PrivProtocol::Aes256, PrivProtocol::Aes192C, PrivProtocol::Aes256C}) {
+    Fixture f;
+    ScriptedV3Agent agent(f.io, privCredentials(priv, AuthProtocol::Sha1), echoAnswer);
+    f.agent = &agent;
+
+    f.client.asyncGet(targetFor(agent), privCredentials(priv, AuthProtocol::Sha1), {sysDescr},
+                      f.requestToken());
+    const test::RefusedFetches refused;
+    ASSERT_TRUE(refused.refusing());
+    f.run();
+
+    EXPECT_FALSE(f.ec) << "privacy protocol " << static_cast<int>(priv) << ": " << f.ec.message();
   }
 }
 

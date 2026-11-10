@@ -4,10 +4,13 @@
 #include <array>
 #include <span>
 #include <string>
+#include <utility>
+#include <vector>
 
 #include <snmpio/Usm.hpp>
 
 #include "Bytes.hpp"
+#include "RefusedFetches.hpp"
 
 namespace snmpio {
 namespace {
@@ -456,6 +459,60 @@ TEST(PrivDecrypt, RejectsAKeyTooShortForTheProtocol) {
                                  fromHex("0011223344556677"), bytes({0x00}), ec);
   EXPECT_TRUE(plain.empty());
   EXPECT_EQ(ec, make_error_code(Errc::UnsupportedPrivProtocol));
+}
+
+// ---------------------------------------------------------------------------
+// Algorithm fetches (#47)
+// ---------------------------------------------------------------------------
+
+// Every derivation, digest and crypt a request makes under one pair of protocols, as one string:
+// the keys, an HMAC, and a round trip through the cipher, or the first error met on the way.
+std::string everyCryptoCall(AuthProtocol auth, PrivProtocol priv) {
+  net::ErrorCode ec;
+  const auto creds = privCreds(auth, priv);
+  const auto authKey = localizedAuthKey(creds, privEngineId(), ec);
+  if (ec) return "localizedAuthKey: " + ec.message();
+  const auto privKey = localizedPrivKey(creds, privEngineId(), ec);
+  if (ec) return "localizedPrivKey: " + ec.message();
+  const auto digest = authDigest(auth, authKey, bytes({0x30, 0x03, 0x02, 0x01, 0x03}), ec);
+  if (ec) return "authDigest: " + ec.message();
+  const auto plaintext = bytes({0x30, 0x05, 0x04, 0x03, 0x61, 0x62, 0x63});
+  Octets salt;
+  const auto ciphertext = privEncrypt(priv, privKey, 7, 1234, plaintext, salt, ec);
+  if (ec) return "privEncrypt: " + ec.message();
+  const auto back = privDecrypt(priv, privKey, 7, 1234, salt, ciphertext, ec);
+  if (ec) return "privDecrypt: " + ec.message();
+  return hex(authKey) + " " + hex(privKey) + " " + hex(digest) + " " + hex(back);
+}
+
+// OpenSSL's guide asks for one explicit fetch, reused, by anything that runs the same algorithm
+// many times. Once each pair of protocols has run, every call under it gives the same answer with
+// fetching refused outright, which an implicit fetch at each call -- EVP_sha256() and HMAC() both
+// make one -- or a fresh EVP_CIPHER_fetch would fail.
+TEST(Algorithms, AreFetchedOnceAndReusedByEveryCall) {
+  std::vector<std::pair<AuthProtocol, PrivProtocol>> pairs;
+  for (const auto auth : {AuthProtocol::Md5, AuthProtocol::Sha1, AuthProtocol::Sha224,
+                          AuthProtocol::Sha256, AuthProtocol::Sha384, AuthProtocol::Sha512}) {
+    pairs.emplace_back(auth, PrivProtocol::Aes128);
+  }
+  for (const auto priv : {PrivProtocol::Des, PrivProtocol::Aes192, PrivProtocol::Aes256,
+                          PrivProtocol::Aes192C, PrivProtocol::Aes256C}) {
+    pairs.emplace_back(AuthProtocol::Md5, priv);  // MD5's 16 Octets need extending for all four AES
+  }
+
+  std::vector<std::string> fetching;
+  for (const auto& [auth, priv] : pairs) {
+    fetching.push_back(everyCryptoCall(auth, priv));
+    ASSERT_EQ(fetching.back().find(':'), std::string::npos) << fetching.back();
+  }
+
+  const test::RefusedFetches refused;
+  ASSERT_TRUE(refused.refusing());
+  for (std::size_t i = 0; i < pairs.size(); ++i) {
+    EXPECT_EQ(everyCryptoCall(pairs[i].first, pairs[i].second), fetching[i])
+        << "auth " << static_cast<int>(pairs[i].first) << " priv "
+        << static_cast<int>(pairs[i].second);
+  }
 }
 
 }  // namespace

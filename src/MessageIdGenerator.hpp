@@ -32,8 +32,8 @@ class MessageIdGenerator {
  public:
   static constexpr std::size_t keyBytes = 16;  // AES-128
 
-  // Keyed from OpenSSL's default library context.
-  MessageIdGenerator() noexcept = default;
+  // Keyed from OpenSSL's default library context, whose cipher it fetches now if no generator has.
+  MessageIdGenerator() noexcept;
   // Keyed from `libctx` instead, as OpenSSL's own _ex functions take one: for the tests, which
   // hand it a context with no provider in it to fail with.
   explicit MessageIdGenerator(ossl_lib_ctx_st* libctx) noexcept : m_libctx(libctx) {}

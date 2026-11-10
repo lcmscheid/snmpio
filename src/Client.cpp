@@ -670,18 +670,29 @@ void Client::stop() {
   Impl::stop(m_impl);
 }
 
+// Each of these runs as the operation is initiated, on the caller's thread, which is where the
+// algorithms its Credentials need are fetched (detail::fetchAlgorithms): never on the strand.
+namespace {
+void fetchAlgorithmsFor(const std::variant<Community, Credentials>& auth) noexcept {
+  if (const auto* creds = std::get_if<Credentials>(&auth)) detail::fetchAlgorithms(*creds);
+}
+}  // namespace
+
 net::Awaitable<Client::RequestResult> Client::doRequest(Target target, Auth auth, Pdu pdu) {
+  fetchAlgorithmsFor(auth);
   return m_impl->doRequest(m_impl, std::move(target), std::move(auth), std::move(pdu));
 }
 
 net::Awaitable<Client::WalkResult> Client::doWalk(Target target, Auth auth, Oid base,
                                                   WalkOptions options, BatchHandler onBatch) {
+  fetchAlgorithmsFor(auth);
   return m_impl->doWalk(m_impl, std::move(target), std::move(auth), std::move(base), options,
                         std::move(onBatch));
 }
 
 net::Awaitable<Client::CollectResult> Client::doWalkCollect(Target target, Auth auth, Oid base,
                                                             WalkOptions options) {
+  fetchAlgorithmsFor(auth);
   return m_impl->doWalkCollect(m_impl, std::move(target), std::move(auth), std::move(base),
                                options);
 }

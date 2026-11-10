@@ -112,6 +112,13 @@ class Secret {
 [[nodiscard]] SecretOctets passwordDigest(std::span<const std::byte> key, std::string_view password,
                                           net::ErrorCode& ec);
 
+// Fetches every OpenSSL algorithm a request under these Credentials will use, each once per
+// process, and loads the legacy provider if they encrypt with DES (#47). A Client calls it as a
+// request is initiated, on the caller's thread, so that neither a fetch nor the provider's load
+// from disk happens on its strand mid-request. Reports nothing: an algorithm that would not fetch
+// fails the request where it is used, with the error it always did.
+void fetchAlgorithms(const Credentials& creds) noexcept;
+
 }  // namespace snmpio::detail
 
 #endif  // SNMPIO_SRC_SECRET_HPP

@@ -2,6 +2,7 @@
 #include <snmpio/detail/CacheView.hpp>
 #include <snmpio/detail/MessageIdView.hpp>
 
+#include "Algorithms.hpp"
 #include "MessageIdGenerator.hpp"
 #include "Secret.hpp"
 
@@ -276,11 +277,15 @@ class Client::Impl {
     self->awaitBatchDelivery();
   }
 
-  net::Awaitable<RequestResult> doRequest(Ref self, Target target, Auth auth, Pdu pdu);
+  // `unfetched` is what detail::fetchAlgorithms refused, if anything, as the operation was
+  // initiated on the caller's thread.
+  net::Awaitable<RequestResult> doRequest(Ref self, Target target, Auth auth, Pdu pdu,
+                                          std::optional<Errc> unfetched);
   net::Awaitable<WalkResult> doWalk(Ref self, Target target, Auth auth, Oid base,
-                                    WalkOptions options, BatchHandler onBatch);
+                                    WalkOptions options, BatchHandler onBatch,
+                                    std::optional<Errc> unfetched);
   net::Awaitable<CollectResult> doWalkCollect(Ref self, Target target, Auth auth, Oid base,
-                                              WalkOptions options);
+                                              WalkOptions options, std::optional<Errc> unfetched);
 
  private:
   // Which Baseline an Engine's cached pair is (CONTEXT.md), numbered across the Client so
@@ -550,14 +555,16 @@ class Client::Impl {
 
   // Why an operation will not start, in the order every operation keeps: Stopping first, so that
   // one initiated after it completes with ClientStopped whatever else is wrong with it; then the
-  // arguments (requestInRange or walkInRange); then the Credentials (authFault) -- all before
-  // anything is sent or discovered. Both checks are the caller's to make, since what is in range
-  // depends on the operation.
+  // arguments (requestInRange or walkInRange); then the Credentials (authFault); then the OpenSSL
+  // algorithms they need (detail::fetchAlgorithms) -- all before anything is sent or discovered.
+  // The checks are the caller's to make, since what is in range depends on the operation.
   [[nodiscard]] std::optional<net::ErrorCode> refusal(bool argumentsInRange,
-                                                      std::optional<Errc> authProblem) const {
+                                                      std::optional<Errc> authProblem,
+                                                      std::optional<Errc> unfetched) const {
     if (m_stopping) return make_error_code(Errc::ClientStopped);
     if (!argumentsInRange) return make_error_code(Errc::ArgumentOutOfRange);
     if (authProblem) return make_error_code(*authProblem);
+    if (unfetched) return make_error_code(*unfetched);
     return std::nullopt;
   }
 
@@ -671,30 +678,32 @@ void Client::stop() {
 }
 
 // Each of these runs as the operation is initiated, on the caller's thread, which is where the
-// algorithms its Credentials need are fetched (detail::fetchAlgorithms): never on the strand.
+// algorithms its Credentials need are fetched (detail::fetchAlgorithms): never on the strand. What
+// will not fetch refuses the operation, through refusal(), as the strand first sees it.
 namespace {
-void fetchAlgorithmsFor(const std::variant<Community, Credentials>& auth) noexcept {
-  if (const auto* creds = std::get_if<Credentials>(&auth)) detail::fetchAlgorithms(*creds);
+std::optional<Errc> fetchAlgorithmsFor(const std::variant<Community, Credentials>& auth) noexcept {
+  const auto* creds = std::get_if<Credentials>(&auth);
+  return creds == nullptr ? std::nullopt : detail::fetchAlgorithms(*creds);
 }
 }  // namespace
 
 net::Awaitable<Client::RequestResult> Client::doRequest(Target target, Auth auth, Pdu pdu) {
-  fetchAlgorithmsFor(auth);
-  return m_impl->doRequest(m_impl, std::move(target), std::move(auth), std::move(pdu));
+  const auto unfetched = fetchAlgorithmsFor(auth);
+  return m_impl->doRequest(m_impl, std::move(target), std::move(auth), std::move(pdu), unfetched);
 }
 
 net::Awaitable<Client::WalkResult> Client::doWalk(Target target, Auth auth, Oid base,
                                                   WalkOptions options, BatchHandler onBatch) {
-  fetchAlgorithmsFor(auth);
+  const auto unfetched = fetchAlgorithmsFor(auth);
   return m_impl->doWalk(m_impl, std::move(target), std::move(auth), std::move(base), options,
-                        std::move(onBatch));
+                        std::move(onBatch), unfetched);
 }
 
 net::Awaitable<Client::CollectResult> Client::doWalkCollect(Target target, Auth auth, Oid base,
                                                             WalkOptions options) {
-  fetchAlgorithmsFor(auth);
-  return m_impl->doWalkCollect(m_impl, std::move(target), std::move(auth), std::move(base),
-                               options);
+  const auto unfetched = fetchAlgorithmsFor(auth);
+  return m_impl->doWalkCollect(m_impl, std::move(target), std::move(auth), std::move(base), options,
+                               unfetched);
 }
 
 void Client::Impl::finishStopping() {
@@ -1186,8 +1195,9 @@ net::Awaitable<void> Client::Impl::observeBothCancellationTypes() {
 }
 
 net::Awaitable<Client::RequestResult> Client::Impl::doRequest(Ref self, Target target, Auth auth,
-                                                              Pdu pdu) {
-  if (const auto refused = refusal(requestInRange(target, pdu), authFault(auth))) {
+                                                              Pdu pdu,
+                                                              std::optional<Errc> unfetched) {
+  if (const auto refused = refusal(requestInRange(target, pdu), authFault(auth), unfetched)) {
     co_return RequestResult{*refused, Response{}};
   }
   co_return co_await doExchange(self, std::move(target), std::move(auth), std::move(pdu));
@@ -1664,12 +1674,13 @@ Client::Impl::WalkStep Client::Impl::takeBatch(const Oid& base, Oid& current,
 
 net::Awaitable<Client::WalkResult> Client::Impl::doWalk(Ref self, Target target, Auth auth,
                                                         Oid base, WalkOptions options,
-                                                        BatchHandler onBatch) {
+                                                        BatchHandler onBatch,
+                                                        std::optional<Errc> unfetched) {
   // A total cancellation is a request to stop cleanly at a Batch boundary rather than to drop
   // everything, so it has to be observable here -- and observed, not thrown. The state is asked
   // for at each use rather than held, because each request underneath re-seats it.
   co_await observeBothCancellationTypes();
-  if (const auto refused = refusal(walkInRange(target, options), authFault(auth))) {
+  if (const auto refused = refusal(walkInRange(target, options), authFault(auth), unfetched)) {
     co_return WalkResult{*refused};
   }
 
@@ -1728,15 +1739,18 @@ net::Awaitable<Client::WalkResult> Client::Impl::doWalk(Ref self, Target target,
 
 net::Awaitable<Client::CollectResult> Client::Impl::doWalkCollect(Ref self, Target target,
                                                                   Auth auth, Oid base,
-                                                                  WalkOptions options) {
+                                                                  WalkOptions options,
+                                                                  std::optional<Errc> unfetched) {
   // ADR-0004's wrapper is the half that buffers, so it is the half with a limit by default.
   if (!options.maxVarbinds) options.maxVarbinds = defaultCollectLimit;
   std::vector<Varbind> collected;
-  auto [ec] = co_await doWalk(self, std::move(target), std::move(auth), std::move(base), options,
-                              [&collected](std::span<const Varbind> batch) {
-                                collected.insert(collected.end(), batch.begin(), batch.end());
-                                return true;
-                              });
+  auto [ec] = co_await doWalk(
+      self, std::move(target), std::move(auth), std::move(base), options,
+      [&collected](std::span<const Varbind> batch) {
+        collected.insert(collected.end(), batch.begin(), batch.end());
+        return true;
+      },
+      unfetched);
   // ADR-0004 again: `total` keeps what arrived, `terminal` drops everything immediately.
   if (ec == net::asio::error::operation_aborted) collected.clear();
   co_return CollectResult{ec, std::move(collected)};

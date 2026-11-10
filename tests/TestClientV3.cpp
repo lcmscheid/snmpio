@@ -10,6 +10,7 @@
 #include <optional>
 #include <span>
 #include <string>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -18,6 +19,7 @@
 
 #include "CompletionOracle.hpp"
 #include "Deadlines.hpp"
+#include "FreshProcess.hpp"
 #include "MasterKeys.hpp"
 #include "RefusedFetches.hpp"
 #include "ScriptedV3Agent.hpp"
@@ -1488,6 +1490,110 @@ TEST(ClientV3, ARequestFetchesItsAlgorithmsAsItIsInitiated) {
 
     EXPECT_FALSE(f.ec) << "privacy protocol " << static_cast<int>(priv) << ": " << f.ec.message();
   }
+}
+
+// The same for both Walks, whose later requests all run on the strand: with fetching refused from
+// just after initiation, a Walk of several Batches completes under DES and under AES.
+TEST(ClientV3, AWalkFetchesItsAlgorithmsAsItIsInitiated) {
+  std::array<unsigned char, 16> firstDraw{};
+  ASSERT_EQ(RAND_bytes(firstDraw.data(), static_cast<int>(firstDraw.size())), 1);
+  for (const auto priv : {PrivProtocol::Des, PrivProtocol::Aes128}) {
+    for (const bool collect : {false, true}) {
+      const auto creds = privCredentials(priv, AuthProtocol::Sha1);
+      Fixture f;
+      std::uint32_t next = 1;
+      ScriptedV3Agent agent(f.io, creds, [&](const Pdu&) {
+        Pdu p;
+        p.type = PduType::Response;
+        p.varbinds = {next > 3 ? Varbind{Oid{1, 3, 6, 1, 2, 1, 2, 1, 0}, Counter32{7}}  // past it
+                               : Varbind{Oid{1, 3, 6, 1, 2, 1, 1, next, 0}, Counter32{next}}};
+        ++next;
+        return p;
+      });
+      f.agent = &agent;
+
+      std::size_t walked = 0;
+      if (collect) {
+        f.client.asyncWalkCollect(targetFor(agent), creds, Oid{1, 3, 6, 1, 2, 1, 1}, WalkOptions{1},
+                                  f.collectToken());
+      } else {
+        f.client.asyncWalk(
+            targetFor(agent), creds, Oid{1, 3, 6, 1, 2, 1, 1}, WalkOptions{1},
+            [&](std::span<const Varbind> batch) {
+              walked += batch.size();
+              return true;
+            },
+            [&](net::ErrorCode e) {
+              f.ec = e;
+              f.finish();
+            });
+      }
+      const test::RefusedFetches refused;
+      ASSERT_TRUE(refused.refusing());
+      f.run();
+
+      const auto* how = collect ? "asyncWalkCollect" : "asyncWalk";
+      EXPECT_FALSE(f.ec) << how << ", privacy protocol " << static_cast<int>(priv) << ": "
+                         << f.ec.message();
+      EXPECT_EQ(collect ? f.collected.size() : walked, 3U) << how;
+    }
+  }
+}
+
+// An algorithm that will not fetch as a request is initiated refuses the request there, before
+// anything is sent, Engine Discovery included: DES naming the legacy provider (ADR-0005), a hash
+// UnsupportedAuthProtocol (Error.hpp), AES CryptoFailure. The refusal is not held -- the same
+// request, once the algorithm fetches, goes through in the same process. Runs where nothing has
+// been fetched (expectInFreshProcess), with what the Client needs besides drawn first: the CSPRNG,
+// and the passwordDigest's SHA-256. An Agent derives its keys as it is constructed, which fetches
+// its hash but no cipher, so while the request is refused the Agent for the SHA-512 case speaks
+// SHA-1, leaving SHA-512 unfetched.
+TEST(ClientV3, ARequestWhoseAlgorithmsWillNotFetchIsRefusedAsItIsInitiated) {
+  test::expectInFreshProcess([]() -> std::string {
+    std::array<unsigned char, 16> firstDraw{};
+    if (RAND_bytes(firstDraw.data(), static_cast<int>(firstDraw.size())) != 1) return "RAND_bytes";
+    net::ErrorCode ec;
+    std::ignore = passwordToKey(AuthProtocol::Sha256, "maplesyrup", ec);
+    if (ec) return "passwordToKey: " + ec.message();
+
+    struct Case {
+      const char* what = nullptr;
+      Credentials creds;
+      Errc refusedWith = Errc::CryptoFailure;
+      Credentials agentWhileRefused;
+    };
+    const auto des = privCredentials(PrivProtocol::Des, AuthProtocol::Sha1);
+    const auto aes = privCredentials(PrivProtocol::Aes128, AuthProtocol::Sha1);
+    const std::array cases = {
+        Case{"DES", des, Errc::LegacyProviderUnavailable, des},
+        Case{"AES-128", aes, Errc::CryptoFailure, aes},
+        Case{"SHA-512", credentials(AuthProtocol::Sha512), Errc::UnsupportedAuthProtocol,
+             credentials(AuthProtocol::Sha1)},
+    };
+    std::string wrong;
+    for (const auto& c : cases) {
+      for (const bool refusing : {true, false}) {
+        Fixture f;
+        ScriptedV3Agent agent(f.io, refusing ? c.agentWhileRefused : c.creds, echoAnswer);
+        f.agent = &agent;
+        std::optional<test::RefusedFetches> refused;
+        if (refusing) refused.emplace();
+        f.client.asyncGet(targetFor(agent), c.creds, {sysDescr}, f.requestToken());
+        refused.reset();
+        f.io.run();
+
+        const auto want = refusing ? make_error_code(c.refusedWith) : net::ErrorCode{};
+        if (f.completions != 1 || f.ec != want) {
+          wrong += std::string(c.what) + (refusing ? ", refused: " : ", fetching: ") +
+                   f.ec.message() + "\n";
+        }
+        if (refusing && agent.requestsSeen() != 0) {
+          wrong += std::string(c.what) + ": something was sent\n";
+        }
+      }
+    }
+    return wrong;
+  });
 }
 
 // The ScopedPDU is what privacy hides, so nothing above the wire may recognise the OID that went

@@ -76,6 +76,21 @@ struct Response {
 // went with it. And "exactly once" holds only while the executors run -- the Client's, and the
 // one each completion is bound to, which may belong to another io_context: an io_context
 // destroyed without being run destroys the handlers it holds instead of invoking them.
+//
+// The OpenSSL algorithms an operation's Credentials need are fetched as it is initiated, on the
+// thread that initiates it, and held for the process's life; one that will not fetch completes
+// the operation before anything is sent, with Errc::UnsupportedAuthProtocol for a hash,
+// Errc::LegacyProviderUnavailable for DES, and Errc::CryptoFailure for another cipher. The first
+// DES operation a process initiates also loads OpenSSL's legacy provider from disk on that
+// thread, once: initiate it from a thread that may block briefly, rather than from inside a
+// completion handler running on a Client's strand.
+//
+// What snmpio holds is freed as the process exits, after main returns and before OpenSSL's own
+// exit-time cleanup (ADR-0009's process-exit amendment). So a program using snmpio must not call
+// OPENSSL_cleanup() from main, and no Client may still be running on another thread once main
+// returns. One that initialises OpenSSL with OPENSSL_INIT_NO_ATEXIT and cleans up itself does it
+// by registering OPENSSL_cleanup with std::atexit before it first uses snmpio: a handler
+// registered earlier runs later.
 class Client {
  public:
   // Receives each Batch of a streaming Walk. Returning false stops the Walk, which then completes

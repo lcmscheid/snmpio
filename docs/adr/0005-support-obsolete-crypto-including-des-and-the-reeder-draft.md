@@ -23,6 +23,13 @@ therefore loaded lazily on first DES use, and its absence fails *that operation*
 the provider — not the build, and not client construction. A user whose OpenSSL lacks legacy must
 still be able to use AES against every other device in their fleet.
 
+_Amended by #47:_ "first DES use" is the first DES request's initiation, on the caller's thread,
+rather than its first encryption on the Client's strand, so the load from disk never stalls a
+strand mid-request. A load that fails is tried again by the next DES request, rather than failing
+DES for the rest of the process. Its absence still fails only that request, and still names the
+provider: `LegacyProviderUnavailable`, which also covers a legacy provider that loads but will not
+give DES-CBC.
+
 Key Extension is never inferred. Blumenthal and Reeder are mutually incompatible and Targets differ
 in which they expect, so it is a required field whenever the privacy protocol is AES-192/256 and
 construction fails if it is unset. Both are exercised in CI against the Simulator, which speaks both.

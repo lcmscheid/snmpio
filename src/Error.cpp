@@ -85,7 +85,7 @@ class SnmpioCategory final : public net::ErrorCategory {
       case Errc::UnsupportedPrivProtocol:
         return "privacy protocol is unset where the security level requires one";
       case Errc::LegacyProviderUnavailable:
-        return "OpenSSL's legacy provider, which DES lives in, could not be loaded";
+        return "OpenSSL's legacy provider, which DES lives in, could not be loaded or gave no DES";
       case Errc::UnsupportedSecurityModel:
         return "message security model is not USM";
       case Errc::BadMessageFlags:

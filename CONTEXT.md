@@ -150,8 +150,8 @@ The Command Generator refusing new work and completing every Outstanding Request
 `ClientStopped`. It begins at the caller's stop, at destruction, or at a fault in the Command
 Generator itself that no single Target owns. Destroying the Command Generator stops it, so a
 forgotten stop is never a dangling request. A stop that throws scheduling its cleanup leaves the
-Command Generator unusable instead (ADR-0009's amendment). Distinct from cancellation, which ends one request at
-its caller's asking and completes with `operation_aborted`.
+Command Generator unusable instead (ADR-0009's amendment). Distinct from cancellation, which ends
+one request at its caller's asking and completes with `operation_aborted`.
 _Avoid_: shutdown, close, abort
 
 ### Errors

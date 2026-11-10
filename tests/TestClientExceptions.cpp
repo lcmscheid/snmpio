@@ -3,11 +3,13 @@
 #include <atomic>
 #include <chrono>
 #include <cstddef>
+#include <future>
 #include <memory>
 #include <new>
 #include <optional>
 #include <stdexcept>
 #include <thread>
+#include <tuple>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -204,7 +206,8 @@ TEST(ClientExceptions, ARetransmissionThatThrowsLeavesNoIdMapped) {
   while (seen.load() == 0 && std::chrono::steady_clock::now() < deadline) {
     io.run_one_for(std::chrono::milliseconds(5));
   }
-  ASSERT_EQ(seen.load(), 1) << "the first transmission never arrived";
+  // Not ASSERT: the Agent's thread is still running, and leaving now would destroy it joinable.
+  EXPECT_EQ(seen.load(), 1) << "the first transmission never arrived";
   EXPECT_EQ(detail::MessageIdView::outstandingIds(client), 1U);
 
   int thrown = 0;
@@ -226,7 +229,7 @@ TEST(ClientExceptions, ARetransmissionThatThrowsLeavesNoIdMapped) {
 }
 
 // The thread an armed ThrowingExecutor throws on, or none. Shared by every copy of one executor.
-using ArmedFor = std::atomic<std::thread::id>;
+using ArmedThread = std::atomic<std::thread::id>;
 
 // What ThrowingExecutor throws: scheduling failed, which is all stop() could be told.
 struct SchedulingFailed : std::runtime_error {
@@ -239,7 +242,7 @@ struct SchedulingFailed : std::runtime_error {
 template <typename Inner>
 class ThrowingExecutor {
  public:
-  ThrowingExecutor(Inner inner, std::shared_ptr<ArmedFor> armed) noexcept
+  ThrowingExecutor(Inner inner, std::shared_ptr<ArmedThread> armed) noexcept
       : m_inner(std::move(inner)), m_armed(std::move(armed)) {}
 
   template <typename F>
@@ -275,46 +278,58 @@ class ThrowingExecutor {
   template <typename>
   friend class ThrowingExecutor;
   Inner m_inner;
-  std::shared_ptr<ArmedFor> m_armed;
+  std::shared_ptr<ArmedThread> m_armed;
 };
 
 // What an explicit stop() leaves when scheduling its cleanup throws: the exception reaches the
-// caller, and the strand never runs another handler, so nothing the Client owns completes again
-// (ADR-0009's amendment has why, #66).
+// caller, the strand never runs another handler, so nothing the Client owns completes again, and
+// the sockets stay open (ADR-0009's amendment has why, #66).
 TEST(ClientExceptions, AStopWhoseCleanupCannotBeScheduledThrowsAndNothingCompletesAfter) {
   net::IoContext agentIo;
-  std::atomic<int> seen{0};
-  ScriptedAgent agent(agentIo, [&seen](const V2cMessage&) -> std::optional<Pdu> {
-    ++seen;
-    return std::nullopt;
+  std::promise<void> bothArrived;
+  ScriptedAgent agent(agentIo, [&bothArrived, count = 0](const V2cMessage&) mutable {
+    if (++count == 2) bothArrived.set_value();
+    return std::optional<Pdu>{};
   });
   std::thread agentThread([&agentIo] { agentIo.run(); });
 
   net::IoContext io;
-  const auto armed = std::make_shared<ArmedFor>();
+  const auto armed = std::make_shared<ArmedThread>();
   Client client(net::Executor(ThrowingExecutor(io.get_executor(), armed)));
-  auto work = net::asio::make_work_guard(io);
-  std::thread ioThread([&io] { io.run(); });
+  const auto work = net::asio::make_work_guard(io);
 
-  constexpr auto deadline = std::chrono::milliseconds(250);
+  // Long enough that the stop lands well before it, which the test checks.
+  constexpr auto deadline = std::chrono::milliseconds(500);
   auto target = test::targetFor(agent, 0);
   target.timeout = deadline;
   test::CompletionOracle first(io);
   test::CompletionOracle second(io);
   const auto ignore = [](net::ErrorCode, const Response&) {};
+  const auto initiated = std::chrono::steady_clock::now();
   client.asyncGet(target, Community("public"), {sysDescr}, first.handler(ignore));
   client.asyncGet(target, Community("public"), {sysDescr}, second.handler(ignore));
 
+  // Run here until both requests have arrived and nothing is left ready, so the strand is idle,
+  // not just quiet: a stop() that finds it busy queues behind the busy handler without calling
+  // the executor at all. The Agent sees the second request before the send's completion reaches
+  // the strand, so arriving alone is not enough; draining the ready handlers is. Nothing else is
+  // due on the strand until the deadlines.
+  const auto arrivedFuture = bothArrived.get_future();
   const auto giveUp = std::chrono::steady_clock::now() + longDeadline;
-  while (seen.load() < 2 && std::chrono::steady_clock::now() < giveUp) {
-    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  while (arrivedFuture.wait_for(std::chrono::seconds(0)) != std::future_status::ready &&
+         std::chrono::steady_clock::now() < giveUp) {
+    io.run_one_for(std::chrono::milliseconds(5));
   }
-  ASSERT_EQ(seen.load(), 2) << "the two requests never arrived";
+  const bool arrived = arrivedFuture.wait_for(std::chrono::seconds(0)) == std::future_status::ready;
+  while (io.poll() > 0) {
+  }
+  std::thread ioThread([&io] { io.run(); });
 
-  // From this thread, not the io_context's, so the strand is idle and stop() has to schedule.
+  // From this thread, not the io_context's, so stop() has to schedule the cleanup itself.
   armed->store(std::this_thread::get_id());
   EXPECT_THROW(client.stop(), SchedulingFailed);
   armed->store(std::thread::id{});
+  const auto stoppedAfter = std::chrono::steady_clock::now() - initiated;
 
   test::CompletionOracle later(io);
   client.asyncGet(target, Community("public"), {sysDescr}, later.handler(ignore));
@@ -326,19 +341,35 @@ TEST(ClientExceptions, AStopWhoseCleanupCannotBeScheduledThrowsAndNothingComplet
   net::asio::post(io, [&onIo] { onIo = true; });
   net::asio::post(client.getExecutor(), [&onStrand] { onStrand = true; });
   // Well past the Outstanding Requests' deadlines, which is when they would otherwise complete.
-  std::this_thread::sleep_for(4 * deadline);
-  work.reset();
+  // Watched for a fixed time, since what is watched for is nothing happening (CompletionOracle).
+  std::this_thread::sleep_for(3 * deadline);
+  // By hand: the Client's receives stay pending on its open sockets, so run() would not return.
   io.stop();
   ioThread.join();
   net::asio::post(agentIo, [&agent] { agent.close(); });
   agentThread.join();
 
+  ASSERT_TRUE(arrived) << "the two requests never arrived";
+  // A stop near the deadlines may have found the strand busy timing them out, and proves nothing.
+  ASSERT_LT(stoppedAfter, deadline / 2) << "stop() came too late to find the strand idle";
   EXPECT_TRUE(onIo.load()) << "the io_context itself stopped running handlers";
   EXPECT_FALSE(onStrand.load()) << "the strand recovered; the Client may be usable after all";
-  EXPECT_TRUE(first.invocations().empty()) << "an Outstanding Request completed";
-  EXPECT_TRUE(second.invocations().empty()) << "an Outstanding Request completed";
+  // Held, neither invoked nor dropped: each handler is still queued on the strand.
+  for (const auto* oracle : {&first, &second}) {
+    EXPECT_TRUE(oracle->invocations().empty()) << "an Outstanding Request completed";
+    EXPECT_EQ(oracle->destructions(), 0) << "an Outstanding Request's handler was dropped";
+  }
   EXPECT_TRUE(later.invocations().empty()) << "the request after the stop completed";
-  EXPECT_EQ(seen.load(), 2) << "the request after the stop was sent";
+  EXPECT_EQ(agent.requestsSeen(), 2) << "the request after the stop was sent";
+
+  // The cleanup that never ran is the one that closes the sockets, so the port the Client sent
+  // from is still taken. The Stopping flag is not checked: ADR-0009's amendment says why it
+  // cannot be seen from here.
+  net::UdpSocket portCheck(io, net::Udp::v4());
+  net::ErrorCode bindError;
+  std::ignore = portCheck.bind(
+      net::UdpEndpoint(net::asio::ip::address_v4::any(), agent.lastSender().port()), bindError);
+  EXPECT_EQ(bindError, net::asio::error::address_in_use) << "the Client's socket was closed";
 }
 
 }  // namespace

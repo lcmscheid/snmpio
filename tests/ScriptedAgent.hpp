@@ -44,6 +44,9 @@ class ScriptedAgent {
   // close() it there rather than race the receive.
   [[nodiscard]] net::Executor executor() { return m_socket.get_executor(); }
   [[nodiscard]] int requestsSeen() const noexcept { return m_requestsSeen; }
+  // Where the latest request came from: the Client's socket. Read it on the Agent's own thread, or
+  // once that thread is done.
+  [[nodiscard]] net::UdpEndpoint lastSender() const { return m_from; }
 
   // What the Agent quotes back as the community. Empty means "echo whatever arrived".
   void setCommunityOverride(std::string community) { m_communityOverride = std::move(community); }

@@ -1,10 +1,13 @@
 #include "MessageIdGenerator.hpp"
 
+#include "OpenSsl.hpp"
+
 #include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <tuple>
 #include <utility>
 
 #include <snmpio/Error.hpp>
@@ -54,7 +57,26 @@ bool encryptBlock(evp_cipher_ctx_st* ctx, const Block& in, Block& out) {
          std::cmp_equal(written, aesBlockBytes);
 }
 
+// AES-128-ECB from the default library context, fetched once and held (FetchOnce, #47): every
+// Client's generator shares it, where each used to fetch its own, on its strand, as two Clients'
+// strands raced into OpenSSL's lazy initialisation (#90).
+const EVP_CIPHER* defaultAes128Ecb() noexcept {
+  static FetchOnce<CipherPtr> cipher;
+  return rawOrNull(
+      cipher.get([] { return CipherPtr(EVP_CIPHER_fetch(nullptr, "AES-128-ECB", nullptr)); }));
+}
+
 }  // namespace
+
+MessageIdGenerator::MessageIdGenerator() noexcept {
+  // Keyed as the Client that owns this is constructed, on the caller's thread rather than at the
+  // strand's first draw: the cipher's fetch, the key's draw from OpenSSL's CSPRNG -- which sets
+  // itself up on each thread's first draw -- and the key schedule (#47, #90). A constructor has no
+  // error to give, so keying that fails here is tried again by that first draw, and fails it with
+  // CryptoFailure if it fails again.
+  net::ErrorCode ignored;
+  std::ignore = ensureKeyed(ignored);
+}
 
 MessageIdGenerator::MessageIdGenerator(std::span<const std::byte, keyBytes> key,
                                        std::uint32_t counter)
@@ -65,21 +87,32 @@ MessageIdGenerator::~MessageIdGenerator() {
   cleanse(m_encryptedP.data(), m_encryptedP.size());
 }
 
-bool MessageIdGenerator::ensureKeyed(net::ErrorCode& ec) {
+bool MessageIdGenerator::ensureKeyed(net::ErrorCode& ec) noexcept {
   if (m_ctx != nullptr) return true;
-  SecretOctets key = m_fixedKey;
-  EVP_CIPHER* cipher = EVP_CIPHER_fetch(m_libctx, "AES-128-ECB", nullptr);
+  // On the stack and wiped below, so that keying allocates nothing of ours and cannot throw: the
+  // constructor keys too.
+  std::array<std::byte, keyBytes> key{};
+  const bool drawn = m_fixedKey.empty();
+  if (!drawn) std::ranges::copy(m_fixedKey, key.begin());
+  // The default library context's cipher is shared; a test's own context is fetched from afresh.
+  EVP_CIPHER* ownCipher = nullptr;
+  const EVP_CIPHER* cipher = defaultAes128Ecb();
+  if (m_libctx != nullptr) {
+    ownCipher = EVP_CIPHER_fetch(m_libctx, "AES-128-ECB", nullptr);
+    cipher = ownCipher;
+  }
   EVP_CIPHER_CTX* ctx = EVP_CIPHER_CTX_new();
   bool ok = cipher != nullptr && ctx != nullptr;
-  if (ok && key.empty()) {
-    key.resize(keyBytes);
+  if (ok && drawn) {
+    if (m_libctx == nullptr) primeRandom();
     ok = RAND_bytes_ex(m_libctx, reinterpret_cast<unsigned char*>(key.data()), key.size(), 0) == 1;
   }
   ok = ok &&
        EVP_EncryptInit_ex2(ctx, cipher, reinterpret_cast<const unsigned char*>(key.data()), nullptr,
                            nullptr) == 1 &&
        EVP_CIPHER_CTX_set_padding(ctx, 0) == 1 && encryptBlock(ctx, p, m_encryptedP);
-  EVP_CIPHER_free(cipher);  // the context keeps its own reference
+  EVP_CIPHER_free(ownCipher);       // the context keeps its own reference
+  cleanse(key.data(), key.size());  // the context keeps its own key schedule, wiped when it goes
   if (!ok) {
     EVP_CIPHER_CTX_free(ctx);
     ec = make_error_code(Errc::CryptoFailure);

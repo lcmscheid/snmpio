@@ -62,7 +62,7 @@ enum class Errc {
                               // local OpenSSL will not provide
   UnsupportedSecurityLevel,   // a Security Level this build cannot produce
   UnsupportedPrivProtocol,    // authPriv asked for with PrivProtocol::None
-  LegacyProviderUnavailable,  // DES needs OpenSSL's legacy provider, and it would not load
+  LegacyProviderUnavailable,  // DES needs OpenSSL's legacy provider; it would not load or give DES
   UnsupportedSecurityModel,   // msgSecurityModel names something other than USM
   BadMessageFlags,            // msgFlags was not one Octet, or claimed privacy without auth
   PasswordTooShort,           // a password under minimumPasswordLength (RFC 3414 section 11.2)

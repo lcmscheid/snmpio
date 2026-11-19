@@ -4,10 +4,15 @@
 #include <array>
 #include <span>
 #include <string>
+#include <tuple>
+#include <utility>
+#include <vector>
 
 #include <snmpio/Usm.hpp>
 
 #include "Bytes.hpp"
+#include "FreshProcess.hpp"
+#include "RefusedFetches.hpp"
 
 namespace snmpio {
 namespace {
@@ -456,6 +461,99 @@ TEST(PrivDecrypt, RejectsAKeyTooShortForTheProtocol) {
                                  fromHex("0011223344556677"), bytes({0x00}), ec);
   EXPECT_TRUE(plain.empty());
   EXPECT_EQ(ec, make_error_code(Errc::UnsupportedPrivProtocol));
+}
+
+// ---------------------------------------------------------------------------
+// Algorithm fetches (#47)
+// ---------------------------------------------------------------------------
+
+// Every derivation, digest and crypt a request makes under one pair of protocols, as one string:
+// the keys, an HMAC, and a round trip through the cipher, or the first error met on the way.
+std::string everyCryptoCall(AuthProtocol auth, PrivProtocol priv) {
+  net::ErrorCode ec;
+  const auto creds = privCreds(auth, priv);
+  const auto authKey = localizedAuthKey(creds, privEngineId(), ec);
+  if (ec) return "localizedAuthKey: " + ec.message();
+  const auto privKey = localizedPrivKey(creds, privEngineId(), ec);
+  if (ec) return "localizedPrivKey: " + ec.message();
+  const auto digest = authDigest(auth, authKey, bytes({0x30, 0x03, 0x02, 0x01, 0x03}), ec);
+  if (ec) return "authDigest: " + ec.message();
+  const auto plaintext = bytes({0x30, 0x05, 0x04, 0x03, 0x61, 0x62, 0x63});
+  Octets salt;
+  const auto ciphertext = privEncrypt(priv, privKey, 7, 1234, plaintext, salt, ec);
+  if (ec) return "privEncrypt: " + ec.message();
+  const auto back = privDecrypt(priv, privKey, 7, 1234, salt, ciphertext, ec);
+  if (ec) return "privDecrypt: " + ec.message();
+  return hex(authKey) + " " + hex(privKey) + " " + hex(digest) + " " + hex(back);
+}
+
+// OpenSSL's guide asks for one explicit fetch, reused, by anything that runs the same algorithm
+// many times. Once each pair of protocols has run, every call under it gives the same answer with
+// fetching refused outright, which an implicit fetch at each call -- EVP_sha256() and HMAC() both
+// make one -- or a fresh EVP_CIPHER_fetch would fail.
+TEST(Algorithms, AreFetchedOnceAndReusedByEveryCall) {
+  std::vector<std::pair<AuthProtocol, PrivProtocol>> pairs;
+  for (const auto auth : {AuthProtocol::Md5, AuthProtocol::Sha1, AuthProtocol::Sha224,
+                          AuthProtocol::Sha256, AuthProtocol::Sha384, AuthProtocol::Sha512}) {
+    pairs.emplace_back(auth, PrivProtocol::Aes128);
+  }
+  for (const auto priv : {PrivProtocol::Des, PrivProtocol::Aes192, PrivProtocol::Aes256,
+                          PrivProtocol::Aes192C, PrivProtocol::Aes256C}) {
+    pairs.emplace_back(AuthProtocol::Md5, priv);  // MD5's 16 Octets need extending for all four AES
+  }
+
+  std::vector<std::string> fetching;
+  for (const auto& [auth, priv] : pairs) {
+    fetching.push_back(everyCryptoCall(auth, priv));
+    ASSERT_EQ(fetching.back().find(':'), std::string::npos) << fetching.back();
+  }
+
+  const test::RefusedFetches refused;
+  ASSERT_TRUE(refused.refusing());
+  for (std::size_t i = 0; i < pairs.size(); ++i) {
+    EXPECT_EQ(everyCryptoCall(pairs[i].first, pairs[i].second), fetching[i])
+        << "auth " << static_cast<int>(pairs[i].first) << " priv "
+        << static_cast<int>(pairs[i].second);
+  }
+}
+
+// A fetch that fails is not held: the next call tries it again, and the first that succeeds is
+// held from then on. With fetching refused from the start, each call fails for what it could not
+// fetch -- DES naming the legacy provider (ADR-0005), which loads but gives no DES-CBC under the
+// refusal; a hash UnsupportedAuthProtocol, as Error.hpp defines it for one the local OpenSSL will
+// not provide, and as no protocol at all still is; AES CryptoFailure -- and once the refusal
+// lifts, the same calls succeed in the same process.
+TEST(Algorithms, AFetchThatFailsIsTriedAgainNotHeld) {
+  test::expectInFreshProcess([]() -> std::string {
+    std::string wrong;
+    const auto expect = [&wrong](const char* call, const net::ErrorCode& got, Errc want) {
+      if (got != make_error_code(want)) wrong += std::string(call) + ": " + got.message() + "\n";
+    };
+    const Octets key(16, std::byte{0x5a});
+    const auto plaintext = bytes({0x30, 0x03, 0x02, 0x01, 0x03});
+    {
+      const test::RefusedFetches refused;
+      if (!refused.refusing()) return "the refusal did not take";
+      net::ErrorCode ec;
+      Octets salt;
+      std::ignore = privEncrypt(PrivProtocol::Des, key, 1, 1, plaintext, salt, ec);
+      expect("privEncrypt DES", ec, Errc::LegacyProviderUnavailable);
+      std::ignore = privEncrypt(PrivProtocol::Aes128, key, 1, 1, plaintext, salt, ec);
+      expect("privEncrypt AES-128", ec, Errc::CryptoFailure);
+      std::ignore = authDigest(AuthProtocol::Sha256, key, plaintext, ec);
+      expect("authDigest SHA-256", ec, Errc::UnsupportedAuthProtocol);
+      std::ignore = passwordToKey(AuthProtocol::Sha1, password, ec);
+      expect("passwordToKey SHA-1", ec, Errc::UnsupportedAuthProtocol);
+      std::ignore = authDigest(AuthProtocol::None, key, plaintext, ec);
+      expect("authDigest None", ec, Errc::UnsupportedAuthProtocol);
+    }
+    for (const auto& [auth, priv] : {std::pair{AuthProtocol::Sha1, PrivProtocol::Des},
+                                     std::pair{AuthProtocol::Sha256, PrivProtocol::Aes128}}) {
+      const auto after = everyCryptoCall(auth, priv);
+      if (after.find(':') != std::string::npos) wrong += "after the refusal, " + after + "\n";
+    }
+    return wrong;
+  });
 }
 
 }  // namespace

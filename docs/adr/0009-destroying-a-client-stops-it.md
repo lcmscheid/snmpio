@@ -159,3 +159,18 @@ The Consequences say completion handlers run "on the caller's executor". Precise
 executor associated with the completion token, and a token with none completes on the Client's
 strand, as `spawn` has always done. Nothing changes; `Client.hpp` now asks callers to bind their
 tokens to an executor of their own (#48).
+
+## Amendment, 2026-11-10: process exit
+
+#47 holds the OpenSSL algorithms snmpio fetches for the process's life, in function-local statics,
+so they are freed during static destruction, after `main` returns. Each holder initialises OpenSSL
+in its constructor (`OPENSSL_INIT_LOAD_CONFIG`, not `0`: OpenSSL 3 treats an empty request as
+already done and registers nothing), which on OpenSSL 3 registers OpenSSL's own `atexit` cleanup
+first, so that cleanup runs after the frees, as `[basic.start.term]` orders them. OpenSSL 4
+registers no `atexit` cleanup; by default an `OPENSSL_cleanup()` there is deferred to libcrypto's
+destructor, after the executable's statics. Two rules follow for the caller, the same kind as Asio's
+that the `io_context` outlive its work: do not call `OPENSSL_cleanup()` from `main`, since what
+snmpio still holds would then be freed into a library already torn down; and let no Client run on
+another thread once `main` returns. A program that initialises OpenSSL with `OPENSSL_INIT_NO_ATEXIT`
+and cleans up itself registers `OPENSSL_cleanup` with `std::atexit` before its first use of snmpio,
+so that it runs after snmpio's statics are gone. `Client.hpp` states both rules.

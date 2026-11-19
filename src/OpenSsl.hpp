@@ -43,16 +43,22 @@ template <typename Ptr>
 // try -- is tried again by the next get(), the way std::call_once tries again after a call that
 // throws, rather than failing every request for the rest of the process.
 //
-// Constructing one initialises OpenSSL first, which registers OpenSSL's atexit cleanup before this
-// object's destructor is registered, so the destructor runs, and frees what it holds, while
-// OpenSSL is still there to free it into.
+// Constructing one initialises OpenSSL first. On OpenSSL 3, that registers OpenSSL's atexit
+// cleanup before this object's destructor is registered, so the destructor runs, and frees what it
+// holds, while OpenSSL is still there to free it into. The call has to ask for something:
+// OPENSSL_init_crypto(0, ...) returns before registering anything, since every option it asked
+// for is "already done", and the registration then came from inside the first fetch, after this
+// destructor's, and the DES providers were unloaded into a torn-down library at exit (#94's CI).
+// LOAD_CONFIG is what OpenSSL's own first fetch asks for anyway. OpenSSL 4 registers no atexit
+// cleanup; by default an OPENSSL_cleanup() there only asks libcrypto's destructor to clean up,
+// and that runs after ours.
 //
 // T is held in place, so a fetch allocates nothing of ours: an OpenSslPtr, or a struct of them
 // whose explicit operator bool says whether all of it fetched.
 template <typename T>
 class FetchOnce {
  public:
-  FetchOnce() noexcept { OPENSSL_init_crypto(0, nullptr); }
+  FetchOnce() noexcept { OPENSSL_init_crypto(OPENSSL_INIT_LOAD_CONFIG, nullptr); }
   ~FetchOnce() = default;
 
   FetchOnce(const FetchOnce&) = delete;

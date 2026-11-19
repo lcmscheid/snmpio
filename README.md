@@ -247,13 +247,13 @@ The soak, `Soak.ShapedLikeTheDeployment` in [`tests/TestSoak.cpp`](tests/TestSoa
 shape with eight Clients on an `io_context` run by four threads, half of them v2c and half v3, and
 callers on a second `io_context`. Three of the v3 Clients are handed Master Keys derived before it
 starts, as above; the fourth is handed the passwords, so that a Client's own derivation is soaked
-too. Four more threads initiate, cancel, stop and destroy Clients at moments its seed decides,
-against Agents that answer at once, late, never, twice, or after malformed datagrams. Every
-completion is checked to happen exactly once, on the caller's executor, with a code that what was
-done to the request allows, and, for either version, within half an attempt's deadline of a
-terminal cancellation and inside its first attempt when answered. The Client handed passwords is
-spared those two bounds until #80 moves its derivation off the strand. It runs for two seconds in
-every test run, under ASan and TSan in CI, and carries the `stress` label:
+too, on its own deriver thread. Four more threads initiate, cancel, stop and destroy Clients at
+moments its seed decides, against Agents that answer at once, late, never, twice, or after malformed
+datagrams. Every completion is checked to happen exactly once, on the caller's executor, with a code
+that what was done to the request allows, and, for either version, within half an attempt's deadline
+of a terminal cancellation and inside its first attempt when answered, the Client handed passwords
+included. It runs for two seconds in every test run, under ASan and TSan in CI, and carries the
+`stress` label:
 
 ```sh
 ctest --preset default -L stress                         # the soak alone

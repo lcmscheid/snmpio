@@ -18,6 +18,9 @@ struct CacheCounts {
   // cannot say a password was derived once. Reeder's extension, which reruns password-to-key over
   // a Localized Key, is not a Master Key and is not counted.
   std::size_t masterKeyDerivations = 0;
+  // Reeder Key Extensions run, over the Client's life: each a megabyte hash of its own, which
+  // masterKeyDerivations does not count.
+  std::size_t reederExtensions = 0;
 };
 
 // Test-only: so that what the caches do is asserted rather than inferred. Not part of the API,

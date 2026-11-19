@@ -66,6 +66,9 @@ owns transport and caches with no session type, is unchanged.
 
 ## Amendment, 2026-10-25: the key caches are keyed by Master Key, and the caller may supply one
 
+_Narrowed by the amendment "password-to-key runs on a private thread", below: no megabyte hash is
+left on the strand._
+
 The consequence above names the localized-key cache "(master key, engineID)". Until now it was
 keyed by the password the Master Key is derived from, so that a lookup never had to derive
 anything, and the Master Key itself was never kept: every new Engine paid the megabyte hash again.
@@ -111,3 +114,50 @@ A Target forgotten on an unsigned `unknownEngineIDs` Report is not unmapped: it 
 until it is rediscovered, but still holds its old one, so forgetting evicts nothing and the
 rediscovery can still evict what it replaces. The cache is still the Client's own and on its
 strand; nothing else in this ADR changes.
+
+## Amendment, 2026-11-19: password-to-key runs on a private thread
+
+The amendment of 2026-10-25 left two megabyte hashes on the strand: a password's Master Key, once
+per Client, and a Reeder privacy key's Key Extension, once per Engine. Everything else queued on
+the strand waited behind each (threat model B7). Both now run on a private thread each Client
+starts the first time it needs one, the deriver, and nothing else does: a localising hash is short
+and stays where it was (#80).
+
+The precedent is Asio's own resolver, which runs the blocking `getaddrinfo` on a private thread its
+service starts on first use; the caller passes no executor for it and gets the completion on their
+own. Password-to-key is the same kind of work, blocking and occasional, so the Client takes no
+executor for it either. A constructor argument naming one was the alternative, and it can still be
+added without breaking anyone; no Asio I/O object asks for one today.
+
+The caches stay the strand's. A derivation is spawned on the strand, hands the deriver a job that
+owns copies of everything it reads -- the password, or the Master Key and engineID -- and resumes
+on the strand to write the cache. Nothing the strand owns is touched off it, so nothing gains a
+lock, and the two atomics of the amendments above are still the only state outside the strand.
+
+Derivations are single-flight per key, as Engine Discovery is per Target, and for the same reason:
+a derivation belongs to the key, not to the request that happened to need it first. Requests that
+need a key already being derived wait on that derivation, and cancelling one of them ends that
+request alone, with the rules for a request queued behind a discovery. A Reeder key derived for an
+Engine evicted meanwhile is handed to its waiters but not cached, so the eviction of 2026-11-03
+still bounds the cache.
+
+The deriver is one thread, so derivations of different keys queue one behind another on it. Each
+is occasional, and a request queued behind them can still be cancelled or stopped at once, so a
+second thread would buy little.
+
+Stopping wakes every request waiting on a derivation with `ClientStopped` and does not wait for the
+derivation itself (ADR-0009: never for anything that has not already started, and a megabyte hash
+that has started may not finish soon enough). The derivation is not detached: it finishes against
+the shared state it co-owns, writes its result, and lets the state go. The deriver is joined when
+the state is destroyed, which cannot happen while a derivation is in flight, so the join never
+waits on one. #80's triage asked for the join at Stopping; this overrides it, because a join at
+Stopping either waits on a derivation in progress or cannot happen until one ends, and the state
+going is exactly that moment. The cost is an idle thread from Stopping until the state goes.
+
+A derivation in flight is outstanding work on the `io_context`, and the caller's rule that the
+`io_context` outlive its work covers it, but it is not like a pending timer. Destroying an
+`io_context` with a timer pending destroys the timer's handler; a derivation is held by the
+deriver, which hands its result to the strand of whatever `io_context` it was started on. So a
+caller who stops and destroys the `io_context` with one in flight breaks the rule, and the handoff
+then reaches a destroyed `io_context`. Within the rule, the result is always handed to a live one,
+and the state is never let go on the deriver's own thread. `Client.hpp` says so beside the rule.

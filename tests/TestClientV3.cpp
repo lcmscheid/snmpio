@@ -11,16 +11,17 @@
 #include <optional>
 #include <span>
 #include <string>
+#include <thread>
 #include <tuple>
 #include <utility>
 #include <vector>
 
 #include <snmpio/Client.hpp>
 #include <snmpio/detail/CacheView.hpp>
-#include <snmpio/detail/DeriverView.hpp>
 
 #include "CompletionOracle.hpp"
 #include "Deadlines.hpp"
+#include "DeriverHold.hpp"
 #include "FreshProcess.hpp"
 #include "MasterKeys.hpp"
 #include "RefusedFetches.hpp"
@@ -32,6 +33,8 @@ namespace snmpio {
 namespace {
 
 using test::atOnceLimit;
+using test::derivationHeld;
+using test::DeriverHold;
 using test::ScriptedV3Agent;
 using test::targetFor;
 using test::withMasterKeys;
@@ -2046,43 +2049,9 @@ TEST(ClientV3MasterKey, OnePasswordUnderTwoHashesIsTwoMasterKeys) {
   EXPECT_EQ(detail::CacheView::counts(f.client).masterKeys, 2U);
 }
 
-// What holds a Client's deriver busy (detail::DeriverView), and lets it go: on release(), or when
-// it goes out of scope, so that a test failing early does not leave the deriver's join waiting on
-// it. Declared after the Fixture it occupies, so that it goes first.
-class DeriverHold {
- public:
-  explicit DeriverHold(Client& client) {
-    detail::DeriverView::occupy(client, [released = m_released] { released->wait(false); });
-  }
-  DeriverHold(const DeriverHold&) = delete;
-  DeriverHold& operator=(const DeriverHold&) = delete;
-  DeriverHold(DeriverHold&&) = delete;
-  DeriverHold& operator=(DeriverHold&&) = delete;
-  ~DeriverHold() { release(); }
-
-  void release() {
-    m_released->store(true);
-    m_released->notify_all();
-  }
-  [[nodiscard]] bool released() const { return m_released->load(); }
-
-  // Releases the deriver once `after` has passed on `io`: long enough for every request the test
-  // has made to reach the derivation it queues behind, over loopback.
-  void releaseAfter(net::IoContext& io, std::chrono::milliseconds after) {
-    m_timer.emplace(io, after);
-    m_timer->async_wait([this](net::ErrorCode) { release(); });
-  }
-
- private:
-  std::shared_ptr<std::atomic<bool>> m_released = std::make_shared<std::atomic<bool>>(false);
-  std::optional<net::SteadyTimer> m_timer;
-};
-
-constexpr std::chrono::milliseconds derivationHeld{200};
-
-// #80: a password's Master Key is derived on the Client's deriver, never on its strand. With the
-// deriver held, the request can get no further than the identity phase, which needs no key; derived
-// on the strand, it would not need the deriver at all, and would be answered before the release.
+// #80: a password's Master Key is derived on the Deriver, never on the Client's strand. With the
+// Deriver held, the request can get no further than the identity phase, which needs no key; derived
+// on the strand, it would not need the Deriver at all, and would be answered before the release.
 TEST(ClientV3Derivation, APasswordsMasterKeyIsDerivedOffTheStrand) {
   Fixture f;
   ScriptedV3Agent agent(f.io, credentials(), echoAnswer);
@@ -2105,7 +2074,7 @@ TEST(ClientV3Derivation, APasswordsMasterKeyIsDerivedOffTheStrand) {
   EXPECT_EQ(detail::CacheView::counts(f.client).masterKeyDerivations, 1U);
 }
 
-// #80: Reeder's Key Extension reruns password-to-key, so it too runs on the deriver, even from a
+// #80: Reeder's Key Extension reruns password-to-key, so it too runs on the Deriver, even from a
 // Master Key the caller supplied. SHA-1's 20 Octets are short of AES-256's 32, so it does run.
 TEST(ClientV3Derivation, AReederExtensionIsDerivedOffTheStrand) {
   Fixture f;
@@ -2132,7 +2101,7 @@ TEST(ClientV3Derivation, AReederExtensionIsDerivedOffTheStrand) {
   EXPECT_EQ(counts.reederExtensions, 1U);
 }
 
-// The strand is free while the deriver works: a request needing no derivation is answered whole
+// The strand is free while the Deriver works: a request needing no derivation is answered whole
 // while another, to another Target, waits on its Master Key.
 TEST(ClientV3Derivation, TheStrandServesOtherRequestsMeanwhile) {
   Fixture f;
@@ -2274,7 +2243,7 @@ INSTANTIATE_TEST_SUITE_P(ClientV3Derivation, WaitingOnADerivation,
 
 // ADR-0009: Stopping waits for nothing that has not already started, and a derivation in progress
 // is not something it waits for. A request waiting on one completes with ClientStopped at once,
-// with the deriver still held; were stop() to wait for the derivation, it would never return.
+// with the Deriver still held; were stop() to wait for the derivation, it would never return.
 TEST(ClientV3Derivation, StoppingDoesNotWaitForADerivation) {
   Fixture f;
   ScriptedV3Agent agent(f.io, credentials(), echoAnswer);
@@ -2321,6 +2290,241 @@ TEST(ClientV3Derivation, DestroyingTheClientDoesNotWaitForADerivation) {
 
   EXPECT_TRUE(completed);
   EXPECT_EQ(ec, Errc::ClientStopped) << ec.message();
+}
+
+// Client.hpp's rule for an io_context destroyed with work outstanding: the handlers still queued
+// are destroyed, never invoked, and nothing touches freed memory. A derivation is held to it as a
+// pending timer is. Destroying the io_context joins the Deriver before the Client's strand is shut
+// down (ADR-0003's amendment), so a derivation finishing meanwhile hands its result to a strand
+// still there, which then destroys it; one still queued is abandoned, and its frame destroyed with
+// the Deriver's queue. Which of the two happens depends on how far the Deriver got after the hold
+// let go, so the moment the io_context goes is swept across the derivation, a megabyte hash, to
+// reach both. Handed to a freed strand instead, it is a failure under ASan, and a crash or nothing
+// elsewhere.
+TEST(ClientV3Derivation, DestroyingTheIoContextWithADerivationInFlightIsSafe) {
+  // On a thread and an io_context of their own, so that they outlive the ones destroyed here.
+  net::IoContext agentIo;
+  ScriptedV3Agent agent(agentIo, credentials(), echoAnswer);
+  std::thread agentThread([&agentIo] { agentIo.run(); });
+
+  constexpr int rounds = 12;
+  for (int round = 0; round < rounds; ++round) {
+    SCOPED_TRACE(round);
+    auto io = std::make_unique<net::IoContext>();
+    auto client = std::make_unique<Client>(io->get_executor());
+    // The Engine discovered with Master Keys first, so that the next request's one wait is the
+    // derivation of its own.
+    bool discovered = false;
+    client->asyncGet(targetFor(agent), withMasterKeys(credentials()), {sysDescr},
+                     [&](net::ErrorCode e, const Response&) {
+                       EXPECT_FALSE(e) << e.message();
+                       discovered = true;
+                     });
+    while (!discovered && io->run_one_for(test::longDeadline) != 0) {
+    }
+    ASSERT_TRUE(discovered);
+
+    auto hold = std::make_unique<DeriverHold>(*client);
+    bool invoked = false;
+    client->asyncGet(targetFor(agent), credentials(), {sysUpTime},
+                     [&invoked](net::ErrorCode, const Response&) { invoked = true; });
+    io->run_for(std::chrono::milliseconds(20));
+    client.reset();
+    hold->release();
+    std::this_thread::sleep_for(std::chrono::microseconds(500) * round);
+    io.reset();
+    hold.reset();
+
+    EXPECT_FALSE(invoked) << "a handler queued on a destroyed io_context was invoked";
+  }
+  net::asio::post(agentIo, [&agent] { agent.close(); });
+  agentThread.join();
+}
+
+// The Deriver is the io_context's, not a Client's: one thread, which a second Client on the same
+// io_context waits on too, and starts no thread of its own for.
+TEST(ClientV3Derivation, ClientsOnOneIoContextShareTheDeriver) {
+  net::IoContext io;
+  Client holding{io.get_executor()};
+  Client waiting{io.get_executor()};
+  ScriptedV3Agent agent(io, credentials(), echoAnswer);
+  DeriverHold hold(holding);
+  hold.releaseAfter(io, derivationHeld);
+
+  net::ErrorCode ec = make_error_code(Errc::Timeout);
+  bool releasedFirst = false;
+  waiting.asyncGet(targetFor(agent), credentials(), {sysDescr},
+                   [&](net::ErrorCode e, const Response&) {
+                     ec = e;
+                     releasedFirst = hold.released();
+                     holding.stop();
+                     waiting.stop();
+                     agent.close();
+                   });
+  io.run();
+
+  EXPECT_FALSE(ec) << ec.message();
+  EXPECT_TRUE(releasedFirst) << "the second Client derived on a thread of its own";
+}
+
+// The compliant Agent, but a Report goes back no higher than the request's level: this one sends
+// its notInTimeWindows at its own, authPriv, which a time-sync phase at authNoPriv cannot open. The
+// tests below discover an authPriv Agent at authNoPriv, so that a privacy key is left to derive.
+std::optional<ScriptedV3Agent::Reply> answeredAtItsLevel(ScriptedV3Agent& agent,
+                                                         const ScriptedV3Agent::Request& req) {
+  auto reply = agent.behaveLikeACompliantAgent(req);
+  if (reply && reply->level > req.message.header.level) reply->level = req.message.header.level;
+  return reply;
+}
+
+// The Engine at a Target replaced while a request there waits on a derivation. Another request,
+// which needs none, hears the Agent's new engineID as an unknownEngineIDs Report and rediscovers,
+// which evicts the old Engine (ADR-0003's amendment of 2026-11-03). The key the waiting request
+// then gets back is for an Engine no longer there: it is not cached, since nothing would ever evict
+// it (threat model B2), and the request asks again, of the Engine now at the Target.
+struct ReplacedMidDerivation {
+  net::ErrorCode ec;  // the waiting request's
+  detail::CacheCounts counts;
+};
+
+// `waiting` needs a derivation that discovering with `other` left uncached, and `other` needs none.
+// With `reportOnce`, the Agent answers the waiting request's first exchange with the new Engine
+// with a signed notInTimeWindows Report and a later boots, the retryable kind.
+ReplacedMidDerivation replaceTheEngineMidDerivation(const Credentials& agentCreds,
+                                                    const Credentials& waiting,
+                                                    const Credentials& other,
+                                                    bool reportOnce = false) {
+  Fixture f;
+  f.expectedCompletions = 3;
+  ScriptedV3Agent agent(f.io, agentCreds, echoAnswer);
+  f.agent = &agent;
+  const auto target = targetFor(agent);
+  const auto replacement = engineIdNumbered(9);
+  std::optional<DeriverHold> hold;
+
+  bool reported = false;
+  agent.setResponder(
+      [&](const ScriptedV3Agent::Request& req) -> std::optional<ScriptedV3Agent::Reply> {
+        const auto& vbs = req.message.scoped.pdu.varbinds;
+        if (reportOnce && !reported && req.message.security.engineId == replacement &&
+            !vbs.empty() && vbs[0].name == sysDescr) {
+          reported = true;
+          agent.setBoots(4);
+          return ScriptedV3Agent::report(ScriptedV3Agent::notInTimeWindows,
+                                         SecurityLevel::AuthNoPriv);
+        }
+        return answeredAtItsLevel(agent, req);
+      });
+
+  ReplacedMidDerivation result;
+  f.client.asyncGet(target, other, {sysUpTime}, [&](net::ErrorCode e, const Response&) {
+    EXPECT_FALSE(e) << "discovering: " << e.message();
+    hold.emplace(f.client);
+    f.client.asyncGet(target, waiting, {sysDescr}, [&](net::ErrorCode w, const Response&) {
+      result.ec = w;
+      f.finish();
+    });
+    agent.setEngineId(replacement);
+    f.client.asyncGet(target, other, {sysUpTime}, [&](net::ErrorCode r, const Response&) {
+      EXPECT_FALSE(r) << "the request that replaced the Engine: " << r.message();
+      hold->release();
+      f.finish();
+    });
+    f.finish();
+  });
+  f.run();
+
+  EXPECT_EQ(reported, reportOnce);
+  result.counts = detail::CacheView::counts(f.client);
+  return result;
+}
+
+TEST(ClientV3Derivation, AnEngineReplacedWhileItsMasterKeyIsDerivedIsAskedAgainNotCached) {
+  const auto creds = credentials();
+  const auto outcome = replaceTheEngineMidDerivation(creds, creds, withMasterKeys(creds));
+
+  EXPECT_FALSE(outcome.ec) << outcome.ec.message();
+  EXPECT_EQ(outcome.counts.engines, 1U);
+  EXPECT_EQ(outcome.counts.masterKeyDerivations, 1U);
+  // The replacement's one row, which both requests share. Two would be the evicted Engine's.
+  EXPECT_EQ(outcome.counts.localizedKeys, 1U) << "a key for the evicted Engine was cached";
+}
+
+TEST(ClientV3Derivation, AnEngineReplacedWhileItsReederKeyIsExtendedIsAskedAgainNotCached) {
+  const auto creds = privCredentials(PrivProtocol::Aes256C, AuthProtocol::Sha1);
+  // The same authentication key, and no privacy key to extend.
+  const auto authOnly = withMasterKeys(credentials(AuthProtocol::Sha1));
+  const auto outcome = replaceTheEngineMidDerivation(creds, withMasterKeys(creds), authOnly);
+
+  EXPECT_FALSE(outcome.ec) << outcome.ec.message();
+  EXPECT_EQ(outcome.counts.engines, 1U);
+  EXPECT_EQ(outcome.counts.reederExtensions, 2U) << "one for each Engine";
+  // The replacement's authentication and privacy rows. Three would be the evicted Engine's.
+  EXPECT_EQ(outcome.counts.localizedKeys, 2U) << "a key for the evicted Engine was cached";
+}
+
+// Asking again after a derivation went stale is not the Report's retry (doRequestV3): a request
+// that does so still has that retry for a Report that asks for one.
+TEST(ClientV3Derivation, AskingAgainAfterAStaleDerivationLeavesTheReportItsRetry) {
+  const auto creds = credentials();
+  const auto outcome =
+      replaceTheEngineMidDerivation(creds, creds, withMasterKeys(creds), /*reportOnce=*/true);
+
+  EXPECT_FALSE(outcome.ec) << "the Report found its retry spent: " << outcome.ec.message();
+}
+
+// The bound on asking again: an Engine replaced during the second wait as well ends the request
+// with UnknownEngineId, so that an Agent naming a fresh engineID on every discovery cannot keep a
+// request deriving Reeder keys for ever.
+TEST(ClientV3Derivation, AnEngineReplacedDuringBothWaitsIsUnknown) {
+  Fixture f;
+  f.expectedCompletions = 4;
+  const auto creds = privCredentials(PrivProtocol::Aes256C, AuthProtocol::Sha1);
+  const auto authOnly = withMasterKeys(credentials(AuthProtocol::Sha1));
+  ScriptedV3Agent agent(f.io, creds, echoAnswer);
+  f.agent = &agent;
+  agent.setResponder(
+      [&agent](const ScriptedV3Agent::Request& req) { return answeredAtItsLevel(agent, req); });
+  const auto target = targetFor(agent);
+  std::optional<DeriverHold> first;
+  std::optional<DeriverHold> second;
+  std::optional<net::SteadyTimer> replaceAgain;
+
+  net::ErrorCode waitingEc;
+  f.client.asyncGet(target, authOnly, {sysUpTime}, [&](net::ErrorCode e, const Response&) {
+    EXPECT_FALSE(e) << "discovering: " << e.message();
+    first.emplace(f.client);
+    f.client.asyncGet(target, withMasterKeys(creds), {sysDescr},
+                      [&](net::ErrorCode w, const Response&) {
+                        waitingEc = w;
+                        f.finish();
+                      });
+    agent.setEngineId(engineIdNumbered(9));
+    f.client.asyncGet(target, authOnly, {sysUpTime}, [&](net::ErrorCode r, const Response&) {
+      EXPECT_FALSE(r) << "the first replacement: " << r.message();
+      // Queued behind the first derivation, so that the waiting request's second one, for the
+      // replacement, queues behind this.
+      second.emplace(f.client);
+      first->release();
+      replaceAgain.emplace(f.io, derivationHeld);
+      replaceAgain->async_wait([&](net::ErrorCode) {
+        agent.setEngineId(engineIdNumbered(10));
+        f.client.asyncGet(target, authOnly, {sysUpTime}, [&](net::ErrorCode s, const Response&) {
+          EXPECT_FALSE(s) << "the second replacement: " << s.message();
+          second->release();
+          f.finish();
+        });
+      });
+      f.finish();
+    });
+    f.finish();
+  });
+  f.run();
+
+  EXPECT_EQ(waitingEc, make_error_code(Errc::UnknownEngineId)) << waitingEc.message();
+  const auto counts = detail::CacheView::counts(f.client);
+  EXPECT_EQ(counts.reederExtensions, 2U);
+  EXPECT_EQ(counts.localizedKeys, 1U) << "only the last Engine's authentication row";
 }
 
 // RFC 3414 section 11.2: a password is at least 8 characters. Refused before anything is sent,

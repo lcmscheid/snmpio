@@ -72,11 +72,10 @@ struct Response {
 // scheduled on it, which includes this Client's -- and one more of std::stop_callback's, since
 // destruction waits for a Batch handler running on another thread: see BatchHandler.
 //
-// That work includes a key derivation in flight on the Client's private thread (ADR-0003), which
-// Stopping does not wait for: its result is handed back to the strand when it finishes. Unlike a
-// pending timer's handler, it is not the io_context's to destroy, so stopping an io_context and
-// destroying it while one is in flight is not safe the way it is with only timers and sockets
-// outstanding. Run the io_context until run() returns, which it does not while one is in flight.
+// That work includes a key derivation in flight on the io_context's Deriver (ADR-0003), which
+// Stopping does not wait for. Destroying the io_context joins the Deriver before the Client's
+// strand is shut down, so a derivation is held to the rule below as a pending timer is: its result
+// is handed to a strand still there, and destroyed with the handlers the io_context holds.
 //
 // Two consequences follow, the same ones a socket has. Completion handlers run *after* the
 // destructor has returned, so a handler must not reach back into the Client or into an owner that
@@ -238,8 +237,9 @@ class Client {
   // Keys are cached per Client: the Master Key per (hash, password) when the Credentials carry a
   // password, so that it is derived once however many Engines it meets, and the Localized Keys per
   // (engineID, Master Key). Password-to-key -- a password's Master Key, and a Reeder privacy key's
-  // Key Extension -- runs on a private thread the Client starts the first time it needs one, never
-  // on the strand, and requests that need the same key wait on one derivation (ADR-0003).
+  // Key Extension -- runs on the Deriver, a private thread its io_context's Clients share, started
+  // the first time one needs it, never on a strand; requests that need the same key wait on one
+  // derivation (ADR-0003).
   // Credentials carrying Master Keys the caller derived elsewhere leave it only the short
   // per-Engine hash, and under Reeder the extension (Usm.hpp).
   //

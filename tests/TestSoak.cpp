@@ -106,7 +106,7 @@ Credentials credentialsFor(int slot) {
 }
 
 // The last v3 slot, an authPriv one, whose Clients are handed the passwords and derive both Master
-// Keys on their own derivers, so that the soak takes that path too, held to the same bounds.
+// Keys on the Deriver, so that the soak takes that path too, held to the same bounds.
 constexpr int passwordSlot = clientSlots - 1;
 static_assert(isV3(passwordSlot));
 

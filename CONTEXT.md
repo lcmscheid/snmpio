@@ -135,6 +135,14 @@ Extension at all, so the distinction only arises at 192 and 256 bits. Reeder is 
 independently settled on; we follow it rather than invent a fourth spelling.
 _Avoid_: key expansion, key stretching, "Cisco AES" as a protocol name
 
+**Deriver**:
+The one private thread per `io_context` that password-to-key runs on — a password's Master Key, and
+a Reeder Key Extension — shared by every Command Generator on that context and started the first
+time one needs it, as Asio's resolver keeps one for `getaddrinfo`. Destroying the context joins it.
+Only the megabyte hashes run there; a Localized Key's short hash stays on the Command Generator's
+own strand (ADR-0003).
+_Avoid_: key thread, worker, thread pool
+
 ### Lifecycle
 
 **Outstanding Request**:

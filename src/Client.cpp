@@ -581,7 +581,9 @@ class Client::Impl {
   // started the derivation, never awaited.
   net::Awaitable<void> runDerivation(Ref self, DerivationJob job, SettleDerivation settle,
                                      std::shared_ptr<Derivation> derivation);
-  static net::Awaitable<KeyResult> onDeriver(DerivationJob job);
+  // Runs `job` on `deriver` and completes on the awaiting coroutine's executor.
+  static net::Awaitable<KeyResult> onDeriver(net::ThreadPool::executor_type deriver,
+                                             DerivationJob job);
   // A request's wait for a derivation: the same rules as its wait for an Engine Discovery
   // (ensureEngine). Stopping ends it with ClientStopped and either cancellation type with
   // operation_aborted, at once, and the derivation carries on for its other waiters.
@@ -1323,10 +1325,33 @@ net::Awaitable<Client::RequestResult> Client::Impl::doRequestV2c(Ref self, Targe
   co_return toResult(pending->response);
 }
 
-net::Awaitable<Client::Impl::KeyResult> Client::Impl::onDeriver(DerivationJob job) {
-  KeyResult derived;
-  derived.key = job(derived.ec);
-  co_return derived;
+// As Asio's resolver runs getaddrinfo on its private thread: the job is posted there, and its
+// result posted straight back to the executor of whoever waits, which counts as work meanwhile.
+// Not a co_spawn onto the Deriver: Boost 1.83's (Ubuntu 24.04's) posts once more to the executor
+// it spawned on before completing, so a key that was ready sat behind the next derivation queued
+// before any request saw it.
+net::Awaitable<Client::Impl::KeyResult> Client::Impl::onDeriver(
+    net::ThreadPool::executor_type deriver, DerivationJob job) {
+  return net::asio::async_initiate<decltype(use_awaitable), void(std::exception_ptr, KeyResult)>(
+      [deriver](auto handler, DerivationJob queued) {
+        auto waiter = net::asio::prefer(net::asio::get_associated_executor(handler),
+                                        net::asio::execution::outstanding_work_t::tracked);
+        net::asio::post(deriver, [job = std::move(queued), handler = std::move(handler),
+                                  waiter = std::move(waiter)]() mutable {
+          std::exception_ptr failure;
+          KeyResult derived;
+          try {
+            derived.key = job(derived.ec);
+          } catch (...) {
+            failure = std::current_exception();
+          }
+          net::asio::post(waiter, [handler = std::move(handler), failure,
+                                   derived = std::move(derived)]() mutable {
+            std::move(handler)(failure, std::move(derived));
+          });
+        });
+      },
+      use_awaitable, std::move(job));
 }
 
 // The map by reference, for the reason given where it is declared. A NOLINT on the parameter's own
@@ -1371,8 +1396,7 @@ net::Awaitable<void> Client::Impl::runDerivation([[maybe_unused]] Ref self, Deri
     // executor it was spawned on. Nothing cancels it -- it belongs to the key, not to whichever
     // request asked first -- and Stopping does not wait for it, but lets it finish here, against
     // the state `self` keeps.
-    derivation->result = co_await net::asio::co_spawn(m_deriver.executor(),
-                                                      onDeriver(std::move(job)), use_awaitable);
+    derivation->result = co_await onDeriver(m_deriver.executor(), std::move(job));
     derivation->finished = true;
   } catch (...) {
     derivation->failure = std::current_exception();

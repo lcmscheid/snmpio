@@ -325,6 +325,17 @@ inline Target targetFor(const ScriptedV3Agent& agent, int retries = 1) {
   return t;
 }
 
+// The Answer the v3 tests reach for when the data plane is not what they test: every name asked
+// for, answered with "ok".
+inline Pdu echoAnswer(const Pdu& request) {
+  Pdu p;
+  p.type = PduType::Response;
+  for (const auto& vb : request.varbinds) {
+    p.varbinds.push_back(Varbind{vb.name, Octets{std::byte{'o'}, std::byte{'k'}}});
+  }
+  return p;
+}
+
 }  // namespace snmpio::test
 
 #endif  // SNMPIO_TESTS_SCRIPTEDV3AGENT_HPP

@@ -22,6 +22,7 @@ namespace snmpio {
 namespace {
 
 using detail::MessageIdView;
+using test::echoAnswer;
 using test::longDeadlineTarget;
 using test::respondWith;
 using test::ScriptedAgent;
@@ -34,15 +35,6 @@ const Oid sysDescr{1, 3, 6, 1, 2, 1, 1, 1, 0};
 Credentials credentials() {
   return Credentials{"bert",       SecurityLevel::AuthPriv, AuthProtocol::Sha256,
                      "maplesyrup", PrivProtocol::Aes128,    "privatepass"};
-}
-
-Pdu echoAnswer(const Pdu& request) {
-  Pdu p;
-  p.type = PduType::Response;
-  for (const auto& vb : request.varbinds) {
-    p.varbinds.push_back(Varbind{vb.name, Octets{std::byte{'o'}, std::byte{'k'}}});
-  }
-  return p;
 }
 
 // One io_context on the test thread, stopped once every operation has completed, so that a hung

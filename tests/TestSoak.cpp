@@ -22,9 +22,11 @@
 #include <vector>
 
 #include <snmpio/Client.hpp>
+#include <snmpio/detail/OutstandingView.hpp>
 
 #include "CompletionOracle.hpp"
 #include "MasterKeys.hpp"
+#include "OutstandingReads.hpp"
 #include "ReplyDelivery.hpp"
 #include "ScriptedAgent.hpp"
 #include "ScriptedV3Agent.hpp"
@@ -84,6 +86,10 @@ constexpr auto lateSpread = milliseconds(80);
 // What every request has to complete within once the plan's last event is done: its whole deadline
 // several times over, so that a request still outstanding at the end was stranded, not slow.
 constexpr auto drainLimit = std::chrono::seconds(10);
+// What a Client's own work may still take once every request has completed: a discovery its
+// cancelled requests left running, through both phases' whole deadlines, and the derivation its
+// time-sync phase may queue behind, with room for a sanitizer's slowdown.
+constexpr auto settleLimit = milliseconds(4 * wholeDeadline);
 
 constexpr int clientIoThreads = 4;
 constexpr int callerIoThreads = 2;
@@ -353,7 +359,20 @@ class Slot {
   // The Target leaves the inventory: the generation's Client goes once nothing else holds it.
   void destroy(int generation) { end(generation); }
 
-  // At the end, on the test thread.
+  // At the end, on the test thread: every Client still here, stopped by the plan or not, to be read
+  // (detail::OutstandingView) before retire() lets them go.
+  [[nodiscard]] std::vector<std::shared_ptr<ClientInstance>> remaining() {
+    std::vector<std::shared_ptr<ClientInstance>> clients;
+    const std::scoped_lock lock(m_mutex);
+    for (const auto& g : m_generations) {
+      if (g.client) clients.push_back(g.client);
+    }
+    return clients;
+  }
+
+  // At the end, on the test thread: lets every Client still here go, destroying each that nothing
+  // else holds -- under the io_context's threads, which are still running. `released` is declared
+  // ahead of the lock, so the destructions come once it has been let go, as the class says.
   void retire() {
     std::vector<std::shared_ptr<ClientInstance>> released;
     const std::scoped_lock lock(m_mutex);
@@ -526,6 +545,8 @@ class Soak {
 
     m_drained = m_completions.waitFor(m_records.size(), drainLimit);
 
+    readWhatIsHeld();
+
     for (auto& slot : m_slots) slot->retire();
     for (auto& agent : m_agents) agent->close();
     m_clientWork.reset();
@@ -533,11 +554,37 @@ class Soak {
     for (auto& t : io) t.join();
   }
 
+  // #51: whatever a request left behind that sends nothing -- an exchange still mapped, a discovery
+  // or a derivation still registered, a waiter still parked. Read for every Client still alive,
+  // with the threads still running it, on its own strand, and before anything stops it: so what
+  // reads zero settled on its own rather than being cleared by Stopping. The plan's Stops have
+  // stopped some of them already, and those read zero too. The ones it destroyed cannot be read.
+  //
+  // Every request has completed by now, but a discovery whose requests were all cancelled carries
+  // on to its own end (ADR-0003). Each is given settleLimit to get there before it reads as held.
+  void readWhatIsHeld() {
+    for (const auto& slot : m_slots) {
+      for (const auto& instance : slot->remaining()) {
+        m_heldAtTheEnd.push_back(test::settledOnStrand(instance->client(), settleLimit));
+      }
+    }
+  }
+
   void check() {
     EXPECT_TRUE(m_drained) << m_records.size() - m_completions.count() << " of " << m_records.size()
                            << " requests had not completed " << drainLimit.count()
                            << " s after the plan's last event";
     printOutcomes();
+    for (std::size_t i = 0; i < m_heldAtTheEnd.size(); ++i) {
+      const auto& held = m_heldAtTheEnd[i];
+      if (!held) {
+        ADD_FAILURE() << "remaining Client " << i << "'s strand never ran the read";
+        continue;
+      }
+      EXPECT_EQ(*held, snmpio::detail::OutstandingCounts{})
+          << "remaining Client " << i << " still held something after " << settleLimit.count()
+          << " ms of reading, with every request completed";
+    }
     int failures = 0;
     for (std::size_t i = 0; i < m_records.size(); ++i) {
       if (!checkOne(static_cast<int>(i), m_plan.requests[i], m_records[i])) continue;
@@ -795,6 +842,9 @@ class Soak {
   std::vector<Record> m_records;
   Completions m_completions;
   bool m_drained = false;
+  // One per Client still alive at the end, read on its strand before it was let go: empty if the
+  // strand never ran the read.
+  std::vector<std::optional<snmpio::detail::OutstandingCounts>> m_heldAtTheEnd;
 };
 
 std::optional<std::string> envVar(const char* name) {

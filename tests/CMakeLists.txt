@@ -31,6 +31,7 @@ add_executable(snmpio_tests
   TestMessageIdGenerator.cpp
   TestMessageIds.cpp
   TestOid.cpp
+  TestOutstanding.cpp
   TestPdu.cpp
   TestSecrets.cpp
   TestSoakPlan.cpp

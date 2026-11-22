@@ -35,9 +35,10 @@ cmake --preset default && cmake --build --preset default && ctest --preset defau
 **Naming** — types and files `UpperCamelCase`, functions and variables `lowerCamelCase`, private
 members `m_lowerCamelCase`, namespaces `lower_case`. Enforced by `.clang-tidy`, not by review.
 
-Three names are fixed by forces outside this repo and must not be "corrected":
+Four names are fixed by forces outside this repo and must not be "corrected":
 `make_error_code` (ADL customisation point for both `error_code` types), `LLVMFuzzerTestOneInput`
-(libFuzzer looks it up by name), and `begin`/`end`/`size` on `Oid` (range-for).
+(libFuzzer looks it up by name), `begin`/`end`/`size` on `Oid` (range-for), and `PrintTo` in
+`tests/` (GoogleTest's ADL printer hook).
 
 **Tooling version** — clang-format and clang-tidy are whatever Arch's `clang` package ships, on
 the workstation and in CI (`archlinux:latest`); they follow Arch rather than a pin. Their output

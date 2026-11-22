@@ -14,6 +14,7 @@
 #include <snmpio/detail/CacheView.hpp>
 #include <snmpio/detail/DeriverView.hpp>
 #include <snmpio/detail/MessageIdView.hpp>
+#include <snmpio/detail/OutstandingView.hpp>
 
 #include "Algorithms.hpp"
 #include "Deriver.hpp"
@@ -31,6 +32,7 @@
 #include <map>
 #include <memory>
 #include <optional>
+#include <set>
 #include <span>
 #include <string>
 #include <thread>
@@ -290,6 +292,17 @@ class Client::Impl {
   [[nodiscard]] std::size_t outstandingIds() const noexcept { return m_pending.size(); }
   void rewindIds(std::uint32_t steps) noexcept { m_ids.rewind(steps); }
 
+  // detail::OutstandingView's, and only safe where it says. Exchanges are counted by their Pending,
+  // which every Message ID its retransmissions drew maps to.
+  [[nodiscard]] detail::OutstandingCounts outstandingCounts() const {
+    std::set<const Pending*> exchanges;
+    for (const auto& [id, pending] : m_pending) exchanges.insert(pending.get());
+    return {.exchanges = exchanges.size(),
+            .discoveries = m_discovering.size(),
+            .derivations = m_derivingMasterKeys.size() + m_derivingLocalizedKeys.size(),
+            .waiters = m_waiters};
+  }
+
   // Stopping, from any thread. The flag is set at once, and the strand checks it before each
   // exchange and each Batch, so nothing begins once the strand has seen it; the cleanup that needs
   // the strand follows on it. From another thread the strand may already be past a check, mid-send
@@ -412,6 +425,23 @@ class Client::Impl {
     net::Awaitable<void> wait();
     // Wakes every waiter, settled or not.
     void wake() { done.cancel(); }
+  };
+
+  // Counts the coroutine it lives in as parked on SharedWork, for as long as it lives: for
+  // detail::OutstandingView, and nothing else. A destructor rather than a decrement after the wait,
+  // so that a wait that rethrows, or a frame destroyed unresumed, is uncounted too. The state the
+  // count is in outlives it, since the coroutine holds that state's Ref.
+  class Waiting {
+   public:
+    explicit Waiting(std::size_t& waiters) noexcept : m_waiters(waiters) { ++m_waiters; }
+    ~Waiting() { --m_waiters; }
+    Waiting(const Waiting&) = delete;
+    Waiting& operator=(const Waiting&) = delete;
+    Waiting(Waiting&&) = delete;
+    Waiting& operator=(Waiting&&) = delete;
+
+   private:
+    std::size_t& m_waiters;
   };
 
   // A discovery in flight.
@@ -762,6 +792,8 @@ class Client::Impl {
   // Reeder privacy keys. Each entry leaves as its derivation settles.
   std::map<std::pair<AuthProtocol, SecretOctets>, std::shared_ptr<Derivation>> m_derivingMasterKeys;
   std::map<LocalizedKeyId, std::shared_ptr<Derivation>> m_derivingLocalizedKeys;
+  // Coroutines parked on a discovery or a derivation above, counted by Waiting.
+  std::size_t m_waiters = 0;
   // The context's Deriver, which every Client on it shares (Deriver.hpp). The context owns it and
   // joins it as the context goes, never as a Client stops or goes, so neither waits for a
   // derivation (ADR-0009).
@@ -1449,7 +1481,10 @@ net::Awaitable<Client::Impl::KeyResult> Client::Impl::awaitDerivation(
     [[maybe_unused]] Ref self, std::shared_ptr<Derivation> derivation) {
   // The first derivation on an io_context starts the Deriver before it first suspends, so one that
   // cannot start it has settled by now: wait() returns at once, and rethrows.
-  co_await derivation->wait();
+  {
+    const Waiting waiting(m_waiters);
+    co_await derivation->wait();
+  }
   if (m_stopping) co_return KeyResult{.key = {}, .ec = make_error_code(Errc::ClientStopped)};
   const auto cancelled = co_await net::asio::this_coro::cancellation_state;
   if (cancelled.cancelled() != net::asio::cancellation_type::none || !derivation->finished) {
@@ -1579,7 +1614,10 @@ net::Awaitable<net::ErrorCode> Client::Impl::ensureEngine(Ref self, Target targe
 
   // A discovery that fails before it sends anything has settled by now, and wait() returns at
   // once. Its rethrow comes ahead of Stopping, the louder of the two answers.
-  co_await discovery->wait();
+  {
+    const Waiting waiting(m_waiters);
+    co_await discovery->wait();
+  }
   if (m_stopping) co_return make_error_code(Errc::ClientStopped);
   // The same rule as transact's, in the other wait a request can be in: either cancellation type
   // ends this request. Asked, rather than inferred from an unfinished discovery, because a signal
@@ -2037,6 +2075,17 @@ std::size_t detail::MessageIdView::outstandingIds(const Client& client) {
 
 void detail::MessageIdView::rewindIds(Client& client, std::uint32_t steps) {
   client.m_impl->rewindIds(steps);
+}
+
+detail::OutstandingCounts detail::OutstandingView::counts(const Client& client) {
+  return client.m_impl->outstandingCounts();
+}
+
+void detail::OutstandingView::countsOnStrand(const Client& client,
+                                             std::function<void(const OutstandingCounts&)> then) {
+  net::asio::post(client.m_strand, [impl = client.m_impl, then = std::move(then)] {
+    then(impl->outstandingCounts());
+  });
 }
 
 }  // namespace snmpio

@@ -16,11 +16,15 @@
 
 #include <snmpio/Client.hpp>
 #include <snmpio/Usm.hpp>
+#include <snmpio/detail/CacheView.hpp>
+#include <snmpio/detail/DeriverView.hpp>
 #include <snmpio/detail/MessageIdView.hpp>
 
 #include "CompletionOracle.hpp"
 #include "Deadlines.hpp"
+#include "DeriverHold.hpp"
 #include "FailingAllocation.hpp"
+#include "MasterKeys.hpp"
 #include "ScriptedAgent.hpp"
 #include "ScriptedV3Agent.hpp"
 
@@ -31,11 +35,14 @@
 namespace snmpio {
 namespace {
 
+using test::derivationHeld;
+using test::DeriverHold;
 using test::FailingAllocation;
 using test::longDeadline;
 using test::longDeadlineTarget;
 using test::ScriptedAgent;
 using test::ScriptedV3Agent;
+using test::withMasterKeys;
 
 const Oid sysDescr{1, 3, 6, 1, 2, 1, 1, 1, 0};
 
@@ -97,8 +104,9 @@ TEST(ClientExceptions, ADiscoveryThatThrowsSurfacesForEachWaiterAndLeavesNoneQue
         io.run_until(deadline);
       } catch (const std::bad_alloc&) {
         // Issued once the discovery has thrown, so it either starts a discovery of its own or
-        // queues behind the one that threw, which will never finish.
-        if (++thrown > 1) continue;
+        // queues behind the one that threw, which will never finish. The derivation the discovery
+        // waited on throws first, while the discovery is still registered; the discovery second.
+        if (++thrown != 2) continue;
         client.asyncGet(longDeadlineTarget(agent), credentials(), {sysDescr},
                         [&later, &client](net::ErrorCode ec, const Response&) {
                           later = ec;
@@ -111,12 +119,180 @@ TEST(ClientExceptions, ADiscoveryThatThrowsSurfacesForEachWaiterAndLeavesNoneQue
   net::asio::post(agentIo, [&agent] { agent.close(); });
   agentThread.join();
 
-  // Once for the discovery and once for each request waiting on it, each on its own call to run().
-  EXPECT_EQ(thrown, 3);
+  // Once for the derivation of the Master Key the discovery's time-sync phase needs, once for the
+  // discovery waiting on it, and once for each request waiting on that, each on its own call to
+  // run().
+  EXPECT_EQ(thrown, 4);
   EXPECT_EQ(queuedCompletions, 0) << "a request waiting on the discovery completed instead";
   ASSERT_TRUE(later.has_value()) << "a later request queued behind the discovery that threw";
   EXPECT_FALSE(*later) << later->message();
   EXPECT_EQ(discoveries, 2) << "the later request did not start a discovery of its own";
+}
+
+// Discovers the Engine at `agent` with Master Keys, so that a request handed the password next
+// waits on a derivation of its own rather than on a discovery.
+void discoverWithMasterKeys(net::IoContext& io, Client& client, const ScriptedV3Agent& agent) {
+  bool discovered = false;
+  client.asyncGet(longDeadlineTarget(agent), withMasterKeys(credentials()), {sysDescr},
+                  [&discovered](net::ErrorCode ec, const Response&) {
+                    EXPECT_FALSE(ec) << ec.message();
+                    discovered = true;
+                  });
+  while (!discovered && io.run_one_for(longDeadline) != 0) {
+  }
+  ASSERT_TRUE(discovered);
+  io.restart();
+}
+
+// Where a derivation fails: in the job, on the Deriver, or as its key is cached, on the strand.
+enum class FailsOn { Deriver, Strand };
+
+// Arms a FailingAllocation on the Deriver the Client runs on, from a job of its own queued ahead of
+// every derivation, and disarms it there again: FailingAllocation fails only on the thread that
+// armed it.
+class FailingOnTheDeriver {
+ public:
+  FailingOnTheDeriver(Client& client, std::size_t size) : m_client(client) {
+    detail::DeriverView::occupy(
+        client, [this, size] { m_failing = std::make_unique<FailingAllocation>(size); });
+  }
+  FailingOnTheDeriver(const FailingOnTheDeriver&) = delete;
+  FailingOnTheDeriver& operator=(const FailingOnTheDeriver&) = delete;
+  FailingOnTheDeriver(FailingOnTheDeriver&&) = delete;
+  FailingOnTheDeriver& operator=(FailingOnTheDeriver&&) = delete;
+  // Waits for the disarming, so that nothing armed outlives the test on the Deriver's thread.
+  ~FailingOnTheDeriver() {
+    std::promise<void> disarmed;
+    detail::DeriverView::occupy(m_client, [this, &disarmed] {
+      m_failing.reset();
+      disarmed.set_value();
+    });
+    disarmed.get_future().wait();
+  }
+  // Only once the Deriver has run past the derivation: read from the strand after it settled.
+  [[nodiscard]] bool fired() const { return m_failing && m_failing->fired(); }
+
+ private:
+  Client& m_client;
+  std::unique_ptr<FailingAllocation> m_failing;
+};
+
+// The same rules for a derivation as for a discovery (ADR-0003's amendment): what one throws
+// reaches run() from the derivation itself and again through each request waiting on it, none of
+// them completes, and it leaves nothing registered for a later request to queue behind. On the
+// Deriver, the allocation that fails is the Master Key the job derives; on the strand, its copy
+// into the cache, which a derivation that throws must not leave its waiters stranded by either.
+class ADerivationThatThrows : public testing::TestWithParam<FailsOn> {};
+
+TEST_P(ADerivationThatThrows, SurfacesForEachWaiterAndLeavesNoneQueued) {
+  if (!FailingAllocation::available()) GTEST_SKIP() << "this build cannot replace operator new";
+  net::IoContext agentIo;
+  ScriptedV3Agent agent(agentIo, credentials(), echoAnswer);
+  std::thread agentThread([&agentIo] { agentIo.run(); });
+
+  net::IoContext io;
+  Client client(io.get_executor());
+  discoverWithMasterKeys(io, client, agent);
+  std::optional<FailingOnTheDeriver> onDeriver;
+  if (GetParam() == FailsOn::Deriver) onDeriver.emplace(client, masterKeySize);
+  int queuedCompletions = 0;
+  const auto queued = [&queuedCompletions](net::ErrorCode, const Response&) {
+    ++queuedCompletions;
+  };
+  // The first starts the derivation and the second waits on it too.
+  client.asyncGet(longDeadlineTarget(agent), credentials(), {sysDescr}, queued);
+  client.asyncGet(longDeadlineTarget(agent), credentials(), {sysDescr}, queued);
+
+  std::optional<net::ErrorCode> later;
+  int thrown = 0;
+  bool fired = false;
+  {
+    std::optional<FailingAllocation> onStrand;
+    if (GetParam() == FailsOn::Strand) onStrand.emplace(masterKeySize);
+    const auto deadline = std::chrono::steady_clock::now() + longDeadline;
+    while (!later && std::chrono::steady_clock::now() < deadline) {
+      try {
+        io.run_until(deadline);
+      } catch (const std::bad_alloc&) {
+        // Issued once the derivation has thrown, so it either starts one of its own or waits on
+        // the one that threw, which will never finish.
+        if (++thrown > 1) continue;
+        if (onDeriver) fired = onDeriver->fired();
+        client.asyncGet(longDeadlineTarget(agent), credentials(), {sysDescr},
+                        [&later, &client](net::ErrorCode ec, const Response&) {
+                          later = ec;
+                          client.stop();
+                        });
+      }
+    }
+    if (onStrand) fired = onStrand->fired();
+  }
+  onDeriver.reset();
+  net::asio::post(agentIo, [&agent] { agent.close(); });
+  agentThread.join();
+
+  EXPECT_TRUE(fired) << "no allocation of the key's size was made where it was armed";
+  EXPECT_EQ(thrown, 3) << "once for the derivation and once for each request waiting on it";
+  EXPECT_EQ(queuedCompletions, 0) << "a request waiting on the derivation completed instead";
+  ASSERT_TRUE(later.has_value()) << "a later request waited on the derivation that threw";
+  EXPECT_FALSE(*later) << later->message();
+  // The later request's, and only that: the one that threw cached nothing, so counts nothing.
+  EXPECT_EQ(detail::CacheView::counts(client).masterKeyDerivations, 1U);
+}
+
+INSTANTIATE_TEST_SUITE_P(ClientExceptions, ADerivationThatThrows,
+                         testing::Values(FailsOn::Deriver, FailsOn::Strand),
+                         [](const testing::TestParamInfo<FailsOn>& param) {
+                           return param.param == FailsOn::Deriver ? "OnTheDeriver"
+                                                                  : "AsItsKeyIsCached";
+                         });
+
+// A derivation that throws once every request waiting on it has been cancelled still reaches
+// run(): there is no request left to fail, but the fault is not to pass in silence (L7).
+TEST(ClientExceptions, ADerivationThatThrowsWithNoRequestLeftWaitingStillSurfaces) {
+  if (!FailingAllocation::available()) GTEST_SKIP() << "this build cannot replace operator new";
+  net::IoContext agentIo;
+  ScriptedV3Agent agent(agentIo, credentials(), echoAnswer);
+  std::thread agentThread([&agentIo] { agentIo.run(); });
+
+  net::IoContext io;
+  Client client(io.get_executor());
+  discoverWithMasterKeys(io, client, agent);
+  DeriverHold hold(client);
+  hold.releaseAfter(io, derivationHeld);
+
+  net::asio::cancellation_signal signal;
+  std::vector<net::ErrorCode> completions;
+  client.asyncGet(longDeadlineTarget(agent), credentials(), {sysDescr},
+                  net::asio::bind_cancellation_slot(
+                      signal.slot(), [&completions](net::ErrorCode ec, const Response&) {
+                        completions.push_back(ec);
+                      }));
+  net::SteadyTimer cancelAt(io, derivationHeld / 2);
+  cancelAt.async_wait(
+      [&signal](net::ErrorCode) { signal.emit(net::asio::cancellation_type::terminal); });
+
+  int thrown = 0;
+  {
+    const FailingAllocation failing(masterKeySize);
+    const auto deadline = std::chrono::steady_clock::now() + longDeadline;
+    for (;;) {
+      try {
+        io.run_until(deadline);
+        break;
+      } catch (const std::bad_alloc&) {
+        ++thrown;
+        client.stop();
+      }
+    }
+    EXPECT_TRUE(failing.fired()) << "no allocation of the key's size was made";
+  }
+  net::asio::post(agentIo, [&agent] { agent.close(); });
+  agentThread.join();
+
+  ASSERT_EQ(completions.size(), 1U);
+  EXPECT_EQ(completions[0], net::asio::error::operation_aborted) << completions[0].message();
+  EXPECT_EQ(thrown, 1) << "the derivation's failure passed in silence";
 }
 
 // The size of the one OCTET STRING the Agent below answers with, which the decoder copies into a

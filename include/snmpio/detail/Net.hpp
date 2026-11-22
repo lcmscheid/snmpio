@@ -28,6 +28,7 @@
 #include <boost/asio/steady_timer.hpp>
 #include <boost/asio/strand.hpp>
 #include <boost/asio/this_coro.hpp>
+#include <boost/asio/thread_pool.hpp>
 #include <boost/asio/use_awaitable.hpp>
 #else
 #include <asio/any_io_executor.hpp>
@@ -49,6 +50,7 @@
 #include <asio/steady_timer.hpp>
 #include <asio/strand.hpp>
 #include <asio/this_coro.hpp>
+#include <asio/thread_pool.hpp>
 #include <asio/use_awaitable.hpp>
 #endif
 
@@ -64,6 +66,7 @@ using Executor = asio::any_io_executor;
 using IoContext = asio::io_context;
 using Strand = asio::strand<Executor>;
 using SteadyTimer = asio::steady_timer;
+using ThreadPool = asio::thread_pool;
 using Udp = asio::ip::udp;
 using UdpEndpoint = Udp::endpoint;
 using UdpSocket = Udp::socket;

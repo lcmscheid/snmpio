@@ -1,8 +1,22 @@
+// GCC 16 reports -Wmismatched-new-delete inside Asio's awaitable frame allocator, which pairs its
+// own operator new with std::free through aligned_delete, as it is written to. It is a false
+// positive, and which coroutine it lands on moves with any change to what GCC inlines: shapes here
+// were bent to dodge it more than once, and #80's derivation coroutines found three more that no
+// reshaping held still. Pushed before the includes and popped after them: GCC reports it at the
+// frame allocator's own lines in Asio's headers, so that is the scope that reaches it, and this
+// file's own code stays checked. GCC only, since Clang never raised it.
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wmismatched-new-delete"
+#endif
+
 #include <snmpio/Client.hpp>
 #include <snmpio/detail/CacheView.hpp>
+#include <snmpio/detail/DeriverView.hpp>
 #include <snmpio/detail/MessageIdView.hpp>
 
 #include "Algorithms.hpp"
+#include "Deriver.hpp"
 #include "MessageIdGenerator.hpp"
 #include "Secret.hpp"
 
@@ -24,6 +38,10 @@
 #include <unordered_map>
 #include <utility>
 #include <variant>
+
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC diagnostic pop
+#endif
 
 namespace snmpio {
 namespace {
@@ -245,14 +263,26 @@ class Client::Impl {
  public:
   using Ref = std::shared_ptr<Impl>;
 
-  explicit Impl(net::Strand strand) : m_strand(std::move(strand)) {}
+  // The Deriver is looked up here, after the strand, so that the context shuts it down before the
+  // strand's service: a derivation finishing as the Deriver joins is handed to a strand still
+  // there.
+  explicit Impl(net::Strand strand)
+      : m_strand(std::move(strand)),
+        m_deriver(net::asio::use_service<detail::Deriver>(
+            net::asio::query(m_strand.get_inner_executor(), net::asio::execution::context))) {}
 
   // detail::CacheView's, and only safe where it says.
   [[nodiscard]] detail::CacheCounts cacheCounts() const noexcept {
     return {.engines = m_engines.size(),
             .masterKeys = m_masterKeys.size(),
             .localizedKeys = m_keys.size(),
-            .masterKeyDerivations = m_masterKeyDerivations};
+            .masterKeyDerivations = m_masterKeyDerivations,
+            .reederExtensions = m_reederExtensions};
+  }
+
+  // detail::DeriverView's, and only safe where it says.
+  void occupyDeriver(std::function<void()> job) {
+    net::asio::post(m_deriver.executor(), std::move(job));
   }
 
   // detail::MessageIdView's, and only safe where it says.
@@ -485,7 +515,6 @@ class Client::Impl {
   // By reference, which the coroutine check forbids for the dangling it usually means: here the one
   // caller, runDiscovery, awaits this to the end, and the Credentials outlive that wait -- its own,
   // in its frame, or those a queued request left on the Discovery it holds (Discovery::OwedSync).
-  // By value, GCC 16 raises the spurious -Wmismatched-new-delete described in transact.
   net::Awaitable<net::ErrorCode> discoverEngine(
       Ref self, Target target,
       const Credentials& creds);  // NOLINT(cppcoreguidelines-avoid-reference-coroutine-parameters)
@@ -504,23 +533,84 @@ class Client::Impl {
   // Drops an Engine and its Localized Keys if no endpoint maps to it, forgotten ones included.
   void evictIfUnmapped(const Octets& engineId);
 
-  // The Master Key for one secret: the one the Credentials carry, or the one this Client derived
-  // from the password -- once, the first time it met it, since the derivation is a megabyte hash
-  // and deliberately expensive (CONTEXT.md). Empty, with `ec` set, if there is none.
-  std::span<const std::byte> masterKey(const detail::Secret& secret, net::ErrorCode& ec);
-  // One secret's key, localized per Engine from its Master Key, and cached: a short hash for the
-  // authentication key, but a second megabyte for a Reeder privacy key, whose extension runs
-  // password-to-key again.
-  const SecretOctets* localizedKey(const detail::Secret& secret, const Octets& engineId,
-                                   net::ErrorCode& ec);
-  // The keys a message at the Credentials' Security Level goes out with: the authentication key
-  // wherever it authenticates, the privacy key wherever it encrypts, nullptr for either it does
-  // not use. Both point into the cache, which never evicts (threat model B2).
-  struct LocalizedKeys {
-    const SecretOctets* auth = nullptr;
-    const SecretOctets* priv = nullptr;
+  // A key, derived or found in the cache, by value: a derivation suspends, and a pointer into the
+  // cache could be evicted from under its holder meanwhile (threat model B2). Empty, with `ec` set,
+  // if there is none.
+  struct KeyResult {
+    SecretOctets key;
+    net::ErrorCode ec;
   };
-  LocalizedKeys localizedKeys(const Credentials& creds, const Octets& engineId, net::ErrorCode& ec);
+
+  // A password-to-key in flight on the Deriver, single-flight per key: the first request to need
+  // the key starts it, and every other waits on it rather than starting its own. The timer is an
+  // event, as Discovery's is: waiters park on it and runDerivation cancels it to wake them all.
+  // Like a discovery, it outlives any individual waiter, so cancelling one never cancels it.
+  struct Derivation {
+    explicit Derivation(const net::Executor& ex) : done(ex) {
+      done.expires_at(std::chrono::steady_clock::time_point::max());
+    }
+    net::SteadyTimer done;
+    KeyResult result;
+    bool finished = false;
+    // What the derivation threw, if it did: each waiter rethrows it, as Discovery's do.
+    std::exception_ptr failure;
+  };
+  // What runs on the Deriver. It owns copies of everything it reads, so that nothing the strand
+  // owns is touched off it (ADR-0003's amendment).
+  using DerivationJob = std::function<SecretOctets(net::ErrorCode& ec)>;
+  // What a derivation that succeeded does with its key back on the strand: caches it, and counts it
+  // for detail::CacheView. It may throw, as caching allocates.
+  using KeepKey = std::function<void(const SecretOctets&)>;
+  // What a finished derivation does back on the strand before waking its waiters, whether it
+  // succeeded or not: leaves the in-flight map, and keeps the key if there is one.
+  using SettleDerivation = std::function<void()>;
+
+  // The key `id` names, from the derivation already in flight for it in `inFlight`, or from one
+  // started on the Deriver with `job`, which caches its key with `keep` before waking its waiters.
+  // masterKey's and localizedKey's single flight, which differ only in the map and the cache. The
+  // map by reference, which the coroutine check forbids for the dangling it usually means: it is a
+  // member of the state `self` keeps alive across every wait in here.
+  template <class Id>
+  net::Awaitable<KeyResult> deriveOnce(
+      Ref self,
+      std::map<Id, std::shared_ptr<Derivation>>&
+          inFlight,  // NOLINT(cppcoreguidelines-avoid-reference-coroutine-parameters)
+      Id id, DerivationJob job, KeepKey keep);
+  // Runs `job` on the Deriver and resumes on the strand, where `settle` leaves the in-flight map
+  // and keeps the key, and then wakes the waiters. Spawned on the strand by whichever request
+  // started the derivation, never awaited.
+  net::Awaitable<void> runDerivation(Ref self, DerivationJob job, SettleDerivation settle,
+                                     std::shared_ptr<Derivation> derivation);
+  // Runs `job` on `deriver` and completes on the awaiting coroutine's executor.
+  static net::Awaitable<KeyResult> onDeriver(net::ThreadPool::executor_type deriver,
+                                             DerivationJob job);
+  // A request's wait for a derivation: the same rules as its wait for an Engine Discovery
+  // (ensureEngine). Stopping ends it with ClientStopped and either cancellation type with
+  // operation_aborted, at once, and the derivation carries on for its other waiters.
+  net::Awaitable<KeyResult> awaitDerivation(Ref self, std::shared_ptr<Derivation> derivation);
+
+  // The Master Key for one secret: the one the Credentials carry, or the one this Client derived
+  // from the password -- once, the first time it met it, on the Deriver, since the derivation is a
+  // megabyte hash and deliberately expensive (CONTEXT.md). The Secret views Credentials its caller
+  // holds across the wait.
+  net::Awaitable<KeyResult> masterKey(Ref self, detail::Secret secret);
+  // One secret's key, localized per Engine from its Master Key, and cached: a short hash for the
+  // authentication key, done here, but a second megabyte for a Reeder privacy key, whose extension
+  // runs password-to-key again, and so on the Deriver.
+  net::Awaitable<KeyResult> localizedKey(Ref self, detail::Secret secret, Octets engineId);
+  // The keys a message at the Credentials' Security Level goes out with: the authentication key
+  // wherever it authenticates, the privacy key wherever it encrypts, empty for either it does not
+  // use. The Credentials by reference, as discoverEngine's are, and for the same reason: each
+  // caller awaits this to the end, and holds them in its own frame across every wait in here.
+  struct LocalizedKeys {
+    SecretOctets auth;
+    SecretOctets priv;
+    net::ErrorCode ec;
+  };
+  net::Awaitable<LocalizedKeys> localizedKeys(
+      Ref self,
+      const Credentials& creds,  // NOLINT(cppcoreguidelines-avoid-reference-coroutine-parameters)
+      Octets engineId);
 
   // What a Report means for the request that provoked it: an ErrorCode to fail with, or nothing
   // when it named something we can act on and ask again about. `cancelled` is the request's
@@ -645,11 +735,21 @@ class Client::Impl {
   // time a password needs it, so a Client handed only Master Keys never draws one.
   SecretOctets m_digestKey;
   std::size_t m_masterKeyDerivations = 0;  // for detail::CacheView, and nothing else
+  std::size_t m_reederExtensions = 0;      // and so is this
   // (engineID, hash, Master Key, privacy protocol) -- ADR-0003's (master key, engineID), whether
   // the Master Key was derived above or supplied. The privacy protocol is part of the key rather
   // than of the value because it decides how far the derivation is extended: PrivProtocol::None is
   // the authentication key's row.
-  std::map<std::tuple<Octets, AuthProtocol, SecretOctets, PrivProtocol>, SecretOctets> m_keys;
+  using LocalizedKeyId = std::tuple<Octets, AuthProtocol, SecretOctets, PrivProtocol>;
+  std::map<LocalizedKeyId, SecretOctets> m_keys;
+  // The derivations in flight, keyed as the caches they fill are: Master Keys from passwords, and
+  // Reeder privacy keys. Each entry leaves as its derivation settles.
+  std::map<std::pair<AuthProtocol, SecretOctets>, std::shared_ptr<Derivation>> m_derivingMasterKeys;
+  std::map<LocalizedKeyId, std::shared_ptr<Derivation>> m_derivingLocalizedKeys;
+  // The context's Deriver, which every Client on it shares (Deriver.hpp). The context owns it and
+  // joins it as the context goes, never as a Client stops or goes, so neither waits for a
+  // derivation (ADR-0009).
+  detail::Deriver& m_deriver;
   // One generator for both the v3 msgID and the PDU request-id, so that the two protocols cannot
   // collide in m_pending -- which is keyed on the msgID for v3, as CONTEXT.md requires, because a
   // message we cannot open must still be attributable. Unpredictable, and fresh for every
@@ -715,6 +815,9 @@ void Client::Impl::finishStopping() {
   for (auto& [id, pending] : m_pending) pending->timer.cancel();
   // Anything parked on a discovery is waiting on a reply that will now never come.
   for (auto& [endpoint, discovery] : m_discovering) discovery->done.cancel();
+  // And on a derivation, which carries on to the end (ADR-0009): only its waiters are woken.
+  for (auto& [id, derivation] : m_derivingMasterKeys) derivation->done.cancel();
+  for (auto& [id, derivation] : m_derivingLocalizedKeys) derivation->done.cancel();
 }
 
 std::vector<Varbind> Client::toVarbinds(std::vector<Oid> oids) {
@@ -977,8 +1080,7 @@ void Client::Impl::forgetEngineAt(const net::UdpEndpoint& endpoint) {
 // every reply from an Engine that restarted mid-session is dropped and the caller is told Timeout
 // until the cache is thrown away.
 bool Client::Impl::timely(const net::UdpEndpoint& from, const UsmParameters& security) const {
-  // engineAt's lookup, which is not const. GCC 16's spurious -Wmismatched-new-delete fires on
-  // every shape tried that shares it (a const overload, a template over both constnesses).
+  // engineAt's lookup, which is not const.
   const Octets* engineId = engineIdAt(from);
   if (engineId == nullptr) return true;  // nothing yet to disagree with
   const auto found = m_engines.find(*engineId);
@@ -1025,8 +1127,7 @@ void Client::Impl::observeEngineTime(const net::UdpEndpoint& from, const UsmPara
   // And never marks the Engine synced: see EngineState::timeSynced (#43). There is no early return
   // for an unsynced Engine above because it would save nothing: a pair written then is never
   // relied on, since timely() ignores it and the next discovery overwrites it before an
-  // authenticated request carries it. (The early return also trips the spurious GCC 16
-  // -Wmismatched-new-delete described in transact.)
+  // authenticated request carries it.
 }
 
 Client::Impl::Encoder Client::Impl::v2cEncoder(Community community, Pdu pdu) {
@@ -1043,8 +1144,6 @@ Client::Impl::Encoder Client::Impl::v3Encoder(V3Header header, UsmParameters usm
                     .userName = usm.userName,
                     .contextEngineId = scoped.contextEngineId,
                     .contextName = scoped.contextName};
-  // A statement of its own: naming it in the initialiser above trips the spurious GCC 16
-  // -Wmismatched-new-delete described in transact.
   pending->match.identityPhase = usm.engineId.empty();
   return [header, usm = std::move(usm), scoped = std::move(scoped), pending](
              std::int32_t id, net::ErrorCode& ec) mutable {
@@ -1154,13 +1253,7 @@ net::Awaitable<net::ErrorCode> Client::Impl::transact(Ref self, Target target, E
   // one whose reply was in hand is still outstanding until this returns.
   if (aborted()) co_return net::ErrorCode(net::asio::error::operation_aborted);
   if (pending->answered && !m_stopping) co_return net::ErrorCode{};
-  // Spelled out rather than reusing softCancelled(). Not style: GCC 16 emits a spurious
-  // -Wmismatched-new-delete from inside Asio's coroutine frame allocator, blamed on doRequestV3,
-  // for almost any perturbation of this block's inlining -- reusing the lambda, hoisting it, or
-  // deleting the block all trip it. Leave the shape alone unless the compiler stops caring.
-  if (cancelState.cancelled() != net::asio::cancellation_type::none) {
-    co_return net::ErrorCode(net::asio::error::operation_aborted);
-  }
+  if (softCancelled()) co_return net::ErrorCode(net::asio::error::operation_aborted);
   // Ahead of ec on purpose: stop() closes the socket, so the socket's own complaint about a bad
   // descriptor is a symptom of the stop and would bury the actual reason.
   if (m_stopping) co_return make_error_code(Errc::ClientStopped);
@@ -1232,58 +1325,196 @@ net::Awaitable<Client::RequestResult> Client::Impl::doRequestV2c(Ref self, Targe
   co_return toResult(pending->response);
 }
 
-std::span<const std::byte> Client::Impl::masterKey(const detail::Secret& secret,
-                                                   net::ErrorCode& ec) {
-  ec = {};
-  if (const SecretOctets* supplied = secret.suppliedMasterKey()) return *supplied;
+// As Asio's resolver runs getaddrinfo on its private thread: the job is posted there, and its
+// result posted straight back to the executor of whoever waits, which counts as work meanwhile.
+// Not a co_spawn onto the Deriver: Boost 1.83's (Ubuntu 24.04's) posts once more to the executor
+// it spawned on before completing, so a key that was ready sat behind the next derivation queued
+// before any request saw it.
+net::Awaitable<Client::Impl::KeyResult> Client::Impl::onDeriver(
+    net::ThreadPool::executor_type deriver, DerivationJob job) {
+  return net::asio::async_initiate<decltype(use_awaitable), void(std::exception_ptr, KeyResult)>(
+      [deriver](auto handler, DerivationJob queued) {
+        auto waiter = net::asio::prefer(net::asio::get_associated_executor(handler),
+                                        net::asio::execution::outstanding_work_t::tracked);
+        net::asio::post(deriver, [job = std::move(queued), handler = std::move(handler),
+                                  waiter = std::move(waiter)]() mutable {
+          std::exception_ptr failure;
+          KeyResult derived;
+          try {
+            derived.key = job(derived.ec);
+          } catch (...) {
+            failure = std::current_exception();
+          }
+          net::asio::post(waiter, [handler = std::move(handler), failure,
+                                   derived = std::move(derived)]() mutable {
+            std::move(handler)(failure, std::move(derived));
+          });
+        });
+      },
+      use_awaitable, std::move(job));
+}
+
+// The map by reference, for the reason given where it is declared. A NOLINT on the parameter's own
+// line, as the declaration has, is not honoured on this definition, so it is fenced instead.
+// NOLINTBEGIN(cppcoreguidelines-avoid-reference-coroutine-parameters)
+template <class Id>
+net::Awaitable<Client::Impl::KeyResult> Client::Impl::deriveOnce(
+    Ref self, std::map<Id, std::shared_ptr<Derivation>>& inFlight, Id id, DerivationJob job,
+    KeepKey keep) {
+  // NOLINTEND(cppcoreguidelines-avoid-reference-coroutine-parameters)
+  // No check for Stopping before registering, as ensureEngine has none before registering a
+  // discovery, and for the same reason: every path here has checked it since its last suspension,
+  // and finishStopping is posted to the strand only after the flag is set. So a derivation is
+  // either registered before finishStopping runs, which then wakes its waiters, or not at all.
+  std::shared_ptr<Derivation> derivation;
+  if (const auto found = inFlight.find(id); found != inFlight.end()) {
+    derivation = found->second;
+  } else {
+    derivation = std::make_shared<Derivation>(m_strand);
+    inFlight.emplace(id, derivation);
+    // Spawned on its own rather than awaited, as a discovery is: the derivation belongs to the
+    // key, not to the request that happened to need it first.
+    net::asio::co_spawn(m_strand,
+                        runDerivation(
+                            self, std::move(job),
+                            [&inFlight, id, keep = std::move(keep), derivation] {
+                              inFlight.erase(id);
+                              if (derivation->finished && !derivation->result.ec)
+                                keep(derivation->result.key);
+                            },
+                            derivation),
+                        rethrow);
+  }
+  co_return co_await awaitDerivation(self, std::move(derivation));
+}
+
+net::Awaitable<void> Client::Impl::runDerivation([[maybe_unused]] Ref self, DerivationJob job,
+                                                 SettleDerivation settle,
+                                                 std::shared_ptr<Derivation> derivation) {
+  try {
+    // Off the strand and back: the job runs on the Deriver, and this resumes on the strand, the
+    // executor it was spawned on. Nothing cancels it -- it belongs to the key, not to whichever
+    // request asked first -- and Stopping does not wait for it, but lets it finish here, against
+    // the state `self` keeps.
+    derivation->result = co_await onDeriver(m_deriver.executor(), std::move(job));
+    derivation->finished = true;
+  } catch (...) {
+    derivation->failure = std::current_exception();
+  }
+  // On both paths, as runDiscovery's: one that threw must not stay registered. Settling copies the
+  // key into the cache, and a bad_alloc there is the derivation's failure too, or its waiters would
+  // never be woken to hear of it.
+  try {
+    settle();
+  } catch (...) {
+    if (!derivation->failure) derivation->failure = std::current_exception();
+  }
+  derivation->done.cancel();
+  // Rethrown from here as well as by each waiter, as a discovery's is (L7): with every waiter
+  // cancelled or stopped, this is the only place it is heard.
+  if (derivation->failure) std::rethrow_exception(derivation->failure);
+}
+
+net::Awaitable<Client::Impl::KeyResult> Client::Impl::awaitDerivation(
+    [[maybe_unused]] Ref self, std::shared_ptr<Derivation> derivation) {
+  co_await net::asio::this_coro::throw_if_cancelled(false);
+  [[maybe_unused]] net::ErrorCode waitEc;
+  co_await derivation->done.async_wait(redirect_error(use_awaitable, waitEc));
+  if (derivation->failure) std::rethrow_exception(derivation->failure);
+  if (m_stopping) co_return KeyResult{.key = {}, .ec = make_error_code(Errc::ClientStopped)};
+  const auto cancelled = co_await net::asio::this_coro::cancellation_state;
+  if (cancelled.cancelled() != net::asio::cancellation_type::none || !derivation->finished) {
+    co_return KeyResult{.key = {}, .ec = net::ErrorCode(net::asio::error::operation_aborted)};
+  }
+  co_return derivation->result;
+}
+
+net::Awaitable<Client::Impl::KeyResult> Client::Impl::masterKey(Ref self, detail::Secret secret) {
+  if (const SecretOctets* supplied = secret.suppliedMasterKey()) {
+    co_return KeyResult{.key = *supplied, .ec = {}};
+  }
+  net::ErrorCode ec;
   if (m_digestKey.empty()) {
     m_digestKey = detail::randomDigestKey(ec);
-    if (ec) return {};
+    if (ec) co_return KeyResult{.key = {}, .ec = ec};
   }
   // A keyed digest, not a bare hash: a bare one could be checked against a table of guesses built
   // for any Client. It is still far cheaper to guess against than the megabyte-hashed Master Key
   // beside it, which is why it is keyed per Client and not kept anywhere else.
   auto digest = detail::passwordDigest(m_digestKey, secret.password(), ec);
-  if (ec) return {};
-  auto cacheKey = std::make_pair(secret.authProtocol(), std::move(digest));
-  const auto it = m_masterKeys.find(cacheKey);
-  if (it != m_masterKeys.end()) return it->second;
-  auto derived = passwordToKey(secret.authProtocol(), secret.password(), ec);
-  if (ec) return {};
-  ++m_masterKeyDerivations;
-  return m_masterKeys.emplace(std::move(cacheKey), std::move(derived)).first->second;
+  if (ec) co_return KeyResult{.key = {}, .ec = ec};
+  const auto cacheKey = std::make_pair(secret.authProtocol(), std::move(digest));
+  if (const auto cached = m_masterKeys.find(cacheKey); cached != m_masterKeys.end()) {
+    co_return KeyResult{.key = cached->second, .ec = {}};
+  }
+  // The password goes to the Deriver as a copy of its own, which wipes itself there.
+  co_return co_await deriveOnce(
+      self, m_derivingMasterKeys, cacheKey,
+      [protocol = secret.authProtocol(), password = Password(secret.password())](
+          net::ErrorCode& jobEc) { return passwordToKey(protocol, password.view(), jobEc); },
+      [this, cacheKey](const SecretOctets& key) {
+        // Counted once cached, so that a derivation whose caching threw counts for nothing.
+        m_masterKeys.emplace(cacheKey, key);
+        ++m_masterKeyDerivations;
+      });
 }
 
-const SecretOctets* Client::Impl::localizedKey(const detail::Secret& secret, const Octets& engineId,
-                                               net::ErrorCode& ec) {
-  const auto master = masterKey(secret, ec);
-  if (ec) return nullptr;
+net::Awaitable<Client::Impl::KeyResult> Client::Impl::localizedKey(Ref self, detail::Secret secret,
+                                                                   Octets engineId) {
+  auto master = co_await masterKey(self, secret);
+  if (master.ec) co_return master;
   // The user name is deliberately not part of the key: what the derivation consumes is the Master
   // Key, the protocols and the engineID, so two users sharing a password share a key.
-  auto cacheKey =
-      std::make_tuple(engineId, secret.authProtocol(), SecretOctets(master.begin(), master.end()),
-                      secret.privProtocol());
-  const auto it = m_keys.find(cacheKey);
-  if (it != m_keys.end()) return &it->second;
-  auto derived = detail::localizedKeyFor(secret, master, engineId, ec);
-  if (ec) return nullptr;
-  return &m_keys.emplace(std::move(cacheKey), std::move(derived)).first->second;
+  auto cacheKey = std::make_tuple(engineId, secret.authProtocol(), std::move(master.key),
+                                  secret.privProtocol());
+  if (const auto cached = m_keys.find(cacheKey); cached != m_keys.end()) {
+    co_return KeyResult{.key = cached->second, .ec = {}};
+  }
+  const auto& masterOctets = std::get<2>(cacheKey);
+
+  // Reeder's extension reruns password-to-key, but only where the Localized Key falls short of the
+  // privacy key; SHA-2's are long enough for AES-256, and no extension runs (ADR-0005).
+  const auto priv = secret.privProtocol();
+  const bool reeder = (priv == PrivProtocol::Aes192C || priv == PrivProtocol::Aes256C) &&
+                      keySize(secret.authProtocol()) < privKeySize(priv);
+  if (!reeder) {
+    net::ErrorCode ec;
+    auto localized = detail::localizedKeyFor(secret, masterOctets, engineId, ec);
+    if (ec) co_return KeyResult{.key = {}, .ec = ec};
+    // Cached only while the Engine is: the wait for the Master Key may have outlasted it, and a
+    // row for an Engine evicted meanwhile would never be evicted itself (threat model B2).
+    if (m_engines.contains(engineId)) m_keys.emplace(std::move(cacheKey), localized);
+    co_return KeyResult{.key = std::move(localized), .ec = {}};
+  }
+
+  co_return co_await deriveOnce(
+      self, m_derivingLocalizedKeys, cacheKey,
+      [auth = secret.authProtocol(), priv, master = masterOctets, engineId](net::ErrorCode& jobEc) {
+        return localizedPrivKey(auth, priv, master, engineId, jobEc);
+      },
+      [this, cacheKey](const SecretOctets& key) {
+        // As above: an Engine evicted while the Deriver worked gets no row back.
+        if (m_engines.contains(std::get<0>(cacheKey))) m_keys.emplace(cacheKey, key);
+        ++m_reederExtensions;
+      });
 }
 
-Client::Impl::LocalizedKeys Client::Impl::localizedKeys(const Credentials& creds,
-                                                        const Octets& engineId,
-                                                        net::ErrorCode& ec) {
-  ec = {};
+net::Awaitable<Client::Impl::LocalizedKeys> Client::Impl::localizedKeys(
+    Ref self,
+    const Credentials& creds,  // NOLINT(cppcoreguidelines-avoid-reference-coroutine-parameters)
+    Octets engineId) {
   LocalizedKeys keys;
   if (isAuthenticated(creds.level)) {
-    keys.auth = localizedKey(detail::Secret::auth(creds), engineId, ec);
-    if (ec) return {};
+    auto auth = co_await localizedKey(self, detail::Secret::auth(creds), engineId);
+    if (auth.ec) co_return LocalizedKeys{.auth = {}, .priv = {}, .ec = auth.ec};
+    keys.auth = std::move(auth.key);
   }
   if (isEncrypted(creds.level)) {
-    keys.priv = localizedKey(detail::Secret::priv(creds), engineId, ec);
-    if (ec) return {};
+    auto priv = co_await localizedKey(self, detail::Secret::priv(creds), std::move(engineId));
+    if (priv.ec) co_return LocalizedKeys{.auth = {}, .priv = {}, .ec = priv.ec};
+    keys.priv = std::move(priv.key);
   }
-  return keys;
+  co_return keys;
 }
 
 net::Awaitable<net::ErrorCode> Client::Impl::ensureEngine(Ref self, Target target,
@@ -1316,8 +1547,7 @@ net::Awaitable<net::ErrorCode> Client::Impl::ensureEngine(Ref self, Target targe
     // Discovery outlives any individual waiter": the discovery belongs to the Engine, not to
     // whichever request happened to arrive first, so cancelling that request must not cancel what
     // everyone else is queued behind. The Credentials are copied, not moved: this request reads
-    // their level after the wait. Reading it into a local first instead trips the spurious GCC 16
-    // -Wmismatched-new-delete described in transact.
+    // their level after the wait.
     net::asio::co_spawn(m_strand, runDiscovery(self, std::move(target), creds, discovery), rethrow);
   }
 
@@ -1349,8 +1579,7 @@ net::Awaitable<void> Client::Impl::runDiscovery(Ref self, Target target, Credent
     // if the request that asked for it has since been cancelled: like the first pass, it belongs to
     // the Engine (ADR-0003). The requests that needed only the engineID wait for it too, since one
     // timer wakes every waiter. That costs them its round trips, but only when the two levels meet
-    // one Engine at once. Spelled out through discovery->owedSync each time: binding a reference
-    // to it trips the spurious GCC 16 -Wmismatched-new-delete described in transact.
+    // one Engine at once.
     if (discovery->owedSync) {
       discovery->owedSync->ec = discovery->ec;
       if (!discovery->ec) {
@@ -1408,8 +1637,8 @@ net::Awaitable<net::ErrorCode> Client::Impl::discoverEngine(
   // pair we already synchronised stands and only the identity phase had to run again.
   if (engine.timeSynced) co_return net::ErrorCode{};
 
-  const auto [key, privKey] = localizedKeys(creds, engineId, ec);
-  if (ec) co_return ec;
+  auto keys = co_await localizedKeys(self, creds, engineId);
+  if (keys.ec) co_return keys.ec;
 
   const auto sync = std::make_shared<Pending>(co_await net::asio::this_coro::executor);
   sync->from = target.endpoint;
@@ -1417,8 +1646,8 @@ net::Awaitable<net::ErrorCode> Client::Impl::discoverEngine(
   sync->authRequired = true;
   sync->authProtocol = creds.authProtocol;
   sync->privProtocol = creds.privProtocol;
-  sync->authKey = *key;
-  if (privKey != nullptr) sync->privKey = *privKey;
+  sync->authKey = std::move(keys.auth);
+  sync->privKey = std::move(keys.priv);
   sync->engineId = engineId;
   sync->timeSyncPhase = true;
 
@@ -1538,10 +1767,14 @@ net::Awaitable<Client::RequestResult> Client::Impl::doRequestV3(Ref self, Target
     co_return RequestResult{make_error_code(Errc::UnsupportedAuthProtocol), Response{}};
   }
 
-  // Two attempts, never more. A Report that says "resynchronise and ask again" earns exactly one
-  // further try; an Engine that keeps saying it is an Engine we cannot talk to, and two
-  // implementations that disagree must not be able to trade messages forever.
-  for (int attempt = 0; attempt < 2; ++attempt) {
+  // A Report that says "resynchronise and ask again" earns exactly one further try; an Engine that
+  // keeps saying it is an Engine we cannot talk to, and two implementations that disagree must not
+  // be able to trade messages forever. Keys gone stale during a derivation earn one further try of
+  // their own, below. Neither spends the other's: the two are unrelated, and a request that asked
+  // again for new keys has not yet heard a single Report.
+  bool reportMayRetry = true;
+  bool staleKeysMayRetry = true;
+  for (;;) {
     net::ErrorCode ec = co_await ensureEngine(self, target, creds);
     if (ec) co_return RequestResult{ec, Response{}};
 
@@ -1550,14 +1783,23 @@ net::Awaitable<Client::RequestResult> Client::Impl::doRequestV3(Ref self, Target
     // which nothing on this strand does.
     if (engine == nullptr)
       co_return RequestResult{make_error_code(Errc::UnknownEngineId), Response{}};
+    const Octets engineId = engine->engineId;
+    auto keys = co_await localizedKeys(self, creds, engineId);
+    if (keys.ec) co_return RequestResult{keys.ec, Response{}};
+    // A wait for a derivation gives the strand time to forget the Engine, or to map the Target to
+    // another. The keys are then for an Engine no longer there, and the request asks again, of the
+    // Engine at the Target now. Once: an Agent naming a fresh engineID on every discovery must not
+    // keep a request deriving Reeder keys for ever.
+    engine = engineAt(target.endpoint);
+    if (engine == nullptr || engine->engineId != engineId) {
+      if (std::exchange(staleKeysMayRetry, false)) continue;
+      co_return RequestResult{make_error_code(Errc::UnknownEngineId), Response{}};
+    }
     const auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
                              std::chrono::steady_clock::now() - engine->at)
                              .count();
     const auto projected =
         std::min<std::int64_t>(static_cast<std::int64_t>(engine->time) + elapsed, timeCeiling);
-
-    const auto [key, privKey] = localizedKeys(creds, engine->engineId, ec);
-    if (ec) co_return RequestResult{ec, Response{}};
 
     V3Header header;
     header.level = creds.level;
@@ -1578,8 +1820,8 @@ net::Awaitable<Client::RequestResult> Client::Impl::doRequestV3(Ref self, Target
     pending->authRequired = isAuthenticated(creds.level);
     pending->authProtocol = creds.authProtocol;
     pending->privProtocol = creds.privProtocol;
-    if (key != nullptr) pending->authKey = *key;
-    if (privKey != nullptr) pending->privKey = *privKey;
+    pending->authKey = std::move(keys.auth);
+    pending->privKey = std::move(keys.priv);
     pending->engineId = engine->engineId;
     pending->baselineId = engine->baselineId;
 
@@ -1589,8 +1831,8 @@ net::Awaitable<Client::RequestResult> Client::Impl::doRequestV3(Ref self, Target
 
     if (pending->response.type == PduType::Report) {
       const auto cancelState = co_await net::asio::this_coro::cancellation_state;
-      const auto failure =
-          handleReport(target.endpoint, *pending, attempt == 0, cancelState.cancelled());
+      const auto failure = handleReport(
+          target.endpoint, *pending, std::exchange(reportMayRetry, false), cancelState.cancelled());
       if (!failure) continue;
       co_return RequestResult{*failure, Response{}};
     }
@@ -1600,9 +1842,6 @@ net::Awaitable<Client::RequestResult> Client::Impl::doRequestV3(Ref self, Target
     }
     co_return toResult(pending->response);
   }
-
-  // Unreachable: the second attempt never asks to retry, so the loop always returns from inside.
-  co_return RequestResult{make_error_code(Errc::UnexpectedReport), Response{}};
 }
 
 std::shared_ptr<Client::Impl::WalkTimeLimit> Client::Impl::armTimeLimit(
@@ -1758,6 +1997,10 @@ net::Awaitable<Client::CollectResult> Client::Impl::doWalkCollect(Ref self, Targ
 
 detail::CacheCounts detail::CacheView::counts(const Client& client) {
   return client.m_impl->cacheCounts();
+}
+
+void detail::DeriverView::occupy(Client& client, std::function<void()> job) {
+  client.m_impl->occupyDeriver(std::move(job));
 }
 
 std::size_t detail::MessageIdView::outstandingIds(const Client& client) {

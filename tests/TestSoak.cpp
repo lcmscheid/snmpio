@@ -106,7 +106,7 @@ Credentials credentialsFor(int slot) {
 }
 
 // The last v3 slot, an authPriv one, whose Clients are handed the passwords and derive both Master
-// Keys on their own strands, so that the soak takes that path too.
+// Keys on the Deriver, so that the soak takes that path too, held to the same bounds.
 constexpr int passwordSlot = clientSlots - 1;
 static_assert(isV3(passwordSlot));
 
@@ -468,14 +468,6 @@ bool isWalk(Operation op) {
   return op == Operation::Walk || op == Operation::WalkCollect;
 }
 
-// Whether the soak holds a request to how long it takes, as well as to its code. All but
-// passwordSlot's: a Client handed a password derives its Master Key on its strand, and under TSan a
-// terminal signal can queue behind that for longer than either bound -- threat model B7, until #80
-// moves the derivation off the strand and removes this.
-bool heldToTiming(const Request& r) {
-  return r.client.slot != passwordSlot;
-}
-
 // The request's own Subtree, which a Walk walks: soakRoot.b.i, as subtreeOf() reads it back.
 Oid subtreeFor(const Request& r, int index) {
   return soakRoot.child(static_cast<std::uint32_t>(r.behaviour))
@@ -752,8 +744,7 @@ class Soak {
     }
     // A terminal signal drops a request at once, whatever wait it is in (L2): one that ended long
     // after it was ignored or lost on its way to the strand, and waited out something else (#71).
-    if (record.terminal && heldToTiming(request) &&
-        record.completedAt - record.terminalAt > terminalLimit) {
+    if (record.terminal && record.completedAt - record.terminalAt > terminalLimit) {
       ADD_FAILURE() << context() << ": completed "
                     << std::chrono::duration_cast<milliseconds>(record.completedAt -
                                                                 record.terminalAt)
@@ -780,7 +771,7 @@ class Soak {
     // Every answer lands inside the first attempt's deadline, so one that took longer was lost
     // and retransmitted for -- a reply that overtook its send, say, which only several threads
     // running the io_context produce.
-    if (!code && heldToTiming(request) && !isWalk(request.operation) && took >= attemptTimeout) {
+    if (!code && !isWalk(request.operation) && took >= attemptTimeout) {
       ADD_FAILURE() << context() << ": answered only after "
                     << std::chrono::duration_cast<milliseconds>(took).count()
                     << " ms, past the first attempt's deadline";

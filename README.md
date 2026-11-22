@@ -78,10 +78,11 @@ auto varbinds = co_await client.asyncWalkCollect(
 ```
 
 A password costs a Master Key derivation, RFC 3414's deliberately expensive hash over a megabyte,
-and a Client does it on its own strand the first time it meets that password. It caches the
+and a Client does it the first time it meets that password, on the Deriver: one private thread per
+`io_context`, which its Clients share, as Asio's resolver keeps one for `getaddrinfo`. It caches the
 result, so one Client pays once per password however many Engines it polls, but every Client pays
-it, and on an I/O thread. To pay nothing there, derive the Master Key once, on a thread of your
-own, and hand it to every Client in place of the password:
+it, one after another on that thread. To pay nothing there, derive the Master Key once, on a thread
+of your own, and hand it to every Client in place of the password:
 
 ```cpp
 net::ErrorCode ec;
@@ -233,7 +234,7 @@ Why this shape and not the other two:
   caches, shared across every Target it polls. Clients do not share them, so an Engine reachable at
   two Targets is discovered twice, and each Client derives the Master Key for its own Credentials.
   Where several Targets front one Engine, poll them through one Client. Where one password serves
-  many Targets, each Client pays the derivation once, on its strand, unless the Credentials carry
+  many Targets, each Client pays the derivation once, on the Deriver, unless the Credentials carry
   the Master Key [derived once beforehand](#using-it), when none of them does. ADR-0003's
   amendments of 2026-10-24 and 2026-10-25 record this trade.
 - **Completion handlers run on the caller's executor** — the one bound to the token, or the
@@ -247,13 +248,13 @@ The soak, `Soak.ShapedLikeTheDeployment` in [`tests/TestSoak.cpp`](tests/TestSoa
 shape with eight Clients on an `io_context` run by four threads, half of them v2c and half v3, and
 callers on a second `io_context`. Three of the v3 Clients are handed Master Keys derived before it
 starts, as above; the fourth is handed the passwords, so that a Client's own derivation is soaked
-too. Four more threads initiate, cancel, stop and destroy Clients at moments its seed decides,
-against Agents that answer at once, late, never, twice, or after malformed datagrams. Every
-completion is checked to happen exactly once, on the caller's executor, with a code that what was
-done to the request allows, and, for either version, within half an attempt's deadline of a
-terminal cancellation and inside its first attempt when answered. The Client handed passwords is
-spared those two bounds until #80 moves its derivation off the strand. It runs for two seconds in
-every test run, under ASan and TSan in CI, and carries the `stress` label:
+too, on the Deriver rather than a strand. Four more threads initiate, cancel, stop and destroy
+Clients at moments its seed decides, against Agents that answer at once, late, never, twice, or
+after malformed datagrams. Every completion is checked to happen exactly once, on the caller's
+executor, with a code that what was done to the request allows, and, for either version, within half
+an attempt's deadline of a terminal cancellation and inside its first attempt when answered, the
+Client handed passwords included. It runs for two seconds in every test run, under ASan and TSan in
+CI, and carries the `stress` label:
 
 ```sh
 ctest --preset default -L stress                         # the soak alone

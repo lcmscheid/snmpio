@@ -66,6 +66,9 @@ owns transport and caches with no session type, is unchanged.
 
 ## Amendment, 2026-10-25: the key caches are keyed by Master Key, and the caller may supply one
 
+_Narrowed by the amendment "password-to-key runs on a private thread", below: no megabyte hash is
+left on the strand._
+
 The consequence above names the localized-key cache "(master key, engineID)". Until now it was
 keyed by the password the Master Key is derived from, so that a lookup never had to derive
 anything, and the Master Key itself was never kept: every new Engine paid the megabyte hash again.
@@ -111,3 +114,67 @@ A Target forgotten on an unsigned `unknownEngineIDs` Report is not unmapped: it 
 until it is rediscovered, but still holds its old one, so forgetting evicts nothing and the
 rediscovery can still evict what it replaces. The cache is still the Client's own and on its
 strand; nothing else in this ADR changes.
+
+## Amendment, 2026-11-19: password-to-key runs on a private thread
+
+The amendment of 2026-10-25 left two megabyte hashes on the strand: a password's Master Key, once
+per Client, and a Reeder privacy key's Key Extension, once per Engine. Everything else queued on
+the strand waited behind each (threat model B7). Both now run on a private thread, the Deriver, and
+nothing else does: a localising hash is short and stays where it was (#80).
+
+The precedent is Asio's own resolver. Its service runs the blocking `getaddrinfo` on a private
+thread that it starts on first use, and which every resolver of its kind on that `io_context`
+shares. The caller passes no executor for it and gets the completion on their own. Password-to-key
+is the same kind of work, blocking and occasional, so the Client takes no executor for it either.
+A constructor argument naming one was the alternative, and it can still be added without breaking
+anyone; no Asio I/O object asks for one today.
+
+The Deriver follows the resolver's shape too: an `execution_context` service, so one thread per
+context, shared by every Client on it, and started the first time one of them needs it. #80's triage
+asked for a thread per Client, joined at Stopping; this overrides both, for one reason. Destroying a
+context shuts its services down newest first, and each Client looks the Deriver up after its strand
+exists, so the Deriver joins its thread before the strand's service shuts down, as the resolver
+joins its own. A derivation that finishes meanwhile hands its result to a strand that is still
+there, and is destroyed with the rest. Services newer than the Deriver, the reactor's and the
+timers', may already have destroyed their own pending operations by then; what those hold co-owns
+the Client's state, as a derivation does, so nothing is freed from under either. A thread a Client
+owned cannot be joined there, since the Client's state can outlive the context: a derivation
+finishing after the context went would hand its result to freed memory. So `Client.hpp`'s rule for a
+context destroyed with work outstanding holds for a derivation in flight as it does for a pending
+timer. The derivation in progress at shutdown runs to its end, since a megabyte hash cannot be
+interrupted; those queued behind it are abandoned, as the resolver abandons the lookups queued
+behind its own.
+
+The caches stay the strand's. A derivation is spawned on the strand, hands the Deriver a job that
+owns copies of everything it reads -- the password, or the Master Key and engineID -- and resumes
+on the strand to write the cache. Nothing the strand owns is touched off it, so the Client's state
+gains no lock, and the two atomics of the amendments above are still its only state outside the
+strand. The Deriver's mutex, which guards the thread's start against Clients on other strands, is
+the context's and not any Client's.
+
+Derivations are single-flight per key, as Engine Discovery is per Target, and for the same reason:
+a derivation belongs to the key, not to the request that happened to need it first. Requests that
+need a key already being derived wait on that derivation, and cancelling one of them ends that
+request alone, with the rules for a request queued behind a discovery. A key derived for an Engine
+evicted meanwhile is handed to its waiters but not cached, so the eviction of 2026-11-03 still
+bounds the cache. The request that waited asks again, of the Engine now at its Target, once; that
+is not the retry a Report earns, and spends none of it. A derivation that throws is rethrown by
+each waiter and by the derivation itself, as a discovery's failure is, so it reaches `run()` even
+when no request is left waiting to hear it.
+
+The Deriver is one thread, so derivations of different keys queue one behind another on it, across
+every Client on the context. That is a cost the thread per Client did not have: with one Client per
+Target and each handed a password, each Client's first request waits behind the others' Master
+Keys, and a Reeder Target naming a fresh engineID on every discovery delays every Client's
+extensions behind its own, one per rediscovery, which the eviction of 2026-11-03 and the bounded
+retry above keep from growing without limit. Master Keys derived beforehand, as the README
+recommends, leave only the Reeder extensions to queue. It is the resolver's trade too, whose
+lookups queue behind one another across every resolver on the context. Each derivation is
+occasional, and a request queued behind them can still be cancelled or stopped at once, so a second
+thread would buy little.
+
+Stopping wakes every request waiting on a derivation with `ClientStopped` and does not wait for the
+derivation itself (ADR-0009: never for anything that has not already started, and a megabyte hash
+that has started may not finish soon enough). The derivation is not detached: it finishes against
+the shared state it co-owns, writes its result, and lets the state go. Neither Stopping nor the
+state going joins anything; the context's destruction does.

@@ -295,6 +295,50 @@ TEST(ClientExceptions, ADerivationThatThrowsWithNoRequestLeftWaitingStillSurface
   EXPECT_EQ(thrown, 1) << "the derivation's failure passed in silence";
 }
 
+// A derivation that throws before its first suspension still surfaces for the request that started
+// it (#93, as a discovery's does). co_spawn can run it inline that far, and the first derivation on
+// an io_context starts the Deriver's thread there, so one whose thread pool cannot be allocated
+// has settled, and woken nobody, before that request begins to wait on it. The pool is the size
+// failed: the first allocation of it on the Client's thread once the request is initiated, since
+// discovering with Master Keys derives nothing and so starts no Deriver. Without the fix the
+// derivation's own rethrow is heard and the request's never is: it waits out the deadline.
+TEST(ClientExceptions, ADerivationThatThrowsBeforeItSuspendsSurfacesForTheRequestThatStartedIt) {
+  if (!FailingAllocation::available()) GTEST_SKIP() << "this build cannot replace operator new";
+  net::IoContext agentIo;
+  ScriptedV3Agent agent(agentIo, credentials(), echoAnswer);
+  std::thread agentThread([&agentIo] { agentIo.run(); });
+
+  net::IoContext io;
+  Client client(io.get_executor());
+  discoverWithMasterKeys(io, client, agent);
+
+  int completions = 0;
+  int thrown = 0;
+  // Initiated before the failure is armed: initiation allocates something of the pool's size on
+  // this thread, and the derivation starts only once the strand runs the request.
+  client.asyncGet(longDeadlineTarget(agent), credentials(), {sysDescr},
+                  [&completions](net::ErrorCode, const Response&) { ++completions; });
+  {
+    const FailingAllocation failing(sizeof(net::ThreadPool));
+    const auto deadline = std::chrono::steady_clock::now() + longDeadline;
+    for (;;) {
+      try {
+        io.run_until(deadline);
+        break;
+      } catch (const std::bad_alloc&) {
+        // Once from the derivation and once from the request waiting on it; then nothing is left.
+        if (++thrown == 2) client.stop();
+      }
+    }
+    EXPECT_TRUE(failing.fired()) << "no allocation of the Deriver's pool's size was made";
+  }
+  net::asio::post(agentIo, [&agent] { agent.close(); });
+  agentThread.join();
+
+  EXPECT_EQ(thrown, 2) << "the request waiting on the derivation never heard it threw";
+  EXPECT_EQ(completions, 0) << "a request waiting on the derivation completed instead";
+}
+
 // The size of the one OCTET STRING the Agent below answers with, which the decoder copies into a
 // vector of exactly that many bytes. Odd, so nothing holding a pointer is this size, and nothing
 // else on the Client's thread is: the request it encodes is a few dozen bytes, and the receive

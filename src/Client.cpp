@@ -423,6 +423,8 @@ class Client::Impl {
     [[nodiscard]] net::ErrorCode outcomeFor(SecurityLevel level) const {
       return owesSyncTo(level) && owedSync ? owedSync->ec : ec;
     }
+    // Whether it is over, whichever way: finished with an ErrorCode, or threw.
+    [[nodiscard]] bool settled() const { return finished || failure; }
   };
 
   // Stopping's second half, on the strand: closes the sockets, which ends the receive loops, and
@@ -554,6 +556,8 @@ class Client::Impl {
     bool finished = false;
     // What the derivation threw, if it did: each waiter rethrows it, as Discovery's do.
     std::exception_ptr failure;
+    // Whether it is over, whichever way, as Discovery's settled().
+    [[nodiscard]] bool settled() const { return finished || failure; }
   };
   // What runs on the Deriver. It owns copies of everything it reads, so that nothing the strand
   // owns is touched off it (ADR-0003's amendment).
@@ -1418,8 +1422,13 @@ net::Awaitable<void> Client::Impl::runDerivation([[maybe_unused]] Ref self, Deri
 net::Awaitable<Client::Impl::KeyResult> Client::Impl::awaitDerivation(
     [[maybe_unused]] Ref self, std::shared_ptr<Derivation> derivation) {
   co_await net::asio::this_coro::throw_if_cancelled(false);
-  [[maybe_unused]] net::ErrorCode waitEc;
-  co_await derivation->done.async_wait(redirect_error(use_awaitable, waitEc));
+  // Not if it has already settled, as ensureEngine's wait: co_spawn may run it inline as far as its
+  // first suspension, and the first derivation on an io_context starts the Deriver's thread before
+  // that. One that throws there has settled and woken nobody by the time this request gets here.
+  if (!derivation->settled()) {
+    [[maybe_unused]] net::ErrorCode waitEc;
+    co_await derivation->done.async_wait(redirect_error(use_awaitable, waitEc));
+  }
   if (derivation->failure) std::rethrow_exception(derivation->failure);
   if (m_stopping) co_return KeyResult{.key = {}, .ec = make_error_code(Errc::ClientStopped)};
   const auto cancelled = co_await net::asio::this_coro::cancellation_state;
@@ -1552,8 +1561,14 @@ net::Awaitable<net::ErrorCode> Client::Impl::ensureEngine(Ref self, Target targe
   }
 
   co_await net::asio::this_coro::throw_if_cancelled(false);
-  [[maybe_unused]] net::ErrorCode waitEc;
-  co_await discovery->done.async_wait(redirect_error(use_awaitable, waitEc));
+  // Not if it has already settled: co_spawn may run it inline as far as its first suspension, and
+  // one that fails before that -- before it sends anything -- has settled and woken nobody by the
+  // time this request gets here. Its timer is cancelled already, and nothing would cancel it again
+  // (#93).
+  if (!discovery->settled()) {
+    [[maybe_unused]] net::ErrorCode waitEc;
+    co_await discovery->done.async_wait(redirect_error(use_awaitable, waitEc));
+  }
   // Ahead of Stopping: an exception is a bug or bad_alloc, and the louder of the two answers.
   if (discovery->failure) std::rethrow_exception(discovery->failure);
   if (m_stopping) co_return make_error_code(Errc::ClientStopped);

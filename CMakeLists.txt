@@ -61,11 +61,12 @@ endif()
 # <boost/asio/version.hpp> under Boost, ASIO_VERSION and <asio/version.hpp> standalone -- and the
 # sanitizer builds below name both.
 # The minimum versions are stated once: snmpioConfig.cmake asks a consumer's find_dependency() for
-# the same ones, so an installed package never accepts a dependency this build would have refused.
+# the same ones, so an installed package never accepts a dependency version this build would have
+# refused. A bare standalone Asio header tree has no version to check on either side.
 set(SNMPIO_BOOST_MIN_VERSION 1.77)
 set(SNMPIO_ASIO_MIN_VERSION 1.21)
 set(SNMPIO_OPENSSL_MIN_VERSION 3.0)
-set(SNMPIO_ASIO_HAS_PACKAGE OFF)
+set(SNMPIO_ASIO_FROM_PACKAGE OFF)
 if(SNMP_USE_BOOST_ASIO)
   set(SNMPIO_ASIO_MACRO_PREFIX BOOST_ASIO)
   set(SNMPIO_ASIO_HEADER_PREFIX boost/asio)
@@ -97,7 +98,7 @@ else()
   find_package(asio ${SNMPIO_ASIO_MIN_VERSION} QUIET CONFIG)
   if(asio_FOUND)
     set(SNMPIO_ASIO_TARGET asio::asio)
-    set(SNMPIO_ASIO_HAS_PACKAGE ON)
+    set(SNMPIO_ASIO_FROM_PACKAGE ON)
   else()
     find_path(SNMPIO_ASIO_INCLUDE_DIR asio.hpp)
     if(NOT SNMPIO_ASIO_INCLUDE_DIR)
@@ -141,19 +142,23 @@ set(SNMPIO_SOURCES
   ${CMAKE_CURRENT_SOURCE_DIR}/src/Value.cpp)
 
 # What a target compiling SNMPIO_SOURCES needs: the headers, the Asio flavour (ADR-0002), threads,
-# OpenSSL and C++20. Its inputs are this file's SNMP_USE_BOOST_ASIO, SNMPIO_ASIO_TARGET and
-# SNMPIO_ASIO_INCLUDE_DIRS, read from the caller's scope as CMake functions do. CMake has no
-# private functions, so a project that add_subdirectory()s snmpio sees this one too; the snmpio_
-# prefix is its namespace.
+# OpenSSL and C++20. It reads SNMP_USE_BOOST_ASIO, SNMPIO_ASIO_TARGET, SNMPIO_ASIO_INCLUDE_DIRS and
+# GNUInstallDirs' CMAKE_INSTALL_INCLUDEDIR from the caller's scope, as CMake functions do, so it is
+# for this directory and its children (fuzz/); a project that add_subdirectory()s snmpio sees the
+# function, since CMake has none private -- the snmpio_ prefix is its namespace -- but not the
+# variables, and links snmpio::snmpio instead.
 #
-# The Asio flavour and threads are PUBLIC: Asio types appear in public signatures, and Asio needs
-# the thread library wherever its headers are compiled, so whatever links the target has to be
-# built the same way. OpenSSL is PRIVATE: no public header names an OpenSSL type. Consumers still
-# need the package found, which is why snmpioConfig.cmake finds it -- a static archive carries its
-# private links to the linker. The header directory is CMAKE_CURRENT_FUNCTION_LIST_DIR's, this
-# file's, so a call from fuzz/, or from a project that add_subdirectory()s snmpio, finds the same
-# one. The Asio include directory, when the find_path() fallback under Dependencies supplied one,
-# is BUILD_INTERFACE only: it is this machine's path, which the installed snmpio must not carry.
+# The Asio flavour is PUBLIC: Asio types appear in public signatures, so whatever links the target
+# has to be built against the same flavour. Threads are PUBLIC because Asio's headers, compiled in
+# whatever includes ours, need the thread library at link time. OpenSSL is PRIVATE: no public
+# header names an OpenSSL type. Consumers still need the package found, which is why
+# snmpioConfig.cmake finds it -- a static archive carries its private links to the linker.
+#
+# The header directory is the directory of this file (CMAKE_CURRENT_FUNCTION_LIST_DIR), not the
+# caller's, so fuzz/ finds the same one. The Asio include directory, when the find_path() fallback
+# under Dependencies supplied one, is BUILD_INTERFACE only: it is this machine's path, which the
+# installed snmpio must not carry. snmpio_fuzzed is never installed, so for it the wrapper changes
+# nothing.
 function(snmpio_configure_library target)
   target_include_directories(${target}
     PUBLIC

@@ -1601,6 +1601,68 @@ TEST(ClientV3, ARequestWhoseAlgorithmsWillNotFetchIsRefusedAsItIsInitiated) {
   });
 }
 
+// An Engine Discovery that fails before it sends anything fails the request that started it, once,
+// with the discovery's error (#93). co_spawn can run the discovery inline up to its first
+// suspension, so one that fails before any finishes before that request has begun to wait on it.
+// Reached here through the Message ID generator's keying: with fetching refused, AES-128-ECB will
+// not fetch as the Client is constructed or at the discovery's first draw, so that draw fails with
+// CryptoFailure. Run where nothing has been fetched (expectInFreshProcess), since a fetch that
+// succeeded is held for the process's life. Bounded by a deadline: the bug was a wait nobody ends.
+// A second request, with fetching allowed again, goes through: the failed discovery left nothing
+// registered for it to queue behind. Both are judged by CompletionOracle once the Client has
+// stopped and the io_context drained, so a late second completion of the first counts too. Not on
+// Fixture, whose Client is constructed, and keyed, before fetching can be refused.
+TEST(ClientV3, ADiscoveryThatFailsBeforeItSendsFailsTheRequestThatStartedIt) {
+  test::expectInFreshProcess([]() -> std::string {
+    // OpenSSL's CSPRNG fetches its generator on a thread's first draw, so it is drawn from here,
+    // before the refusal, for only the Message ID keying to be refused (as in
+    // ARequestFetchesItsAlgorithmsAsItIsInitiated).
+    std::array<unsigned char, 16> firstDraw{};
+    if (RAND_bytes(firstDraw.data(), static_cast<int>(firstDraw.size())) != 1) return "RAND_bytes";
+    const auto creds = credentials(AuthProtocol::None, SecurityLevel::NoAuthNoPriv);
+
+    net::IoContext io;
+    ScriptedV3Agent agent(io, creds, echoAnswer);
+    std::optional<test::RefusedFetches> refused;
+    refused.emplace();
+    if (!refused->refusing()) return "fetching was not refused";
+    Client client(io.get_executor());
+
+    test::CompletionOracle first(io);
+    bool firstDone = false;
+    client.asyncGet(
+        targetFor(agent), creds, {sysDescr},
+        first.handler([&firstDone](net::ErrorCode, const Response&) { firstDone = true; }));
+    while (!firstDone && io.run_one_for(test::longDeadline) != 0) {
+    }
+    refused.reset();
+    std::string wrong;
+    if (agent.requestsSeen() != 0) wrong += "something was sent\n";
+
+    io.restart();
+    test::CompletionOracle later(io);
+    client.asyncGet(targetFor(agent), creds, {sysDescr},
+                    later.handler([&](net::ErrorCode, const Response&) {
+                      client.stop();
+                      agent.close();
+                    }));
+    io.run_for(test::longDeadline);
+    // Again, for a request still out. One stranded on a wait nobody ends, as #93's was, keeps its
+    // handler, and the oracles report the completion missing.
+    client.stop();
+    agent.close();
+    io.run_for(test::longDeadline);
+
+    if (const auto r = first.completedExactlyOnce({make_error_code(Errc::CryptoFailure)}); !r) {
+      wrong += std::string("refused: ") + r.message() + "\n";
+    }
+    if (const auto r = later.completedExactlyOnce({net::ErrorCode{}}); !r) {
+      wrong += std::string("fetching: ") + r.message() + "\n";
+    }
+    return wrong;
+  });
+}
+
 // The ScopedPDU is what privacy hides, so nothing above the wire may recognise the OID that went
 // out. Read off the datagram rather than inferred from the flags.
 TEST(ClientV3, AuthPrivPutsNothingReadableOnTheWire) {

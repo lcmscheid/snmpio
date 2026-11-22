@@ -295,6 +295,80 @@ TEST(ClientExceptions, ADerivationThatThrowsWithNoRequestLeftWaitingStillSurface
   EXPECT_EQ(thrown, 1) << "the derivation's failure passed in silence";
 }
 
+// The size of an allocation to fail for a thread pool not to start, found by starting one here
+// rather than assumed, since which of a pool's allocations reach operator new, and at what size,
+// varies with the Asio version: 1.38 allocates the pool itself in 56 bytes but its scheduler
+// elsewhere, while 1.28 allocates the pool in 32 bytes, which the Client's digest key shares, and
+// its scheduler through operator new too. The larger of the two that does fail it, being the less
+// likely to be shared; zero if neither does.
+std::size_t threadPoolStartSize() {
+  for (const std::size_t size : {sizeof(net::asio::detail::scheduler), sizeof(net::ThreadPool)}) {
+    const FailingAllocation failing(size);
+    try {
+      const auto pool = std::make_unique<net::ThreadPool>(1);
+    } catch (const std::bad_alloc&) {
+      return size;
+    }
+  }
+  return 0;
+}
+
+// A derivation that throws before its first suspension still surfaces for the request that started
+// it (#93, as a discovery's does). co_spawn can run it inline that far, and the first derivation on
+// an io_context starts the Deriver there, so one whose Deriver cannot be started has settled, and
+// woken nobody, before that request begins to wait on it. Without the fix the derivation's own
+// rethrow is heard and the request's never is: it waits out the deadline.
+//
+// Failed at an allocation that starts the Deriver, the first of its size on the Client's thread
+// once the request is initiated (threadPoolStartSize). Discovering with Master Keys derives
+// nothing, so nothing has started it before. The size holds pointers, so it is not one nothing
+// else allocates; FailingAllocation.hpp asks for a check rather than an assumption, so the Deriver
+// is checked to be unstarted afterwards. A failure on the request's own path throws
+// once, not twice, and one as the key is cached comes after a started Deriver handed it back, so
+// either fails a check below rather than passing. Between the derivation's spawn and the start
+// nothing else allocates through operator new: its job moves into a coroutine frame, which Asio
+// takes from aligned_alloc (FailingAllocation.hpp).
+TEST(ClientExceptions, ADerivationThatThrowsBeforeItSuspendsSurfacesForTheRequestThatStartedIt) {
+  if (!FailingAllocation::available()) GTEST_SKIP() << "this build cannot replace operator new";
+  const std::size_t startSize = threadPoolStartSize();
+  ASSERT_NE(startSize, 0U) << "no allocation a thread pool's start makes could be failed";
+  net::IoContext agentIo;
+  ScriptedV3Agent agent(agentIo, credentials(), echoAnswer);
+  std::thread agentThread([&agentIo] { agentIo.run(); });
+
+  net::IoContext io;
+  Client client(io.get_executor());
+  discoverWithMasterKeys(io, client, agent);
+  ASSERT_FALSE(detail::DeriverView::started(client)) << "discovering with Master Keys derived";
+
+  int completions = 0;
+  int thrown = 0;
+  // Initiated before the failure is armed: initiation can allocate something of the same size on
+  // this thread (on Asio 1.38 it does), and the derivation starts only once the strand runs it.
+  client.asyncGet(longDeadlineTarget(agent), credentials(), {sysDescr},
+                  [&completions](net::ErrorCode, const Response&) { ++completions; });
+  {
+    const FailingAllocation failing(startSize);
+    const auto deadline = std::chrono::steady_clock::now() + longDeadline;
+    for (;;) {
+      try {
+        io.run_until(deadline);
+        break;
+      } catch (const std::bad_alloc&) {
+        // Once from the derivation and once from the request waiting on it; then nothing is left.
+        if (++thrown == 2) client.stop();
+      }
+    }
+    EXPECT_TRUE(failing.fired()) << "no allocation of the size that starts the Deriver was made";
+  }
+  EXPECT_FALSE(detail::DeriverView::started(client)) << "what failed was not the Deriver starting";
+  net::asio::post(agentIo, [&agent] { agent.close(); });
+  agentThread.join();
+
+  EXPECT_EQ(thrown, 2) << "the request waiting on the derivation never heard it threw";
+  EXPECT_EQ(completions, 0) << "a request waiting on the derivation completed instead";
+}
+
 // The size of the one OCTET STRING the Agent below answers with, which the decoder copies into a
 // vector of exactly that many bytes. Odd, so nothing holding a pointer is this size, and nothing
 // else on the Client's thread is: the request it encodes is a few dozen bytes, and the receive

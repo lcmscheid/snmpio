@@ -284,6 +284,7 @@ class Client::Impl {
   void occupyDeriver(std::function<void()> job) {
     net::asio::post(m_deriver.executor(), std::move(job));
   }
+  [[nodiscard]] bool deriverStarted() const { return m_deriver.started(); }
 
   // detail::MessageIdView's, and only safe where it says.
   [[nodiscard]] std::size_t outstandingIds() const noexcept { return m_pending.size(); }
@@ -385,18 +386,40 @@ class Client::Impl {
     BaselineId baselineId{};
   };
 
-  // A discovery in flight. The timer is an event, not a deadline: waiters park on it and the
-  // discovering coroutine cancels it to wake them all. Same trick as Pending's.
-  struct Discovery {
-    explicit Discovery(const net::Executor& ex) : done(ex) {}
+  // Work that many requests wait on and that outlives any one of them (ADR-0003): an Engine
+  // Discovery, or a password-to-key derivation. The coroutine doing it sets `finished` or
+  // `failure`, then wakes every waiter at once by cancelling `done`, a timer used as an event
+  // rather than a deadline -- the same trick as Pending's. Stopping wakes them too, unsettled.
+  struct SharedWork {
+    explicit SharedWork(const net::Executor& ex) : done(ex) {
+      done.expires_at(std::chrono::steady_clock::time_point::max());
+    }
+    // Waited on through wait() and woken through wake(), never directly.
     net::SteadyTimer done;
-    net::ErrorCode ec;
+    // It ran to its end, whatever its outcome says.
     bool finished = false;
+    // What it threw, if it did: each waiter rethrows it, so that every request it was serving
+    // leaves run() the way the work itself does, rather than waiting forever.
+    std::exception_ptr failure;
+
+    // Whether it is over, whichever way: finished, or threw.
+    [[nodiscard]] bool settled() const { return finished || failure; }
+    // Parks until it settles or Stopping wakes its waiters, then rethrows what it threw. Not at all
+    // if it has already settled: co_spawn may run it inline as far as its first suspension, and
+    // work that settles before that has woken nobody by the time the request that started it gets
+    // here. Its timer is cancelled already, and nothing would cancel it again (#93). The rethrow
+    // comes first because an exception is a bug or bad_alloc, the loudest answer there is.
+    net::Awaitable<void> wait();
+    // Wakes every waiter, settled or not.
+    void wake() { done.cancel(); }
+  };
+
+  // A discovery in flight.
+  struct Discovery : SharedWork {
+    using SharedWork::SharedWork;
+    net::ErrorCode ec;
     // Whether it runs the time-sync phase: it does when the request that started it authenticates.
     bool synchronises = false;
-    // What the discovery threw, if it did: each waiter rethrows it, so that every request it was
-    // serving leaves run() the way the discovery itself does, rather than waiting forever.
-    std::exception_ptr failure;
 
     // The time-sync phase a discovery that does not synchronise owes the requests queued behind it
     // that authenticate: its identity phase records only an unsigned pair, which they may not
@@ -542,18 +565,11 @@ class Client::Impl {
   };
 
   // A password-to-key in flight on the Deriver, single-flight per key: the first request to need
-  // the key starts it, and every other waits on it rather than starting its own. The timer is an
-  // event, as Discovery's is: waiters park on it and runDerivation cancels it to wake them all.
-  // Like a discovery, it outlives any individual waiter, so cancelling one never cancels it.
-  struct Derivation {
-    explicit Derivation(const net::Executor& ex) : done(ex) {
-      done.expires_at(std::chrono::steady_clock::time_point::max());
-    }
-    net::SteadyTimer done;
+  // the key starts it, and every other waits on it rather than starting its own. Like a discovery,
+  // it outlives any individual waiter, so cancelling one never cancels it.
+  struct Derivation : SharedWork {
+    using SharedWork::SharedWork;
     KeyResult result;
-    bool finished = false;
-    // What the derivation threw, if it did: each waiter rethrows it, as Discovery's do.
-    std::exception_ptr failure;
   };
   // What runs on the Deriver. It owns copies of everything it reads, so that nothing the strand
   // owns is touched off it (ADR-0003's amendment).
@@ -814,10 +830,10 @@ void Client::Impl::finishStopping() {
   if (m_v6) std::ignore = m_v6->close(ignored);
   for (auto& [id, pending] : m_pending) pending->timer.cancel();
   // Anything parked on a discovery is waiting on a reply that will now never come.
-  for (auto& [endpoint, discovery] : m_discovering) discovery->done.cancel();
+  for (auto& [endpoint, discovery] : m_discovering) discovery->wake();
   // And on a derivation, which carries on to the end (ADR-0009): only its waiters are woken.
-  for (auto& [id, derivation] : m_derivingMasterKeys) derivation->done.cancel();
-  for (auto& [id, derivation] : m_derivingLocalizedKeys) derivation->done.cancel();
+  for (auto& [id, derivation] : m_derivingMasterKeys) derivation->wake();
+  for (auto& [id, derivation] : m_derivingLocalizedKeys) derivation->wake();
 }
 
 std::vector<Varbind> Client::toVarbinds(std::vector<Oid> oids) {
@@ -1409,18 +1425,31 @@ net::Awaitable<void> Client::Impl::runDerivation([[maybe_unused]] Ref self, Deri
   } catch (...) {
     if (!derivation->failure) derivation->failure = std::current_exception();
   }
-  derivation->done.cancel();
+  derivation->wake();
   // Rethrown from here as well as by each waiter, as a discovery's is (L7): with every waiter
   // cancelled or stopped, this is the only place it is heard.
   if (derivation->failure) std::rethrow_exception(derivation->failure);
 }
 
+net::Awaitable<void> Client::Impl::SharedWork::wait() {
+  // Changes nothing: every entry point has already turned throwing off, in
+  // observeBothCancellationTypes, so a request cancelled while it waits is woken rather than thrown
+  // out. Restated as the first co_await only for clang-analyzer, which analyses this coroutine on
+  // its own and otherwise follows the timer's async_wait into Asio with a resume context it never
+  // saw set, and reports a null dereference that cannot happen (core.NullDereference).
+  co_await net::asio::this_coro::throw_if_cancelled(false);
+  if (!settled()) {
+    [[maybe_unused]] net::ErrorCode waitEc;
+    co_await done.async_wait(redirect_error(use_awaitable, waitEc));
+  }
+  if (failure) std::rethrow_exception(failure);
+}
+
 net::Awaitable<Client::Impl::KeyResult> Client::Impl::awaitDerivation(
     [[maybe_unused]] Ref self, std::shared_ptr<Derivation> derivation) {
-  co_await net::asio::this_coro::throw_if_cancelled(false);
-  [[maybe_unused]] net::ErrorCode waitEc;
-  co_await derivation->done.async_wait(redirect_error(use_awaitable, waitEc));
-  if (derivation->failure) std::rethrow_exception(derivation->failure);
+  // The first derivation on an io_context starts the Deriver before it first suspends, so one that
+  // cannot start it has settled by now: wait() returns at once, and rethrows.
+  co_await derivation->wait();
   if (m_stopping) co_return KeyResult{.key = {}, .ec = make_error_code(Errc::ClientStopped)};
   const auto cancelled = co_await net::asio::this_coro::cancellation_state;
   if (cancelled.cancelled() != net::asio::cancellation_type::none || !derivation->finished) {
@@ -1539,9 +1568,6 @@ net::Awaitable<net::ErrorCode> Client::Impl::ensureEngine(Ref self, Target targe
   } else {
     discovery = std::make_shared<Discovery>(m_strand);
     discovery->synchronises = isAuthenticated(creds.level);
-    // A timer used as an event rather than a deadline: it never expires on its own, and cancelling
-    // it is how every waiter is woken at once.
-    discovery->done.expires_at(std::chrono::steady_clock::time_point::max());
     m_discovering.emplace(target.endpoint, discovery);
     // Spawned on its own rather than awaited, and this is the point of ADR-0003's "Engine
     // Discovery outlives any individual waiter": the discovery belongs to the Engine, not to
@@ -1551,11 +1577,9 @@ net::Awaitable<net::ErrorCode> Client::Impl::ensureEngine(Ref self, Target targe
     net::asio::co_spawn(m_strand, runDiscovery(self, std::move(target), creds, discovery), rethrow);
   }
 
-  co_await net::asio::this_coro::throw_if_cancelled(false);
-  [[maybe_unused]] net::ErrorCode waitEc;
-  co_await discovery->done.async_wait(redirect_error(use_awaitable, waitEc));
-  // Ahead of Stopping: an exception is a bug or bad_alloc, and the louder of the two answers.
-  if (discovery->failure) std::rethrow_exception(discovery->failure);
+  // A discovery that fails before it sends anything has settled by now, and wait() returns at
+  // once. Its rethrow comes ahead of Stopping, the louder of the two answers.
+  co_await discovery->wait();
   if (m_stopping) co_return make_error_code(Errc::ClientStopped);
   // The same rule as transact's, in the other wait a request can be in: either cancellation type
   // ends this request. Asked, rather than inferred from an unfinished discovery, because a signal
@@ -1594,7 +1618,7 @@ net::Awaitable<void> Client::Impl::runDiscovery(Ref self, Target target, Credent
   // On both paths: a discovery that threw must not stay registered, or every later request to
   // this Target would queue behind one that will never finish.
   m_discovering.erase(endpoint);
-  discovery->done.cancel();
+  discovery->wake();
   if (discovery->failure) std::rethrow_exception(discovery->failure);
 }
 
@@ -2001,6 +2025,10 @@ detail::CacheCounts detail::CacheView::counts(const Client& client) {
 
 void detail::DeriverView::occupy(Client& client, std::function<void()> job) {
   client.m_impl->occupyDeriver(std::move(job));
+}
+
+bool detail::DeriverView::started(const Client& client) {
+  return client.m_impl->deriverStarted();
 }
 
 std::size_t detail::MessageIdView::outstandingIds(const Client& client) {

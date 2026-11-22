@@ -40,6 +40,12 @@ class Deriver : public net::asio::execution_context::service {
     return m_pool->get_executor();
   }
 
+  // Whether executor() has started the thread yet. For detail::DeriverView.
+  [[nodiscard]] bool started() const {
+    const std::scoped_lock lock(m_mutex);
+    return m_pool != nullptr;
+  }
+
  private:
   // The context's shutdown, ahead of any handler of its being destroyed. The derivation in progress
   // runs to its end, since a megabyte hash cannot be interrupted; those queued behind it are
@@ -57,7 +63,7 @@ class Deriver : public net::asio::execution_context::service {
     pool->join();
   }
 
-  std::mutex m_mutex;
+  mutable std::mutex m_mutex;
   std::unique_ptr<net::ThreadPool> m_pool;
 };
 

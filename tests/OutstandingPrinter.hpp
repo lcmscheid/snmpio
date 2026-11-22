@@ -1,5 +1,5 @@
-#ifndef SNMPIO_TESTS_OUTSTANDING_HPP
-#define SNMPIO_TESTS_OUTSTANDING_HPP
+#ifndef SNMPIO_TESTS_OUTSTANDINGPRINTER_HPP
+#define SNMPIO_TESTS_OUTSTANDINGPRINTER_HPP
 
 #include <ostream>
 
@@ -16,4 +16,4 @@ inline void PrintTo(const OutstandingCounts& counts, std::ostream* os) {
 
 }  // namespace snmpio::detail
 
-#endif  // SNMPIO_TESTS_OUTSTANDING_HPP
+#endif  // SNMPIO_TESTS_OUTSTANDINGPRINTER_HPP

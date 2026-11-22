@@ -10,7 +10,7 @@
 
 #include "Deadlines.hpp"
 #include "DeriverHold.hpp"
-#include "Outstanding.hpp"
+#include "OutstandingPrinter.hpp"
 #include "ScriptedAgent.hpp"
 #include "ScriptedV3Agent.hpp"
 
@@ -54,8 +54,13 @@ struct Fixture {
   int expected = 1;
   int completions = 0;
 
+  // Read at the last completion, before stop(), so that what it says settled on its own rather
+  // than being cleared by Stopping.
+  std::optional<OutstandingCounts> heldAtTheEnd;
+
   void completed() {
     if (++completions < expected) return;
+    heldAtTheEnd = OutstandingView::counts(client);
     client.stop();
     closeAgent();
   }
@@ -70,6 +75,8 @@ struct Fixture {
   void run() {
     io.run();
     EXPECT_EQ(completions, expected) << "a request never completed";
+    ASSERT_TRUE(heldAtTheEnd.has_value());
+    EXPECT_EQ(*heldAtTheEnd, OutstandingCounts{}) << "still held at the last completion";
   }
 };
 
@@ -87,7 +94,6 @@ TEST(Outstanding, AnExchangeAwaitingAReplyIsHeldUntilItIsAnswered) {
 
   ASSERT_TRUE(whileAsked.has_value());
   EXPECT_EQ(*whileAsked, (OutstandingCounts{.exchanges = 1}));
-  EXPECT_EQ(OutstandingView::counts(f.client), OutstandingCounts{});
 }
 
 // One exchange however many Message IDs it has been sent under: a retransmission maps a second.
@@ -111,7 +117,6 @@ TEST(Outstanding, ARetransmittedExchangeIsStillOne) {
 
   ASSERT_TRUE(atRetransmission.has_value());
   EXPECT_EQ(*atRetransmission, (OutstandingCounts{.exchanges = 1}));
-  EXPECT_EQ(OutstandingView::counts(f.client), OutstandingCounts{});
 }
 
 // Two requests to an undiscovered Engine queue behind one Engine Discovery, as its waiters; the
@@ -133,7 +138,6 @@ TEST(Outstanding, RequestsQueuedBehindADiscoveryAreItsWaiters) {
 
   ASSERT_TRUE(atIdentityPhase.has_value());
   EXPECT_EQ(*atIdentityPhase, (OutstandingCounts{.exchanges = 1, .discoveries = 1, .waiters = 2}));
-  EXPECT_EQ(OutstandingView::counts(f.client), OutstandingCounts{});
 }
 
 // With the Deriver held, the discovery gets past its identity phase and then parks on the Master
@@ -156,7 +160,6 @@ TEST(Outstanding, ADiscoveryWaitingOnADerivationIsOneOfItsWaiters) {
 
   ASSERT_TRUE(whileHeld.has_value());
   EXPECT_EQ(*whileHeld, (OutstandingCounts{.discoveries = 1, .derivations = 1, .waiters = 3}));
-  EXPECT_EQ(OutstandingView::counts(f.client), OutstandingCounts{});
 }
 
 // A request cancelled out of a discovery leaves at once, and stops being its waiter; the discovery
@@ -188,7 +191,6 @@ TEST(Outstanding, ARequestCancelledOutOfADiscoveryStopsWaitingOnIt) {
 
   ASSERT_TRUE(afterCancel.has_value());
   EXPECT_EQ(*afterCancel, (OutstandingCounts{.discoveries = 1, .derivations = 1, .waiters = 2}));
-  EXPECT_EQ(OutstandingView::counts(f.client), OutstandingCounts{});
 }
 
 }  // namespace

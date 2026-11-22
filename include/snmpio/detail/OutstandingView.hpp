@@ -24,9 +24,6 @@ struct OutstandingCounts {
   // waited on until it resumes, so this can stay above zero after the work itself has gone.
   std::size_t waiters = 0;
 
-  [[nodiscard]] bool none() const noexcept {
-    return exchanges == 0 && discoveries == 0 && derivations == 0 && waiters == 0;
-  }
   friend bool operator==(const OutstandingCounts&, const OutstandingCounts&) = default;
 };
 

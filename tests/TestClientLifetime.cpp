@@ -23,7 +23,7 @@
 #include "AfterHops.hpp"
 #include "CompletionOracle.hpp"
 #include "Deadlines.hpp"
-#include "Outstanding.hpp"
+#include "OutstandingPrinter.hpp"
 #include "ScriptedAgent.hpp"
 #include "ScriptedV3Agent.hpp"
 

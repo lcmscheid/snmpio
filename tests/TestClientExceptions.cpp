@@ -305,9 +305,11 @@ TEST(ClientExceptions, ADerivationThatThrowsWithNoRequestLeftWaitingStillSurface
 // once the request is initiated. Discovering with Master Keys derives nothing, so nothing has
 // started it before. The size holds pointers, so it is not one nothing else allocates, and request
 // initiation does allocate it; FailingAllocation.hpp asks for a check rather than an assumption,
-// so the Deriver is checked to be unstarted afterwards. A failure that landed anywhere else -- the
-// request's own path, or the key being cached once a started Deriver handed it back -- fails one of
-// the checks below rather than passing.
+// so the Deriver is checked to be unstarted afterwards. A failure on the request's own path throws
+// once, not twice, and one as the key is cached comes after a started Deriver handed it back, so
+// either fails a check below rather than passing. Between the derivation's spawn and the start
+// nothing else allocates through operator new: its job moves into a coroutine frame, which Asio
+// takes from aligned_alloc (FailingAllocation.hpp).
 TEST(ClientExceptions, ADerivationThatThrowsBeforeItSuspendsSurfacesForTheRequestThatStartedIt) {
   if (!FailingAllocation::available()) GTEST_SKIP() << "this build cannot replace operator new";
   net::IoContext agentIo;

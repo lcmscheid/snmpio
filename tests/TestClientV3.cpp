@@ -1617,10 +1617,8 @@ TEST(ClientV3, ADiscoveryThatFailsBeforeItSendsFailsTheRequestThatStartedIt) {
     // OpenSSL's CSPRNG fetches its generator on a thread's first draw, so it is drawn from here,
     // before the refusal, for only the Message ID keying to be refused (as in
     // ARequestFetchesItsAlgorithmsAsItIsInitiated).
-    std::array<unsigned char, 16> csprngPrimed{};
-    if (RAND_bytes(csprngPrimed.data(), static_cast<int>(csprngPrimed.size())) != 1) {
-      return "RAND_bytes";
-    }
+    std::array<unsigned char, 16> firstDraw{};
+    if (RAND_bytes(firstDraw.data(), static_cast<int>(firstDraw.size())) != 1) return "RAND_bytes";
     const auto creds = credentials(AuthProtocol::None, SecurityLevel::NoAuthNoPriv);
 
     net::IoContext io;
@@ -1649,7 +1647,8 @@ TEST(ClientV3, ADiscoveryThatFailsBeforeItSendsFailsTheRequestThatStartedIt) {
                       agent.close();
                     }));
     io.run_for(test::longDeadline);
-    // Again, for a request still out: stopping forces its handler out, for the oracles to report.
+    // Again, for a request still out. One stranded on a wait nobody ends, as #93's was, keeps its
+    // handler, and the oracles report the completion missing.
     client.stop();
     agent.close();
     io.run_for(test::longDeadline);

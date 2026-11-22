@@ -394,7 +394,7 @@ class Client::Impl {
     explicit SharedWork(const net::Executor& ex) : done(ex) {
       done.expires_at(std::chrono::steady_clock::time_point::max());
     }
-    // Reached only through wait() and wake().
+    // Waited on through wait() and woken through wake(), never directly.
     net::SteadyTimer done;
     // It ran to its end, whatever its outcome says.
     bool finished = false;
@@ -1432,9 +1432,11 @@ net::Awaitable<void> Client::Impl::runDerivation([[maybe_unused]] Ref self, Deri
 }
 
 net::Awaitable<void> Client::Impl::SharedWork::wait() {
-  // A request cancelled while it waits is woken, not thrown out: it asks after waking, as transact
-  // does, since the signal may arrive as the work settles. The flag is the whole coroutine
-  // stack's, so it holds in the caller after this returns.
+  // Changes nothing: every entry point has already turned throwing off, in
+  // observeBothCancellationTypes, so a request cancelled while it waits is woken rather than thrown
+  // out. Restated as the first co_await only for clang-analyzer, which analyses this coroutine on
+  // its own and otherwise follows the timer's async_wait into Asio with a resume context it never
+  // saw set, and reports a null dereference that cannot happen (core.NullDereference).
   co_await net::asio::this_coro::throw_if_cancelled(false);
   if (!settled()) {
     [[maybe_unused]] net::ErrorCode waitEc;

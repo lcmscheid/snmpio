@@ -326,7 +326,8 @@ void destroyWhileOthersRunAndInitiate(int round) {
   initiator.join();
   // #51: read while the runners still run it, on its strand, and before stop() could clear
   // anything: destroying its sibling mid-request, on another thread, left the survivor holding
-  // nothing of its own requests', which have all completed by now.
+  // nothing of its own requests'. The initiator waited for each to complete, up to a limit the
+  // oracles check below, so one still running is given as long again to settle before it reads.
   const auto survivorHeld = test::settledOnStrand(survivor, longDeadline);
   survivor.stop();
   for (auto* agent : {&silent, &retransmitted, &walked, &answering})

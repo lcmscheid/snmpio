@@ -29,10 +29,10 @@ namespace {
 
 using detail::OutstandingCounts;
 using detail::OutstandingView;
-using test::countsOnStrand;
 using test::DeriverHold;
 using test::echoAnswer;
 using test::longDeadlineTarget;
+using test::readOnStrand;
 using test::respondWith;
 using test::ScriptedAgent;
 using test::ScriptedV3Agent;
@@ -264,12 +264,12 @@ TEST(Outstanding, AReadOnTheStrandSeesWhatOtherThreadsLeaveHeld) {
   client.asyncGet(longDeadlineTarget(agent), publicCommunity, {sysDescr},
                   [&completed](net::ErrorCode ec, const Response&) { completed.set_value(ec); });
   asked.wait();
-  const auto whileAsked = countsOnStrand(client);
+  const auto whileAsked = readOnStrand(client);
   net::asio::dispatch(agent.executor(),
                       [&] { agent.answerLate(*question, respondWith({Varbind{sysDescr, null}})); });
   auto answer = completed.get_future();
   const bool answered = answer.wait_for(test::longDeadline) == std::future_status::ready;
-  const auto afterAnswer = countsOnStrand(client);
+  const auto afterAnswer = readOnStrand(client);
 
   client.stop();
   net::asio::dispatch(agent.executor(), [&agent] { agent.close(); });

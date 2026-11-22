@@ -1,6 +1,7 @@
 #ifndef SNMPIO_TESTS_OUTSTANDINGREADS_HPP
 #define SNMPIO_TESTS_OUTSTANDINGREADS_HPP
 
+#include <algorithm>
 #include <chrono>
 #include <future>
 #include <memory>
@@ -27,7 +28,7 @@ namespace snmpio::test {
 // Reads the view on the Client's strand, from a thread that is not running it, while other threads
 // may be (detail::OutstandingView::countsOnStrand), and waits up to `limit` for the answer. Empty
 // if the strand never got to it: nothing ran the io_context in time.
-inline std::optional<detail::OutstandingCounts> countsOnStrand(
+inline std::optional<detail::OutstandingCounts> readOnStrand(
     const Client& client, std::chrono::milliseconds limit = std::chrono::seconds(5)) {
   // Shared with the handler, which may still run after a read that gave up on it.
   auto read = std::make_shared<std::promise<detail::OutstandingCounts>>();
@@ -38,15 +39,20 @@ inline std::optional<detail::OutstandingCounts> countsOnStrand(
   return answer.get();
 }
 
-// Reads on the strand until the Client holds nothing, or until `limit` has passed, and returns
-// what it last read: so that work a request was allowed to leave running -- a discovery carrying
-// on after the request that started it was cancelled (ADR-0003) -- has its own deadlines to settle
-// in, and only work that outlives them all reads as held.
+// Reads on the strand until the Client holds nothing, or until `limit` has passed, and returns what
+// it last read, or nothing if the strand stopped answering. So work a request was allowed to leave
+// running -- a discovery carrying on after the request that started it was cancelled (ADR-0003) --
+// has its own deadlines to settle in, and only work that outlives them all reads as held.
 inline std::optional<detail::OutstandingCounts> settledOnStrand(const Client& client,
                                                                 std::chrono::milliseconds limit) {
   const auto giveUpAt = std::chrono::steady_clock::now() + limit;
   for (;;) {
-    auto counts = countsOnStrand(client, limit);
+    // Each read gets what is left of the limit, so the whole stays near it, but never so little
+    // that a strand merely busy at the end reads as one that stopped answering.
+    const auto left = std::max(std::chrono::milliseconds(100),
+                               std::chrono::duration_cast<std::chrono::milliseconds>(
+                                   giveUpAt - std::chrono::steady_clock::now()));
+    auto counts = readOnStrand(client, left);
     if (!counts || *counts == detail::OutstandingCounts{}) return counts;
     if (std::chrono::steady_clock::now() >= giveUpAt) return counts;
     std::this_thread::sleep_for(std::chrono::milliseconds(5));

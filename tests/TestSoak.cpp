@@ -370,7 +370,9 @@ class Slot {
     return clients;
   }
 
-  // At the end, on the test thread.
+  // At the end, on the test thread: lets every Client still here go, destroying each that nothing
+  // else holds -- under the io_context's threads, which are still running. `released` is declared
+  // ahead of the lock, so the destructions come once it has been let go, as the class says.
   void retire() {
     std::vector<std::shared_ptr<ClientInstance>> released;
     const std::scoped_lock lock(m_mutex);
@@ -580,8 +582,8 @@ class Soak {
         continue;
       }
       EXPECT_EQ(*held, snmpio::detail::OutstandingCounts{})
-          << "remaining Client " << i << " still held something " << settleLimit.count()
-          << " ms after its last request completed";
+          << "remaining Client " << i << " still held something after " << settleLimit.count()
+          << " ms of reading, with every request completed";
     }
     int failures = 0;
     for (std::size_t i = 0; i < m_records.size(); ++i) {

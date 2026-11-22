@@ -147,10 +147,9 @@ _Avoid_: key thread, worker, thread pool
 
 **Outstanding Request**:
 An operation the Command Generator has initiated and not yet completed, whichever wait it is in —
-awaiting a reply, between retransmissions, queued behind an Engine Discovery, or queued behind the
-derivation of a key it needs. Every Outstanding
-Request completes exactly once, whatever ends it: a reply, its deadline, a cancellation, or
-Stopping. The one exception is a caller's stop that throws scheduling its cleanup: none completes
+awaiting a reply, between retransmissions, queued behind an Engine Discovery, or queued behind a
+derivation on the Deriver. Every Outstanding Request completes exactly once, whatever ends it: a
+reply, its deadline, a cancellation, or Stopping. The one exception is a caller's stop that throws scheduling its cleanup: none completes
 after that, and the exception is how the caller learns it (ADR-0009's amendment). "Exactly once"
 also holds only while the executors involved run, the caller's as well as the Command Generator's:
 a completion still queued when its `io_context` is destroyed is never invoked (`Client.hpp`).

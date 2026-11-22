@@ -9,8 +9,8 @@ namespace snmpio::detail {
 
 // Test-only, as CacheView is: a way to keep the Deriver a Client runs on busy, the private thread
 // its io_context's password-to-key runs on, so that the tests can hold a derivation queued behind
-// it and see what the strand does meanwhile. Not part of the API, and nothing outside the tests
-// calls it.
+// it and see what the strand does meanwhile, and to ask whether it has started at all. Not part of
+// the API, and nothing outside the tests calls it.
 //
 // It reaches the Client directly rather than through its strand, so it is only safe while nothing
 // else is running that strand: before io_context::run() is first called, or from a handler on the
@@ -20,6 +20,10 @@ struct DeriverView {
   // Whatever the job blocks on must be released before the io_context goes, whose destruction joins
   // the Deriver.
   static void occupy(Client& client, std::function<void()> job);
+  // Whether the Client's io_context's Deriver has started its thread, which the first derivation
+  // on that io_context does. Lets a test that keeps the Deriver from starting check that it was
+  // the start it failed, and not something else of the same size.
+  [[nodiscard]] static bool started(const Client& client);
 };
 
 }  // namespace snmpio::detail

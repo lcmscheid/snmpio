@@ -1609,12 +1609,18 @@ TEST(ClientV3, ARequestWhoseAlgorithmsWillNotFetchIsRefusedAsItIsInitiated) {
 // CryptoFailure. Run where nothing has been fetched (expectInFreshProcess), since a fetch that
 // succeeded is held for the process's life. Bounded by a deadline: the bug was a wait nobody ends.
 // A second request, with fetching allowed again, goes through: the failed discovery left nothing
-// registered for it to queue behind. Not on Fixture, whose Client is constructed, and keyed, before
-// fetching can be refused.
+// registered for it to queue behind. Both are judged by CompletionOracle once the Client has
+// stopped and the io_context drained, so a late second completion of the first counts too. Not on
+// Fixture, whose Client is constructed, and keyed, before fetching can be refused.
 TEST(ClientV3, ADiscoveryThatFailsBeforeItSendsFailsTheRequestThatStartedIt) {
   test::expectInFreshProcess([]() -> std::string {
-    std::array<unsigned char, 16> firstDraw{};
-    if (RAND_bytes(firstDraw.data(), static_cast<int>(firstDraw.size())) != 1) return "RAND_bytes";
+    // OpenSSL's CSPRNG fetches its generator on a thread's first draw, so it is drawn from here,
+    // before the refusal, for only the Message ID keying to be refused (as in
+    // ARequestFetchesItsAlgorithmsAsItIsInitiated).
+    std::array<unsigned char, 16> csprngPrimed{};
+    if (RAND_bytes(csprngPrimed.data(), static_cast<int>(csprngPrimed.size())) != 1) {
+      return "RAND_bytes";
+    }
     const auto creds = credentials(AuthProtocol::None, SecurityLevel::NoAuthNoPriv);
 
     net::IoContext io;
@@ -1624,40 +1630,36 @@ TEST(ClientV3, ADiscoveryThatFailsBeforeItSendsFailsTheRequestThatStartedIt) {
     if (!refused->refusing()) return "fetching was not refused";
     Client client(io.get_executor());
 
-    int completions = 0;
-    net::ErrorCode ec;
-    client.asyncGet(targetFor(agent), creds, {sysDescr}, [&](net::ErrorCode e, const Response&) {
-      ++completions;
-      ec = e;
-    });
-    while (completions == 0 && io.run_one_for(test::longDeadline) != 0) {
+    test::CompletionOracle first(io);
+    bool firstDone = false;
+    client.asyncGet(
+        targetFor(agent), creds, {sysDescr},
+        first.handler([&firstDone](net::ErrorCode, const Response&) { firstDone = true; }));
+    while (!firstDone && io.run_one_for(test::longDeadline) != 0) {
     }
-    io.poll();  // a second completion, were there one
     refused.reset();
-
     std::string wrong;
-    if (completions != 1 || ec != make_error_code(Errc::CryptoFailure)) {
-      wrong += "refused: " + std::to_string(completions) + " completions, " + ec.message() + "\n";
-    }
     if (agent.requestsSeen() != 0) wrong += "something was sent\n";
 
     io.restart();
-    int laterCompletions = 0;
-    net::ErrorCode laterEc;
-    client.asyncGet(targetFor(agent), creds, {sysDescr}, [&](net::ErrorCode e, const Response&) {
-      ++laterCompletions;
-      laterEc = e;
-      client.stop();
-      agent.close();
-    });
+    test::CompletionOracle later(io);
+    client.asyncGet(targetFor(agent), creds, {sysDescr},
+                    later.handler([&](net::ErrorCode, const Response&) {
+                      client.stop();
+                      agent.close();
+                    }));
     io.run_for(test::longDeadline);
-    if (laterCompletions != 1 || laterEc) {
-      wrong += "fetching: " + std::to_string(laterCompletions) + " completions, " +
-               laterEc.message() + "\n";
-    }
+    // Again, for a request still out: stopping forces its handler out, for the oracles to report.
     client.stop();
     agent.close();
     io.run_for(test::longDeadline);
+
+    if (const auto r = first.completedExactlyOnce({make_error_code(Errc::CryptoFailure)}); !r) {
+      wrong += std::string("refused: ") + r.message() + "\n";
+    }
+    if (const auto r = later.completedExactlyOnce({net::ErrorCode{}}); !r) {
+      wrong += std::string("fetching: ") + r.message() + "\n";
+    }
     return wrong;
   });
 }

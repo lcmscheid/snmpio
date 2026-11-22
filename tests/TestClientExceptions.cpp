@@ -297,11 +297,17 @@ TEST(ClientExceptions, ADerivationThatThrowsWithNoRequestLeftWaitingStillSurface
 
 // A derivation that throws before its first suspension still surfaces for the request that started
 // it (#93, as a discovery's does). co_spawn can run it inline that far, and the first derivation on
-// an io_context starts the Deriver's thread there, so one whose thread pool cannot be allocated
-// has settled, and woken nobody, before that request begins to wait on it. The pool is the size
-// failed: the first allocation of it on the Client's thread once the request is initiated, since
-// discovering with Master Keys derives nothing and so starts no Deriver. Without the fix the
-// derivation's own rethrow is heard and the request's never is: it waits out the deadline.
+// an io_context starts the Deriver there, so one whose Deriver cannot be started has settled, and
+// woken nobody, before that request begins to wait on it. Without the fix the derivation's own
+// rethrow is heard and the request's never is: it waits out the deadline.
+//
+// Failed at the allocation that starts the Deriver, the first of its size on the Client's thread
+// once the request is initiated. Discovering with Master Keys derives nothing, so nothing has
+// started it before. The size holds pointers, so it is not one nothing else allocates, and request
+// initiation does allocate it; FailingAllocation.hpp asks for a check rather than an assumption,
+// so the Deriver is checked to be unstarted afterwards. A failure that landed anywhere else -- the
+// request's own path, or the key being cached once a started Deriver handed it back -- fails one of
+// the checks below rather than passing.
 TEST(ClientExceptions, ADerivationThatThrowsBeforeItSuspendsSurfacesForTheRequestThatStartedIt) {
   if (!FailingAllocation::available()) GTEST_SKIP() << "this build cannot replace operator new";
   net::IoContext agentIo;
@@ -311,11 +317,12 @@ TEST(ClientExceptions, ADerivationThatThrowsBeforeItSuspendsSurfacesForTheReques
   net::IoContext io;
   Client client(io.get_executor());
   discoverWithMasterKeys(io, client, agent);
+  ASSERT_FALSE(detail::DeriverView::started(client)) << "discovering with Master Keys derived";
 
   int completions = 0;
   int thrown = 0;
-  // Initiated before the failure is armed: initiation allocates something of the pool's size on
-  // this thread, and the derivation starts only once the strand runs the request.
+  // Initiated before the failure is armed: initiation allocates something of the same size on this
+  // thread, and the derivation starts only once the strand runs the request.
   client.asyncGet(longDeadlineTarget(agent), credentials(), {sysDescr},
                   [&completions](net::ErrorCode, const Response&) { ++completions; });
   {
@@ -330,8 +337,9 @@ TEST(ClientExceptions, ADerivationThatThrowsBeforeItSuspendsSurfacesForTheReques
         if (++thrown == 2) client.stop();
       }
     }
-    EXPECT_TRUE(failing.fired()) << "no allocation of the Deriver's pool's size was made";
+    EXPECT_TRUE(failing.fired()) << "no allocation of the size that starts the Deriver was made";
   }
+  EXPECT_FALSE(detail::DeriverView::started(client)) << "what failed was not the Deriver starting";
   net::asio::post(agentIo, [&agent] { agent.close(); });
   agentThread.join();
 

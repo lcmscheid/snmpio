@@ -15,14 +15,12 @@ target_link_options(snmpio_fuzz_options INTERFACE -fsanitize=fuzzer,address,unde
 target_compile_definitions(snmpio_fuzz_options INTERFACE
   ${SNMPIO_ASIO_NO_RECYCLING} ${SNMPIO_STDLIB_HARDENING})
 
-# The library itself has to be instrumented, or coverage feedback sees nothing. Its sources and
-# Asio wiring are the root's, so those two cannot drift from snmpio's.
+# The library itself has to be instrumented, or coverage feedback sees nothing. Its sources,
+# headers and dependencies are the root's, so they cannot drift from snmpio's; only the fuzzing
+# options are its own.
 add_library(snmpio_fuzzed STATIC ${SNMPIO_SOURCES})
-target_include_directories(snmpio_fuzzed PUBLIC ${CMAKE_SOURCE_DIR}/include)
 target_link_libraries(snmpio_fuzzed PUBLIC snmpio_fuzz_options)
-snmpio_use_asio(snmpio_fuzzed)
-target_link_libraries(snmpio_fuzzed PRIVATE OpenSSL::Crypto)
-target_compile_features(snmpio_fuzzed PUBLIC cxx_std_20)
+snmpio_configure_library(snmpio_fuzzed)
 
 foreach(target FuzzBerValue FuzzBerVarbindList FuzzClient FuzzOidText FuzzV2cMessage FuzzV3Message)
   add_executable(${target} ${target}.cpp)

@@ -60,15 +60,22 @@ endif()
 # Asio's own macros and headers carry the flavour's prefix -- BOOST_ASIO_VERSION and
 # <boost/asio/version.hpp> under Boost, ASIO_VERSION and <asio/version.hpp> standalone -- and the
 # sanitizer builds below name both.
+# The minimum versions are stated once: snmpioConfig.cmake asks a consumer's find_dependency() for
+# the same ones, so an installed package never accepts a dependency this build would have refused.
+set(SNMPIO_BOOST_MIN_VERSION 1.77)
+set(SNMPIO_ASIO_MIN_VERSION 1.21)
+set(SNMPIO_OPENSSL_MIN_VERSION 3.0)
+set(SNMPIO_ASIO_HAS_PACKAGE OFF)
 if(SNMP_USE_BOOST_ASIO)
   set(SNMPIO_ASIO_MACRO_PREFIX BOOST_ASIO)
   set(SNMPIO_ASIO_HEADER_PREFIX boost/asio)
   # Boost.System has been header-only since 1.69 and some distributions no longer ship a
   # boost_system component at all, so ask for the component and fall back to Boost::headers.
-  find_package(Boost 1.77 QUIET CONFIG OPTIONAL_COMPONENTS system)
+  find_package(Boost ${SNMPIO_BOOST_MIN_VERSION} QUIET CONFIG OPTIONAL_COMPONENTS system)
   if(NOT Boost_FOUND)
     message(FATAL_ERROR
-      "Boost.Asio was not found (need Boost >= 1.77, for per-operation cancellation).\n"
+      "Boost.Asio was not found (need Boost >= ${SNMPIO_BOOST_MIN_VERSION}, for per-operation "
+      "cancellation).\n"
       "  Install it       -- Arch: pacman -S boost | Debian/Ubuntu: apt install libboost-dev\n"
       "  Or use standalone -- cmake --preset standalone  (equivalently -DSNMP_USE_BOOST_ASIO=OFF)\n"
       "The two are not interchangeable after the fact: the choice appears in every public "
@@ -84,10 +91,13 @@ else()
   set(SNMPIO_ASIO_HEADER_PREFIX asio)
   # 1.21 is where per-operation cancellation arrived, which the Walk's total/terminal split needs.
   # Only the CONFIG path can be checked; the include-directory fallback below is a bare header
-  # tree with no version to read.
-  find_package(asio 1.21 QUIET CONFIG)
+  # tree with no version to read. Neither Arch's asio nor Debian's libasio-dev ships the CMake
+  # package, so the fallback is the common case, and snmpioConfig.cmake has to know which was
+  # taken: only the CONFIG path leaves asio::asio in the exported interface for it to find.
+  find_package(asio ${SNMPIO_ASIO_MIN_VERSION} QUIET CONFIG)
   if(asio_FOUND)
     set(SNMPIO_ASIO_TARGET asio::asio)
+    set(SNMPIO_ASIO_HAS_PACKAGE ON)
   else()
     find_path(SNMPIO_ASIO_INCLUDE_DIR asio.hpp)
     if(NOT SNMPIO_ASIO_INCLUDE_DIR)
@@ -108,15 +118,15 @@ find_package(Threads REQUIRED)
 
 # ADR-0001: the crypto is OpenSSL EVP's, not ours. Required rather than optional -- SNMPv3 is the
 # reason this library exists, and a build with USM silently missing would be a trap.
-find_package(OpenSSL 3.0 REQUIRED)
+find_package(OpenSSL ${SNMPIO_OPENSSL_MIN_VERSION} REQUIRED)
 
 # ---------------------------------------------------------------------------
 # The library
 # ---------------------------------------------------------------------------
 # Two targets compile these sources: snmpio, and fuzz/'s snmpio_fuzzed, an instrumented copy for
-# coverage feedback. Both take the list and snmpio_use_asio() from here, so a new source file or a
-# changed Asio setting is one edit. Each target once had its own copy, and a miss in fuzz/'s showed
-# up only in a fuzzer build. Absolute paths, because fuzz/ resolves relative ones against itself.
+# coverage feedback. Both take the list and snmpio_configure_library() from here, so a new source
+# file, header directory or dependency is one edit. Absolute paths, because fuzz/ resolves relative
+# ones against itself.
 set(SNMPIO_SOURCES
   ${CMAKE_CURRENT_SOURCE_DIR}/src/BerReader.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/BerWriter.cpp
@@ -130,11 +140,25 @@ set(SNMPIO_SOURCES
   ${CMAKE_CURRENT_SOURCE_DIR}/src/V3Message.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/Value.cpp)
 
-# The Asio flavour (ADR-0002), applied PUBLIC: it appears in public signatures, so whatever links
-# the target has to be built the same way. The include directory is BUILD_INTERFACE only: it is
-# this machine's path, which the installed package must not carry (see the find_path() fallback
-# under Dependencies).
-function(snmpio_use_asio target)
+# What a target compiling SNMPIO_SOURCES needs: the headers, the Asio flavour (ADR-0002), threads,
+# OpenSSL and C++20. Its inputs are this file's SNMP_USE_BOOST_ASIO, SNMPIO_ASIO_TARGET and
+# SNMPIO_ASIO_INCLUDE_DIRS, read from the caller's scope as CMake functions do. CMake has no
+# private functions, so a project that add_subdirectory()s snmpio sees this one too; the snmpio_
+# prefix is its namespace.
+#
+# The Asio flavour and threads are PUBLIC: Asio types appear in public signatures, and Asio needs
+# the thread library wherever its headers are compiled, so whatever links the target has to be
+# built the same way. OpenSSL is PRIVATE: no public header names an OpenSSL type. Consumers still
+# need the package found, which is why snmpioConfig.cmake finds it -- a static archive carries its
+# private links to the linker. The header directory is CMAKE_CURRENT_FUNCTION_LIST_DIR's, this
+# file's, so a call from fuzz/, or from a project that add_subdirectory()s snmpio, finds the same
+# one. The Asio include directory, when the find_path() fallback under Dependencies supplied one,
+# is BUILD_INTERFACE only: it is this machine's path, which the installed snmpio must not carry.
+function(snmpio_configure_library target)
+  target_include_directories(${target}
+    PUBLIC
+      $<BUILD_INTERFACE:${CMAKE_CURRENT_FUNCTION_LIST_DIR}/include>
+      $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
   target_link_libraries(${target} PUBLIC ${SNMPIO_ASIO_TARGET} Threads::Threads)
   if(SNMPIO_ASIO_INCLUDE_DIRS)
     target_include_directories(${target} SYSTEM PUBLIC
@@ -145,22 +169,13 @@ function(snmpio_use_asio target)
   else()
     target_compile_definitions(${target} PUBLIC ASIO_STANDALONE=1)
   endif()
+  target_link_libraries(${target} PRIVATE OpenSSL::Crypto)
+  target_compile_features(${target} PUBLIC cxx_std_20)
 endfunction()
 
 add_library(snmpio ${SNMPIO_SOURCES})
 add_library(snmpio::snmpio ALIAS snmpio)
-
-target_include_directories(snmpio
-  PUBLIC
-    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-    $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
-
-snmpio_use_asio(snmpio)
-# Private: no public header names an OpenSSL type. Consumers still need the package found, which
-# is why snmpioConfig.cmake finds it -- a static archive carries its private links to the linker.
-target_link_libraries(snmpio PRIVATE OpenSSL::Crypto)
-
-target_compile_features(snmpio PUBLIC cxx_std_20)
+snmpio_configure_library(snmpio)
 
 set_target_properties(snmpio PROPERTIES
   VERSION ${PROJECT_VERSION}

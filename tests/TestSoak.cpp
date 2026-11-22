@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <iostream>
+#include <iterator>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -22,9 +23,11 @@
 #include <vector>
 
 #include <snmpio/Client.hpp>
+#include <snmpio/detail/OutstandingView.hpp>
 
 #include "CompletionOracle.hpp"
 #include "MasterKeys.hpp"
+#include "Outstanding.hpp"
 #include "ReplyDelivery.hpp"
 #include "ScriptedAgent.hpp"
 #include "ScriptedV3Agent.hpp"
@@ -353,12 +356,18 @@ class Slot {
   // The Target leaves the inventory: the generation's Client goes once nothing else holds it.
   void destroy(int generation) { end(generation); }
 
-  // At the end, on the test thread.
-  void retire() {
+  // At the end, on the test thread: stops every Client still here, so that the io_context's
+  // threads can run out, and hands them over to be read once they have (detail::OutstandingView).
+  [[nodiscard]] std::vector<std::shared_ptr<ClientInstance>> retire() {
     std::vector<std::shared_ptr<ClientInstance>> released;
-    const std::scoped_lock lock(m_mutex);
-    released.reserve(m_generations.size());
-    for (auto& g : m_generations) released.push_back(std::move(g.client));
+    {
+      const std::scoped_lock lock(m_mutex);
+      for (auto& g : m_generations) {
+        if (g.client) released.push_back(std::move(g.client));
+      }
+    }
+    for (const auto& instance : released) instance->stop();
+    return released;
   }
 
  private:
@@ -526,11 +535,21 @@ class Soak {
 
     m_drained = m_completions.waitFor(m_records.size(), drainLimit);
 
-    for (auto& slot : m_slots) slot->retire();
+    std::vector<std::shared_ptr<ClientInstance>> retired;
+    for (auto& slot : m_slots) std::ranges::move(slot->retire(), std::back_inserter(retired));
     for (auto& agent : m_agents) agent->close();
     m_clientWork.reset();
     m_callerWork.reset();
     for (auto& t : io) t.join();
+
+    // #51: whatever a request left behind that sends nothing. Read only now, with no thread left
+    // running the Clients' strands, as the view requires -- and so after stop(), which wakes every
+    // waiter and closes the sockets, unlike the disruption matrix's quiet period. What it still
+    // catches is anything Stopping does not clear: an exchange, a discovery or a derivation left
+    // registered, or a waiter that never resumed. The Clients the plan destroyed are not here.
+    for (const auto& instance : retired) {
+      m_heldAtTheEnd.push_back(snmpio::detail::OutstandingView::counts(instance->client()));
+    }
   }
 
   void check() {
@@ -538,6 +557,10 @@ class Soak {
                            << " requests had not completed " << drainLimit.count()
                            << " s after the plan's last event";
     printOutcomes();
+    for (std::size_t i = 0; i < m_heldAtTheEnd.size(); ++i) {
+      EXPECT_EQ(m_heldAtTheEnd[i], snmpio::detail::OutstandingCounts{})
+          << "retired Client " << i << " still held something for its requests";
+    }
     int failures = 0;
     for (std::size_t i = 0; i < m_records.size(); ++i) {
       if (!checkOne(static_cast<int>(i), m_plan.requests[i], m_records[i])) continue;
@@ -795,6 +818,8 @@ class Soak {
   std::vector<Record> m_records;
   Completions m_completions;
   bool m_drained = false;
+  // One per Client still alive at the end, read once every thread had joined.
+  std::vector<snmpio::detail::OutstandingCounts> m_heldAtTheEnd;
 };
 
 std::optional<std::string> envVar(const char* name) {

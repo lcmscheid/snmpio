@@ -13,9 +13,11 @@
 #include <vector>
 
 #include <snmpio/Client.hpp>
+#include <snmpio/detail/OutstandingView.hpp>
 
 #include "CompletionOracle.hpp"
 #include "Deadlines.hpp"
+#include "Outstanding.hpp"
 #include "ScriptedAgent.hpp"
 #include "ScriptedV3Agent.hpp"
 
@@ -127,7 +129,11 @@ TEST(CompletionOracle, CountsOnlyTheLiveHandlerAcrossMoves) {
 // After completing, a cell stays up for a quiet period longer than every deadline the request could
 // still have running, with the Agent listening, and only then stops the Client. Anything the
 // request left behind -- a retransmission, a Walk's next round, an exchange of its own after the
-// discovery it was cancelled out of -- has to show itself to the Agent in that time.
+// discovery it was cancelled out of -- has to show itself to the Agent in that time. What it left
+// behind that sends nothing -- an exchange still mapped, a discovery or a derivation still
+// registered, a waiter still parked on one -- is read through detail::OutstandingView at the end of
+// the quiet period, before the Client is stopped (#51). That check is the only one a Stop cell
+// has, since its socket is closed; a Destroy cell has no Client left to read.
 // ---------------------------------------------------------------------------
 
 enum class Wait : std::uint8_t {
@@ -201,6 +207,8 @@ struct Rig {
   net::SteadyTimer backstop{io};
   std::chrono::steady_clock::time_point disruptedAt;
   std::chrono::steady_clock::time_point completedAt;
+  // What the Client still held once the quiet period was over. Empty in the Destroy column.
+  std::optional<detail::OutstandingCounts> heldAfterQuiet;
 
   void finish() {
     if (client) client->stop();
@@ -238,7 +246,11 @@ struct Rig {
           backstop.cancel();
           then(ec, std::forward<decltype(rest)>(rest)...);
           quiet.expires_after(quietPeriod);
-          quiet.async_wait([this](net::ErrorCode) { finish(); });
+          quiet.async_wait([this](net::ErrorCode) {
+            // Safe here: this handler runs on the one thread that runs the Client's io_context.
+            if (client) heldAfterQuiet = detail::OutstandingView::counts(*client);
+            finish();
+          });
         }));
   }
   auto token() {
@@ -346,6 +358,11 @@ TEST_P(DisruptionMatrix, CompletesExactlyOnceWithTheRulesCode) {
   ASSERT_NE(rig.disruptedAt, std::chrono::steady_clock::time_point{})
       << "the cell never reached the moment it disrupts at";
   EXPECT_TRUE(rig.oracle.completedExactlyOnce({expectedCode(wait, disruption)}));
+  if (disruption != Disruption::Destroy) {
+    ASSERT_TRUE(rig.heldAfterQuiet.has_value()) << "the quiet period never ended";
+    EXPECT_EQ(*rig.heldAfterQuiet, detail::OutstandingCounts{})
+        << "the Client still held something for the request after the quiet period";
+  }
   // Client.hpp: terminal drops the request at once, where total waits out the deadline of the
   // exchange in flight -- and the codes alone cannot tell the two apart. Stopping is at once too,
   // whatever the request was doing when it began. Only a silent Target makes this bite; elsewhere

@@ -18,10 +18,12 @@
 #include <vector>
 
 #include <snmpio/Client.hpp>
+#include <snmpio/detail/OutstandingView.hpp>
 
 #include "AfterHops.hpp"
 #include "CompletionOracle.hpp"
 #include "Deadlines.hpp"
+#include "Outstanding.hpp"
 #include "ScriptedAgent.hpp"
 #include "ScriptedV3Agent.hpp"
 
@@ -34,6 +36,8 @@
 namespace snmpio {
 namespace {
 
+using detail::OutstandingCounts;
+using detail::OutstandingView;
 using test::afterHops;
 using test::atOnceLimit;
 using test::CompletionOracle;
@@ -325,6 +329,9 @@ void destroyWhileOthersRunAndInitiate(int round) {
     net::asio::dispatch(agent->executor(), [agent] { agent->close(); });
   net::asio::dispatch(withholding.executor(), [&withholding] { withholding.close(); });
   for (auto& runner : runners) runner.join();
+  // #51: read with every runner joined, as the view requires. Destroying its sibling mid-request,
+  // on another thread, left the survivor holding nothing of its own requests'.
+  const auto survivorHeld = OutstandingView::counts(survivor);
 
   for (std::size_t i = 0; i < reached.size(); ++i)
     EXPECT_TRUE(reached.at(i)) << "the doomed Client's request never reached " << waitNames.at(i);
@@ -344,6 +351,7 @@ void destroyWhileOthersRunAndInitiate(int round) {
   ASSERT_TRUE(afterDestruction.has_value());
   EXPECT_TRUE(afterDestruction->completedExactlyOnce({net::ErrorCode{}}))
       << "the survivor's request after destruction";
+  EXPECT_EQ(survivorHeld, OutstandingCounts{}) << "the survivor still held something";
 }
 
 TEST(ClientLifetime, DestroyedWhileOtherThreadsRunAndInitiate) {
@@ -422,6 +430,8 @@ struct BlockedBatchOutcome {
   bool stopperReturnedBeforeHandler = false;
   int batches = 0;
   std::optional<net::ErrorCode> result;
+  // What the Client still held once run() had returned, if `stopClient` left one (#51).
+  std::optional<OutstandingCounts> held;
 };
 
 // ADR-0009's amendment: Stopping on one thread waits for a Batch already being delivered on
@@ -475,6 +485,7 @@ BlockedBatchOutcome stopWhileABatchIsBlocked(
   net::asio::post(io, [&agent] { agent.close(); });
   runner.join();
   outcome.batches = batches;
+  if (client) outcome.held = OutstandingView::counts(*client);
   return outcome;
 }
 
@@ -496,6 +507,8 @@ TEST(ClientLifetime, StopWaitsForABatchBeingDeliveredOnAnotherThread) {
   EXPECT_EQ(outcome.batches, 1) << "a Batch was delivered after stop()";
   ASSERT_TRUE(outcome.result.has_value()) << "the Walk never completed";
   EXPECT_EQ(*outcome.result, Errc::ClientStopped);
+  ASSERT_TRUE(outcome.held.has_value());
+  EXPECT_EQ(*outcome.held, OutstandingCounts{}) << "the stopped Client still held the Walk's";
 }
 
 // The other half of the rule: the delivering thread never waits for itself, or destroying a Client
@@ -589,6 +602,8 @@ TEST(ClientLifetime, StoppingAsTheSendCompletesStillCompletesAtOnce) {
     ASSERT_TRUE(result.has_value());
     EXPECT_EQ(*result, Errc::ClientStopped);
     EXPECT_LT(completedAt - stoppedAt, atOnceLimit(longDeadline)) << "waited for the deadline";
+    // #51: whichever step Stopping caught the request at, it left nothing mapped behind it.
+    EXPECT_EQ(OutstandingView::counts(*client), OutstandingCounts{});
   }
 }
 
@@ -645,6 +660,8 @@ TEST(ClientLifetime, ARequestInitiatedAfterStoppingCompletesWithClientStopped) {
   EXPECT_TRUE(v2c.completedExactlyOnce({make_error_code(Errc::ClientStopped)}));
   EXPECT_TRUE(v3.completedExactlyOnce({make_error_code(Errc::ClientStopped)}));
   EXPECT_TRUE(walk.completedExactlyOnce({make_error_code(Errc::ClientStopped)}));
+  EXPECT_EQ(OutstandingView::counts(client), OutstandingCounts{})
+      << "a request refused at once still left something behind";
 }
 
 TEST(ClientLifetime, DestroyedBeforeTheIoContextRunsStillCompletesWithClientStopped) {

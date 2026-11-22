@@ -26,6 +26,7 @@ namespace detail {
 struct CacheView;
 struct DeriverView;
 struct MessageIdView;
+struct OutstandingView;
 }  // namespace detail
 
 // What a completed request hands back.
@@ -359,6 +360,7 @@ class Client {
   friend struct detail::CacheView;
   friend struct detail::DeriverView;
   friend struct detail::MessageIdView;
+  friend struct detail::OutstandingView;
 
   // Everything the Client knows, and the coroutines that act on it, co-owned by each of those
   // coroutines (ADR-0009). Defined in Client.cpp.

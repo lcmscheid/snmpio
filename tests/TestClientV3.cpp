@@ -70,6 +70,24 @@ Pdu echoAnswer(const Pdu& request) {
   return p;
 }
 
+// Engine Discovery's two phases, told apart as the Client sends them: the identity phase names no
+// engineID (RFC 3414 section 4), and the time-sync phase names the discovered one with zero boots.
+bool isIdentityPhase(const ScriptedV3Agent::Request& req) {
+  return req.message.security.engineId.empty();
+}
+
+bool isTimeSyncPhase(const ScriptedV3Agent::Request& req) {
+  return !isIdentityPhase(req) && req.message.security.boots == 0;
+}
+
+// An engineID unlike the Scripted Agent's own, one per n, in RFC 3411's SnmpEngineID format: the
+// high bit set over net-snmp's enterprise number, 8072, then format 5, administratively assigned
+// octets, eight octets in all.
+Octets engineIdNumbered(std::uint8_t n) {
+  return {std::byte{0x80}, std::byte{0x00}, std::byte{0x1f}, std::byte{0x88},
+          std::byte{0x05}, std::byte{0x00}, std::byte{0x00}, std::byte{n}};
+}
+
 // Same shape as TestClient.cpp's: one io_context on the test thread, so a hung operation is a hung
 // test rather than a flake.
 struct Fixture {
@@ -205,7 +223,7 @@ TEST(ClientV3, ResynchronisesAfterANotInTimeWindowsReport) {
   agent.setResponder(
       [&](const ScriptedV3Agent::Request& req) -> std::optional<ScriptedV3Agent::Reply> {
         const auto& usm = req.message.security;
-        if (usm.engineId.empty()) {
+        if (isIdentityPhase(req)) {
           return ScriptedV3Agent::report(ScriptedV3Agent::unknownEngineIds,
                                          SecurityLevel::NoAuthNoPriv);
         }
@@ -337,7 +355,7 @@ TEST(ClientV3, AcceptsAReplyFromAnEngineThatRestartedSinceWeCachedIt) {
   std::vector<std::int32_t> bootsCarried;
   const auto r = afterTheCacheIsSettled([&](ScriptedV3Agent& agent) {
     agent.setResponder([&](const ScriptedV3Agent::Request& req) {
-      if (!req.message.security.engineId.empty()) {
+      if (!isIdentityPhase(req)) {
         bootsCarried.push_back(req.message.security.boots);
       }
       return answersWith(9, 20)(req);
@@ -368,10 +386,6 @@ TEST(ClientV3, DropsAReplyClaimingAnOlderBootsCount) {
       << "a boots regression was accepted: " << ec.message();
 }
 
-bool isTimeSyncPhase(const ScriptedV3Agent::Request& req) {
-  return !req.message.security.engineId.empty() && req.message.security.boots == 0;
-}
-
 // Which of a test's requests this is, told apart by the first name it asks for.
 bool asksFor(const ScriptedV3Agent::Request& req, const Oid& name) {
   const auto& varbinds = req.message.scoped.pdu.varbinds;
@@ -388,8 +402,7 @@ TEST(ClientV3, RediscoversAnEngineWhoseBootsWentBackwards) {
     agent.setTime(50);
     agent.setResponder([&](const ScriptedV3Agent::Request& req) {
       if (isTimeSyncPhase(req)) ++timeSyncPhases;
-      if (!req.message.security.engineId.empty())
-        bootsCarried.push_back(req.message.security.boots);
+      if (!isIdentityPhase(req)) bootsCarried.push_back(req.message.security.boots);
       return agent.behaveLikeACompliantAgent(req);
     });
   });
@@ -413,7 +426,7 @@ TEST(ClientV3, AnUnsignedLowerBootsReportNeverClearsTheCachedClock) {
     agent.setResponder([&](const ScriptedV3Agent::Request& req) {
       if (isTimeSyncPhase(req)) ++timeSyncPhases;
       auto reply = agent.behaveLikeACompliantAgent(req);
-      if (req.message.security.engineId.empty()) return reply;
+      if (isIdentityPhase(req)) return reply;
       bootsCarried.push_back(req.message.security.boots);
       if (reply && reply->scoped.pdu.type == PduType::Report) {
         reply->level = SecurityLevel::NoAuthNoPriv;
@@ -436,7 +449,7 @@ TEST(ClientV3, AForcedResyncHappensAtMostOncePerRequest) {
   const auto r = afterTheCacheIsSettled([&](ScriptedV3Agent& agent) {
     agent.setResponder(
         [&](const ScriptedV3Agent::Request& req) -> std::optional<ScriptedV3Agent::Reply> {
-          if (req.message.security.engineId.empty()) return agent.behaveLikeACompliantAgent(req);
+          if (isIdentityPhase(req)) return agent.behaveLikeACompliantAgent(req);
           auto report =
               ScriptedV3Agent::report(ScriptedV3Agent::notInTimeWindows, SecurityLevel::AuthNoPriv);
           report.boots = isTimeSyncPhase(req) ? 2 : req.message.security.boots - 1;
@@ -542,7 +555,7 @@ TEST_P(ALateSignedResponseAtTheOldBoots, NeitherFailsARequestNorCostsASecondRedi
         }
         if (!reset) return agent.behaveLikeACompliantAgent(req);
 
-        if (at == ReleasePoint::DuringTheRediscovery && req.message.security.engineId.empty()) {
+        if (at == ReleasePoint::DuringTheRediscovery && isIdentityPhase(req)) {
           release();
         }
         // Both datagrams are on the wire before the Client has read either, so the held Response
@@ -608,7 +621,7 @@ TEST(ClientV3, ASignedHigherBootsReportIsAdoptedWithoutRediscovery) {
   const auto r = afterTheCacheIsSettled([&](ScriptedV3Agent& agent) {
     agent.setBoots(9);
     agent.setResponder([&](const ScriptedV3Agent::Request& req) {
-      if (req.message.security.engineId.empty()) ++identityPhases;
+      if (isIdentityPhase(req)) ++identityPhases;
       if (isTimeSyncPhase(req)) ++timeSyncPhases;
       return agent.behaveLikeACompliantAgent(req);
     });
@@ -627,7 +640,7 @@ TEST(ClientV3, FailsWhenTheEngineNeverAgreesOnTheTimeWindow) {
   ScriptedV3Agent agent(f.io, credentials(), echoAnswer);
   f.agent = &agent;
   agent.setResponder([](const ScriptedV3Agent::Request& req) {
-    if (req.message.security.engineId.empty()) {
+    if (isIdentityPhase(req)) {
       return std::optional(
           ScriptedV3Agent::report(ScriptedV3Agent::unknownEngineIds, SecurityLevel::NoAuthNoPriv));
     }
@@ -695,12 +708,11 @@ TEST(ClientV3, DropsAResponseFromOutsideTheTimeWindow) {
   f.agent = &agent;
   agent.setResponder(
       [&](const ScriptedV3Agent::Request& req) -> std::optional<ScriptedV3Agent::Reply> {
-        const auto& usm = req.message.security;
-        if (usm.engineId.empty())
+        if (isIdentityPhase(req))
           return ScriptedV3Agent::report(ScriptedV3Agent::unknownEngineIds,
                                          SecurityLevel::NoAuthNoPriv);
         if (!isAuthenticated(req.message.header.level)) return std::nullopt;
-        if (usm.boots == 0) return agent.behaveLikeACompliantAgent(req);  // the time-sync phase
+        if (isTimeSyncPhase(req)) return agent.behaveLikeACompliantAgent(req);
         ScriptedV3Agent::Reply reply;
         reply.level = req.message.header.level;
         reply.scoped.pdu = echoAnswer(req.message.scoped.pdu);
@@ -730,8 +742,7 @@ TEST(ClientV3, RediscoversWhenTheEngineIdChanges) {
     EXPECT_FALSE(e) << e.message();
     // The Target was replaced between requests. The Report that says so is unauthenticated by
     // necessity, and re-discovery is what it has to trigger.
-    agent.setEngineId({std::byte{0x80}, std::byte{0x00}, std::byte{0x1f}, std::byte{0x88},
-                       std::byte{0x09}, std::byte{0x09}});
+    agent.setEngineId(engineIdNumbered(9));
     f.client.asyncGet(target, credentials(), {sysUpTime}, f.requestToken());
     f.finish();
   });
@@ -807,7 +818,7 @@ TEST(ClientV3, SurfacesAnUnsupportedSecurityLevelReport) {
   ScriptedV3Agent agent(f.io, credentials(), echoAnswer);
   f.agent = &agent;
   agent.setResponder([](const ScriptedV3Agent::Request& req) {
-    if (req.message.security.engineId.empty()) {
+    if (isIdentityPhase(req)) {
       return std::optional(
           ScriptedV3Agent::report(ScriptedV3Agent::unknownEngineIds, SecurityLevel::NoAuthNoPriv));
     }
@@ -833,14 +844,13 @@ TEST(ClientV3, AnUnauthenticatedReportNeverResynchronisesTheCache) {
   bool lied = false;
   agent.setResponder(
       [&](const ScriptedV3Agent::Request& req) -> std::optional<ScriptedV3Agent::Reply> {
-        const auto& usm = req.message.security;
-        if (usm.engineId.empty()) {
+        if (isIdentityPhase(req)) {
           ++identityPhases;
           return ScriptedV3Agent::report(ScriptedV3Agent::unknownEngineIds,
                                          SecurityLevel::NoAuthNoPriv);
         }
         if (!isAuthenticated(req.message.header.level)) return std::nullopt;
-        if (usm.boots == 0) {  // discovery's second phase
+        if (isTimeSyncPhase(req)) {
           auto r =
               ScriptedV3Agent::report(ScriptedV3Agent::notInTimeWindows, SecurityLevel::AuthNoPriv);
           r.boots = 3;
@@ -884,8 +894,7 @@ TEST(ClientV3, AnUnauthenticatedReportNeverSetsTheDiscoveredClock) {
   int syncPhases = 0;
   agent.setResponder(
       [&](const ScriptedV3Agent::Request& req) -> std::optional<ScriptedV3Agent::Reply> {
-        const auto& usm = req.message.security;
-        if (!usm.engineId.empty() && usm.boots == 0 && ++syncPhases == 1) {
+        if (isTimeSyncPhase(req) && ++syncPhases == 1) {
           // Unsigned, answering the first time-sync phase before the Engine can.
           auto r = ScriptedV3Agent::report(ScriptedV3Agent::notInTimeWindows,
                                            SecurityLevel::NoAuthNoPriv);
@@ -919,7 +928,7 @@ TEST(ClientV3, AnUnsignedNotInTimeWindowsAloneFailsTheTimeSyncAtItsDeadline) {
   int syncPhases = 0;
   agent.setResponder(
       [&](const ScriptedV3Agent::Request& req) -> std::optional<ScriptedV3Agent::Reply> {
-        if (req.message.security.engineId.empty()) return agent.behaveLikeACompliantAgent(req);
+        if (isIdentityPhase(req)) return agent.behaveLikeACompliantAgent(req);
         ++syncPhases;
         return ScriptedV3Agent::report(ScriptedV3Agent::notInTimeWindows,
                                        SecurityLevel::NoAuthNoPriv);
@@ -940,7 +949,7 @@ TEST(ClientV3, AnUnauthenticatedReportDuringTimeSyncEndsDiscoveryWithItsError) {
   f.agent = &agent;
   agent.setResponder(
       [&](const ScriptedV3Agent::Request& req) -> std::optional<ScriptedV3Agent::Reply> {
-        if (req.message.security.engineId.empty()) return agent.behaveLikeACompliantAgent(req);
+        if (isIdentityPhase(req)) return agent.behaveLikeACompliantAgent(req);
         return ScriptedV3Agent::report(ScriptedV3Agent::unknownUserNames,
                                        SecurityLevel::NoAuthNoPriv);
       });
@@ -964,8 +973,7 @@ TEST(ClientV3, AdoptsTheClockFromASignedReportNamingAnotherCounter) {
   f.agent = &agent;
   agent.setResponder(
       [&](const ScriptedV3Agent::Request& req) -> std::optional<ScriptedV3Agent::Reply> {
-        const auto& usm = req.message.security;
-        if (!usm.engineId.empty() && usm.boots == 0) {
+        if (isTimeSyncPhase(req)) {
           auto r =
               ScriptedV3Agent::report(ScriptedV3Agent::unknownEngineIds, SecurityLevel::AuthNoPriv);
           r.boots = 3;
@@ -1010,7 +1018,7 @@ TEST(ClientV3, TheIdentityPhasesClockIsNotABaseline) {
   agent.setTime(0);
   agent.setResponder(
       [&](const ScriptedV3Agent::Request& req) -> std::optional<ScriptedV3Agent::Reply> {
-        if (!req.message.security.engineId.empty()) return agent.behaveLikeACompliantAgent(req);
+        if (!isIdentityPhase(req)) return agent.behaveLikeACompliantAgent(req);
         auto r =
             ScriptedV3Agent::report(ScriptedV3Agent::unknownEngineIds, SecurityLevel::NoAuthNoPriv);
         r.boots = 900000;
@@ -1038,14 +1046,14 @@ TEST(ClientV3, ASignedButDroppedReplyDoesNotVouchForTheNextOne) {
   int dataRequests = 0;
   agent.setResponder(
       [&](const ScriptedV3Agent::Request& req) -> std::optional<ScriptedV3Agent::Reply> {
-        const auto& usm = req.message.security;
-        if (usm.engineId.empty() || usm.boots == 0) return agent.behaveLikeACompliantAgent(req);
+        if (isIdentityPhase(req) || isTimeSyncPhase(req))
+          return agent.behaveLikeACompliantAgent(req);
         ++dataRequests;
         if (dataRequests == 1) {
           // Signed with the right key, and dropped for naming an Engine we did not address.
           ScriptedV3Agent::Reply reply;
           reply.scoped.pdu = echoAnswer(req.message.scoped.pdu);
-          reply.engineId = Octets{std::byte{0x80}, std::byte{0x00}, std::byte{0x00}};
+          reply.engineId = engineIdNumbered(0xad);
           return reply;
         }
         if (dataRequests == 2) {
@@ -1730,7 +1738,7 @@ TEST(ClientV3, SurfacesADecryptionErrorReport) {
   f.agent = &agent;
   agent.setResponder(
       [&agent](const ScriptedV3Agent::Request& req) -> std::optional<ScriptedV3Agent::Reply> {
-        if (req.message.scoped.pdu.type == PduType::Get && !req.message.security.engineId.empty() &&
+        if (req.message.scoped.pdu.type == PduType::Get && !isIdentityPhase(req) &&
             req.message.scoped.pdu.varbinds.size() == 1) {
           return ScriptedV3Agent::report(ScriptedV3Agent::decryptionErrors,
                                          SecurityLevel::AuthNoPriv);
@@ -1867,7 +1875,7 @@ TEST(ClientV3, AnIdentityPhaseAnsweredWithAResponseStillDiscovers) {
   int identityResponses = 0;
   agent.setResponder(
       [&](const ScriptedV3Agent::Request& req) -> std::optional<ScriptedV3Agent::Reply> {
-        if (!req.message.security.engineId.empty()) return agent.behaveLikeACompliantAgent(req);
+        if (!isIdentityPhase(req)) return agent.behaveLikeACompliantAgent(req);
         ++identityResponses;
         ScriptedV3Agent::Reply reply;
         reply.level = SecurityLevel::NoAuthNoPriv;
@@ -1884,10 +1892,20 @@ TEST(ClientV3, AnIdentityPhaseAnsweredWithAResponseStillDiscovers) {
   EXPECT_EQ(f.response.varbinds[0].name, sysDescr);
 }
 
+// Every request queued behind one Engine Discovery, each failed with the same error.
+void expectEachFailedWith(const std::vector<net::ErrorCode>& errors, int queued, Errc expected) {
+  ASSERT_EQ(errors.size(), static_cast<std::size_t>(queued));
+  for (std::size_t i = 0; i < errors.size(); ++i) {
+    EXPECT_EQ(errors[i], make_error_code(expected))
+        << "request " << i << ": " << errors[i].message();
+  }
+}
+
 // R6 (2): the identity phase's answer, Report or Response, is read only for its engineID, and one
-// that carries none fails that Engine Discovery with UnknownEngineId -- once, at once, and for
-// every request queued behind it. Not a retransmission, not a Timeout at the deadline, and nothing
-// cached: an empty engineID is an illegal size (RFC 3414 section 3.2 step 3).
+// that carries none fails that Engine Discovery with UnknownEngineId, for every request queued
+// behind it, after one datagram. Not a retransmission, not a Timeout at the deadline, and nothing
+// cached: an empty engineID is an illegal size (RFC 3414 section 3.2 step 3). A Client that retried
+// forever would hang this test, which the Fixture leaves to ctest's timeout on purpose.
 class AnIdentityPhaseWithNoEngineId : public testing::TestWithParam<PduType> {};
 
 TEST_P(AnIdentityPhaseWithNoEngineId, FailsTheDiscoveryAndEveryRequestQueuedBehindIt) {
@@ -1898,7 +1916,7 @@ TEST_P(AnIdentityPhaseWithNoEngineId, FailsTheDiscoveryAndEveryRequestQueuedBehi
   f.agent = &agent;
   agent.setResponder(
       [&](const ScriptedV3Agent::Request& req) -> std::optional<ScriptedV3Agent::Reply> {
-        if (!req.message.security.engineId.empty()) return agent.behaveLikeACompliantAgent(req);
+        if (!isIdentityPhase(req)) return agent.behaveLikeACompliantAgent(req);
         auto reply =
             ScriptedV3Agent::report(ScriptedV3Agent::unknownEngineIds, SecurityLevel::NoAuthNoPriv);
         if (GetParam() == PduType::Response) reply.scoped.pdu = echoAnswer(req.message.scoped.pdu);
@@ -1916,11 +1934,7 @@ TEST_P(AnIdentityPhaseWithNoEngineId, FailsTheDiscoveryAndEveryRequestQueuedBehi
   }
   f.run();
 
-  ASSERT_EQ(errors.size(), static_cast<std::size_t>(queued));
-  for (std::size_t i = 0; i < errors.size(); ++i) {
-    EXPECT_EQ(errors[i], make_error_code(Errc::UnknownEngineId))
-        << "request " << i << ": " << errors[i].message();
-  }
+  ASSERT_NO_FATAL_FAILURE(expectEachFailedWith(errors, queued, Errc::UnknownEngineId));
   EXPECT_EQ(agent.requestsSeen(), 1) << "one identity phase, answered, and nothing after it";
   EXPECT_EQ(detail::CacheView::counts(f.client).engines, 0U);
 }
@@ -1932,28 +1946,29 @@ INSTANTIATE_TEST_SUITE_P(ClientV3, AnIdentityPhaseWithNoEngineId,
                                                                : "AnsweredWithAResponse";
                          });
 
+// A compliant Scripted Agent whose first identity phase alone is answered, by someone else, with an
+// engineID that is not the Scripted Agent's. It counts the identity phases it sees, so that a test
+// can see the rediscovery.
+struct FirstIdentityPhaseAnsweredWrongly {
+  int identityPhases = 0;
+
+  ScriptedV3Agent::Responder responder(ScriptedV3Agent& agent) {
+    return [this, &agent](const ScriptedV3Agent::Request& req) {
+      auto reply = agent.behaveLikeACompliantAgent(req);
+      if (!reply || !isIdentityPhase(req)) return reply;
+      if (++identityPhases == 1) reply->engineId = engineIdNumbered(0xad);
+      return reply;
+    };
+  }
+};
+
 // R6 (2)'s other failure, through R6 (1), as the threat model's identity-phase paragraph has it:
 // whoever answers the identity phase first chooses the engineID, and at authNoPriv and authPriv
 // nothing corrects a wrong one within that Engine Discovery. The time-sync phase goes out under
 // it, the real Engine refuses that with an unsigned unknownEngineIDs Report, and the Report ends
 // the discovery with UnknownEngineId, failing every request queued behind it before any is sent.
-// The next request rediscovers, and the wrong Engine it replaces leaves no cache entry behind.
-const Octets wrongEngineId{std::byte{0x80}, std::byte{0x00}, std::byte{0x1f},
-                           std::byte{0x88}, std::byte{0x0b}, std::byte{0xad}};
-
-// A compliant Agent whose first identity phase alone is answered, by someone else, with
-// wrongEngineId. Counts every identity phase, so that a test can see the rediscovery.
-ScriptedV3Agent::Responder wrongAtTheFirstIdentityPhase(ScriptedV3Agent& agent,
-                                                        int& identityPhases) {
-  return [&agent, &identityPhases](const ScriptedV3Agent::Request& req) {
-    auto reply = agent.behaveLikeACompliantAgent(req);
-    if (!reply || !req.message.security.engineId.empty()) return reply;
-    ++identityPhases;
-    if (identityPhases == 1) reply->engineId = wrongEngineId;
-    return reply;
-  };
-}
-
+// The wrong Engine is cached by then; the next request rediscovers, and the real Engine replaces
+// it rather than joining it (threat model B2).
 class AnIdentityPhaseWithAWrongEngineId : public testing::TestWithParam<SecurityLevel> {};
 
 TEST_P(AnIdentityPhaseWithAWrongEngineId, FailsTheDiscoveryAndTheNextRequestRediscovers) {
@@ -1962,19 +1977,22 @@ TEST_P(AnIdentityPhaseWithAWrongEngineId, FailsTheDiscoveryAndTheNextRequestRedi
   f.expectedCompletions = queued + 1;
   const auto creds =
       GetParam() == SecurityLevel::AuthPriv ? privCredentials(PrivProtocol::Aes128) : credentials();
+  FirstIdentityPhaseAnsweredWrongly wrongly;  // before the Scripted Agent, so it outlives it
   ScriptedV3Agent agent(f.io, creds, echoAnswer);
   f.agent = &agent;
-  int identityPhases = 0;
-  agent.setResponder(wrongAtTheFirstIdentityPhase(agent, identityPhases));
+  agent.setResponder(wrongly.responder(agent));
 
   std::vector<net::ErrorCode> errors;
   int requestsSeenAtFailure = 0;
+  std::size_t enginesAtFailure = 0;
   const auto target = targetFor(agent, 1);
   for (int i = 0; i < queued; ++i) {
     f.client.asyncGet(target, creds, {sysDescr}, [&](net::ErrorCode e, const Response&) {
       errors.push_back(e);
       if (errors.size() == static_cast<std::size_t>(queued)) {
         requestsSeenAtFailure = agent.requestsSeen();
+        // Safe from a handler: one thread runs this io_context (CacheView.hpp).
+        enginesAtFailure = detail::CacheView::counts(f.client).engines;
         f.client.asyncGet(target, creds, {sysUpTime}, f.requestToken());
       }
       f.finish();
@@ -1982,17 +2000,16 @@ TEST_P(AnIdentityPhaseWithAWrongEngineId, FailsTheDiscoveryAndTheNextRequestRedi
   }
   f.run();
 
-  ASSERT_EQ(errors.size(), static_cast<std::size_t>(queued));
-  for (std::size_t i = 0; i < errors.size(); ++i) {
-    EXPECT_EQ(errors[i], make_error_code(Errc::UnknownEngineId))
-        << "request " << i << ": " << errors[i].message();
-  }
+  ASSERT_NO_FATAL_FAILURE(expectEachFailedWith(errors, queued, Errc::UnknownEngineId));
   EXPECT_EQ(requestsSeenAtFailure, 2) << "identity, then time sync under the wrong engineID";
+  EXPECT_EQ(enginesAtFailure, 1U) << "the wrong Engine, and it alone, is cached at the failure";
 
+  // Signed, and at authPriv encrypted, under keys localised to the real engineID: the Client
+  // accepts this only with the real Engine cached.
   EXPECT_FALSE(f.ec) << "the next request did not rediscover: " << f.ec.message();
   ASSERT_EQ(f.response.varbinds.size(), 1U);
   EXPECT_EQ(f.response.varbinds[0].name, sysUpTime);
-  EXPECT_EQ(identityPhases, 2);
+  EXPECT_EQ(wrongly.identityPhases, 2);
   EXPECT_EQ(agent.requestsSeen(), 5) << "a second full discovery, then the request";
   EXPECT_EQ(detail::CacheView::counts(f.client).engines, 1U) << "the wrong Engine was kept";
 }
@@ -2009,10 +2026,10 @@ INSTANTIATE_TEST_SUITE_P(ClientV3, AnIdentityPhaseWithAWrongEngineId,
 TEST(ClientV3, AWrongEngineIdFromTheIdentityPhaseIsCorrectedAtNoAuthNoPriv) {
   Fixture f;
   const auto creds = credentials(AuthProtocol::None, SecurityLevel::NoAuthNoPriv);
+  FirstIdentityPhaseAnsweredWrongly wrongly;  // before the Scripted Agent, so it outlives it
   ScriptedV3Agent agent(f.io, creds, echoAnswer);
   f.agent = &agent;
-  int identityPhases = 0;
-  agent.setResponder(wrongAtTheFirstIdentityPhase(agent, identityPhases));
+  agent.setResponder(wrongly.responder(agent));
 
   f.client.asyncGet(targetFor(agent, 0), creds, {sysDescr}, f.requestToken());
   f.run();
@@ -2020,7 +2037,7 @@ TEST(ClientV3, AWrongEngineIdFromTheIdentityPhaseIsCorrectedAtNoAuthNoPriv) {
   EXPECT_FALSE(f.ec) << f.ec.message();
   ASSERT_EQ(f.response.varbinds.size(), 1U);
   EXPECT_EQ(f.response.varbinds[0].name, sysDescr);
-  EXPECT_EQ(identityPhases, 2);
+  EXPECT_EQ(wrongly.identityPhases, 2);
   // Identity, the request under the wrong engineID, identity again, the request again.
   EXPECT_EQ(agent.requestsSeen(), 4);
 }
@@ -2050,11 +2067,6 @@ TEST(ClientV3, RejectsADigestNarrowerThanTheProtocols) {
 // ---------------------------------------------------------------------------
 // Master Keys
 // ---------------------------------------------------------------------------
-
-Octets engineIdNumbered(std::uint8_t n) {
-  return {std::byte{0x80}, std::byte{0x00}, std::byte{0x1f}, std::byte{0x88},
-          std::byte{0x02}, std::byte{0x00}, std::byte{0x00}, std::byte{n}};
-}
 
 TEST(ClientV3MasterKey, AuthNoPrivSucceedsAndDerivesNothing) {
   for (const auto protocol :
@@ -3046,8 +3058,7 @@ TEST(ClientV3Cache, AnIdentityPhaseNamingAFreshEngineIdEachTimeLeavesTheCachesBo
   agent.setResponder(
       [&](const ScriptedV3Agent::Request& req) -> std::optional<ScriptedV3Agent::Reply> {
         auto reply = agent.behaveLikeACompliantAgent(req);
-        if (reply && req.message.security.engineId.empty())
-          reply->engineId = engineIdNumbered(++named);
+        if (reply && isIdentityPhase(req)) reply->engineId = engineIdNumbered(++named);
         return reply;
       });
 
@@ -3111,7 +3122,7 @@ TEST(ClientV3Cache, AForgottenEngineThatComesBackUnchangedIsKept) {
   agent.setResponder(
       [&](const ScriptedV3Agent::Request& req) -> std::optional<ScriptedV3Agent::Reply> {
         if (isTimeSyncPhase(req)) ++timeSyncPhases;
-        if (settled && !reported && !req.message.security.engineId.empty()) {
+        if (settled && !reported && !isIdentityPhase(req)) {
           reported = true;
           return ScriptedV3Agent::report(ScriptedV3Agent::unknownEngineIds,
                                          SecurityLevel::NoAuthNoPriv);

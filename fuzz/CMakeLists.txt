@@ -15,31 +15,14 @@ target_link_options(snmpio_fuzz_options INTERFACE -fsanitize=fuzzer,address,unde
 target_compile_definitions(snmpio_fuzz_options INTERFACE
   ${SNMPIO_ASIO_NO_RECYCLING} ${SNMPIO_STDLIB_HARDENING})
 
-# The library itself has to be instrumented, or coverage feedback sees nothing.
-add_library(snmpio_fuzzed STATIC
-  ${CMAKE_SOURCE_DIR}/src/BerReader.cpp
-  ${CMAKE_SOURCE_DIR}/src/BerWriter.cpp
-  ${CMAKE_SOURCE_DIR}/src/Client.cpp
-  ${CMAKE_SOURCE_DIR}/src/Error.cpp
-  ${CMAKE_SOURCE_DIR}/src/MessageIdGenerator.cpp
-  ${CMAKE_SOURCE_DIR}/src/Oid.cpp
-  ${CMAKE_SOURCE_DIR}/src/Password.cpp
-  ${CMAKE_SOURCE_DIR}/src/Pdu.cpp
-  ${CMAKE_SOURCE_DIR}/src/Usm.cpp
-  ${CMAKE_SOURCE_DIR}/src/V3Message.cpp
-  ${CMAKE_SOURCE_DIR}/src/Value.cpp)
+# The library itself has to be instrumented, or coverage feedback sees nothing. Its sources and
+# Asio wiring are the root's, so those two cannot drift from snmpio's.
+add_library(snmpio_fuzzed STATIC ${SNMPIO_SOURCES})
 target_include_directories(snmpio_fuzzed PUBLIC ${CMAKE_SOURCE_DIR}/include)
-target_link_libraries(snmpio_fuzzed
-  PUBLIC snmpio_fuzz_options ${SNMPIO_ASIO_TARGET} Threads::Threads PRIVATE OpenSSL::Crypto)
-if(SNMPIO_ASIO_INCLUDE_DIRS)
-  target_include_directories(snmpio_fuzzed SYSTEM PUBLIC ${SNMPIO_ASIO_INCLUDE_DIRS})
-endif()
+target_link_libraries(snmpio_fuzzed PUBLIC snmpio_fuzz_options)
+snmpio_use_asio(snmpio_fuzzed)
+target_link_libraries(snmpio_fuzzed PRIVATE OpenSSL::Crypto)
 target_compile_features(snmpio_fuzzed PUBLIC cxx_std_20)
-if(SNMP_USE_BOOST_ASIO)
-  target_compile_definitions(snmpio_fuzzed PUBLIC SNMPIO_USE_BOOST_ASIO=1)
-else()
-  target_compile_definitions(snmpio_fuzzed PUBLIC ASIO_STANDALONE=1)
-endif()
 
 foreach(target FuzzBerValue FuzzBerVarbindList FuzzClient FuzzOidText FuzzV2cMessage FuzzV3Message)
   add_executable(${target} ${target}.cpp)

@@ -37,6 +37,7 @@ namespace {
 
 using test::derivationHeld;
 using test::DeriverHold;
+using test::echoAnswer;
 using test::FailingAllocation;
 using test::longDeadline;
 using test::longDeadlineTarget;
@@ -57,15 +58,6 @@ const std::size_t masterKeySize = keySize(AuthProtocol::Sha224);
 Credentials credentials() {
   return Credentials{"bert",       SecurityLevel::AuthNoPriv, AuthProtocol::Sha224,
                      "maplesyrup", PrivProtocol::None,        ""};
-}
-
-Pdu echoAnswer(const Pdu& request) {
-  Pdu p;
-  p.type = PduType::Response;
-  for (const auto& vb : request.varbinds) {
-    p.varbinds.push_back(Varbind{vb.name, Octets{std::byte{'o'}, std::byte{'k'}}});
-  }
-  return p;
 }
 
 TEST(ClientExceptions, ADiscoveryThatThrowsSurfacesForEachWaiterAndLeavesNoneQueued) {

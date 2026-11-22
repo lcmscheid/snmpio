@@ -23,7 +23,7 @@
 #include "AfterHops.hpp"
 #include "CompletionOracle.hpp"
 #include "Deadlines.hpp"
-#include "OutstandingPrinter.hpp"
+#include "OutstandingReads.hpp"
 #include "ScriptedAgent.hpp"
 #include "ScriptedV3Agent.hpp"
 
@@ -324,14 +324,15 @@ void destroyWhileOthersRunAndInitiate(int round) {
   const bool doomedFinished = doomedCompleted.waitFor(atOnceLimit(longDeadline));
 
   initiator.join();
+  // #51: read while the runners still run it, on its strand, and before stop() could clear
+  // anything: destroying its sibling mid-request, on another thread, left the survivor holding
+  // nothing of its own requests', which have all completed by now.
+  const auto survivorHeld = test::settledOnStrand(survivor, longDeadline);
   survivor.stop();
   for (auto* agent : {&silent, &retransmitted, &walked, &answering})
     net::asio::dispatch(agent->executor(), [agent] { agent->close(); });
   net::asio::dispatch(withholding.executor(), [&withholding] { withholding.close(); });
   for (auto& runner : runners) runner.join();
-  // #51: read with every runner joined, as the view requires. Destroying its sibling mid-request,
-  // on another thread, left the survivor holding nothing of its own requests'.
-  const auto survivorHeld = OutstandingView::counts(survivor);
 
   for (std::size_t i = 0; i < reached.size(); ++i)
     EXPECT_TRUE(reached.at(i)) << "the doomed Client's request never reached " << waitNames.at(i);
@@ -351,7 +352,8 @@ void destroyWhileOthersRunAndInitiate(int round) {
   ASSERT_TRUE(afterDestruction.has_value());
   EXPECT_TRUE(afterDestruction->completedExactlyOnce({net::ErrorCode{}}))
       << "the survivor's request after destruction";
-  EXPECT_EQ(survivorHeld, OutstandingCounts{}) << "the survivor still held something";
+  ASSERT_TRUE(survivorHeld.has_value()) << "the survivor's strand never ran the read";
+  EXPECT_EQ(*survivorHeld, OutstandingCounts{}) << "the survivor still held something";
 }
 
 TEST(ClientLifetime, DestroyedWhileOtherThreadsRunAndInitiate) {

@@ -2,15 +2,20 @@
 
 #include <chrono>
 #include <functional>
+#include <future>
+#include <latch>
 #include <optional>
 #include <span>
+#include <thread>
+#include <utility>
+#include <vector>
 
 #include <snmpio/Client.hpp>
 #include <snmpio/detail/OutstandingView.hpp>
 
 #include "Deadlines.hpp"
 #include "DeriverHold.hpp"
-#include "OutstandingPrinter.hpp"
+#include "OutstandingReads.hpp"
 #include "ScriptedAgent.hpp"
 #include "ScriptedV3Agent.hpp"
 
@@ -24,8 +29,9 @@ namespace {
 
 using detail::OutstandingCounts;
 using detail::OutstandingView;
-using test::derivationHeld;
+using test::countsOnStrand;
 using test::DeriverHold;
+using test::echoAnswer;
 using test::longDeadlineTarget;
 using test::respondWith;
 using test::ScriptedAgent;
@@ -37,13 +43,6 @@ const Oid sysDescr{1, 3, 6, 1, 2, 1, 1, 1, 0};
 Credentials credentials() {
   return Credentials{"bert",       SecurityLevel::AuthPriv, AuthProtocol::Sha256,
                      "maplesyrup", PrivProtocol::Aes128,    "privatepass"};
-}
-
-Pdu echoAnswer(const Pdu& request) {
-  Pdu p;
-  p.type = PduType::Response;
-  p.varbinds = request.varbinds;
-  return p;
 }
 
 // One io_context on the test thread, stopped once every request has completed.
@@ -78,6 +77,42 @@ struct Fixture {
     ASSERT_TRUE(heldAtTheEnd.has_value());
     EXPECT_EQ(*heldAtTheEnd, OutstandingCounts{}) << "still held at the last completion";
   }
+};
+
+// Reads the view on the test's one io_context until it says `expected`, or until the limit, and
+// hands over what it last read. A read at a fixed moment would race a slow runner to the state it
+// expects; this waits for the state, and only one that never comes fails the comparison after.
+class Poll {
+ public:
+  Poll(net::IoContext& io, const Client& client) : m_timer(io), m_client(&client) {}
+
+  void until(const OutstandingCounts& expected, std::function<void(OutstandingCounts)> then) {
+    m_expected = expected;
+    m_then = std::move(then);
+    m_giveUpAt = std::chrono::steady_clock::now() + test::longDeadline;
+    step();
+  }
+
+ private:
+  void step() {
+    const auto counts = OutstandingView::counts(*m_client);
+    if (counts == m_expected || std::chrono::steady_clock::now() >= m_giveUpAt) {
+      // Moved out first, so that `then` may start the next poll.
+      const auto then = std::exchange(m_then, nullptr);
+      then(counts);
+      return;
+    }
+    m_timer.expires_after(std::chrono::milliseconds(1));
+    m_timer.async_wait([this](net::ErrorCode ec) {
+      if (!ec) step();
+    });
+  }
+
+  net::SteadyTimer m_timer;
+  const Client* m_client;
+  OutstandingCounts m_expected;
+  std::function<void(OutstandingCounts)> m_then;
+  std::chrono::steady_clock::time_point m_giveUpAt;
 };
 
 TEST(Outstanding, AnExchangeAwaitingAReplyIsHeldUntilItIsAnswered) {
@@ -141,36 +176,40 @@ TEST(Outstanding, RequestsQueuedBehindADiscoveryAreItsWaiters) {
 }
 
 // With the Deriver held, the discovery gets past its identity phase and then parks on the Master
-// Key its time-sync phase needs: a waiter too, beside the two requests parked on the discovery.
-TEST(Outstanding, ADiscoveryWaitingOnADerivationIsOneOfItsWaiters) {
+// Key its time-sync phase needs: the derivation's waiter, beside the two requests parked on the
+// discovery. The Deriver is let go only once that has been read.
+TEST(Outstanding, ADiscoveryWaitingOnADerivationIsTheDerivationsWaiter) {
   Fixture f;
   f.expected = 2;
   ScriptedV3Agent agent(f.io, credentials(), echoAnswer);
   f.closeAgent = [&agent] { agent.close(); };
   DeriverHold hold(f.client);
-  hold.releaseAfter(f.io, derivationHeld);
 
   const auto target = longDeadlineTarget(agent);
   f.client.asyncGet(target, credentials(), {sysDescr}, f.token());
   f.client.asyncGet(target, credentials(), {sysDescr}, f.token());
+  const OutstandingCounts parked{.discoveries = 1, .derivations = 1, .waiters = 3};
   std::optional<OutstandingCounts> whileHeld;
-  net::SteadyTimer check(f.io, derivationHeld / 2);
-  check.async_wait([&](net::ErrorCode) { whileHeld = OutstandingView::counts(f.client); });
+  Poll poll(f.io, f.client);
+  poll.until(parked, [&](OutstandingCounts counts) {
+    whileHeld = counts;
+    hold.release();
+  });
   f.run();
 
   ASSERT_TRUE(whileHeld.has_value());
-  EXPECT_EQ(*whileHeld, (OutstandingCounts{.discoveries = 1, .derivations = 1, .waiters = 3}));
+  EXPECT_EQ(*whileHeld, parked);
 }
 
 // A request cancelled out of a discovery leaves at once, and stops being its waiter; the discovery
-// carries on (ADR-0003), and once it has settled nothing is held.
+// carries on (ADR-0003), and once it has settled nothing is held. The cancellation goes out only
+// once both requests are parked, and the Deriver is let go only once the cancelled one has left.
 TEST(Outstanding, ARequestCancelledOutOfADiscoveryStopsWaitingOnIt) {
   Fixture f;
   f.expected = 2;
   ScriptedV3Agent agent(f.io, credentials(), echoAnswer);
   f.closeAgent = [&agent] { agent.close(); };
   DeriverHold hold(f.client);
-  hold.releaseAfter(f.io, derivationHeld);
 
   net::asio::cancellation_signal signal;
   const auto target = longDeadlineTarget(agent);
@@ -181,16 +220,68 @@ TEST(Outstanding, ARequestCancelledOutOfADiscoveryStopsWaitingOnIt) {
         f.completed();
       }));
   f.client.asyncGet(target, credentials(), {sysDescr}, f.token());
+  const OutstandingCounts bothParked{.discoveries = 1, .derivations = 1, .waiters = 3};
+  const OutstandingCounts oneLeft{.discoveries = 1, .derivations = 1, .waiters = 2};
+  std::optional<OutstandingCounts> beforeCancel;
   std::optional<OutstandingCounts> afterCancel;
-  net::SteadyTimer cancelAt(f.io, derivationHeld / 4);
-  cancelAt.async_wait(
-      [&signal](net::ErrorCode) { signal.emit(net::asio::cancellation_type::terminal); });
-  net::SteadyTimer check(f.io, derivationHeld / 2);
-  check.async_wait([&](net::ErrorCode) { afterCancel = OutstandingView::counts(f.client); });
+  Poll poll(f.io, f.client);
+  poll.until(bothParked, [&](OutstandingCounts counts) {
+    beforeCancel = counts;
+    signal.emit(net::asio::cancellation_type::terminal);
+    poll.until(oneLeft, [&](OutstandingCounts after) {
+      afterCancel = after;
+      hold.release();
+    });
+  });
   f.run();
 
+  ASSERT_TRUE(beforeCancel.has_value());
+  EXPECT_EQ(*beforeCancel, bothParked);
   ASSERT_TRUE(afterCancel.has_value());
-  EXPECT_EQ(*afterCancel, (OutstandingCounts{.discoveries = 1, .derivations = 1, .waiters = 2}));
+  EXPECT_EQ(*afterCancel, oneLeft);
+}
+
+// The read the soak and the destruction tests make while other threads run the Client: posted to
+// its strand, from a thread that is not running it. It sees an exchange still awaiting its reply,
+// and nothing once the request has completed -- before stop(), so settled rather than cleared.
+TEST(Outstanding, AReadOnTheStrandSeesWhatOtherThreadsLeaveHeld) {
+  net::IoContext io;
+  auto work = net::asio::make_work_guard(io);
+  Client client(io.get_executor());
+  std::latch asked(1);
+  std::optional<V2cMessage> question;
+  ScriptedAgent agent(io, [&](const V2cMessage& msg) -> std::optional<Pdu> {
+    question = msg;
+    asked.count_down();
+    return std::nullopt;
+  });
+  constexpr int runnerCount = 4;
+  std::vector<std::thread> runners;
+  runners.reserve(runnerCount);
+  for (int i = 0; i < runnerCount; ++i) runners.emplace_back([&io] { io.run(); });
+
+  std::promise<net::ErrorCode> completed;
+  client.asyncGet(longDeadlineTarget(agent), publicCommunity, {sysDescr},
+                  [&completed](net::ErrorCode ec, const Response&) { completed.set_value(ec); });
+  asked.wait();
+  const auto whileAsked = countsOnStrand(client);
+  net::asio::dispatch(agent.executor(),
+                      [&] { agent.answerLate(*question, respondWith({Varbind{sysDescr, null}})); });
+  auto answer = completed.get_future();
+  const bool answered = answer.wait_for(test::longDeadline) == std::future_status::ready;
+  const auto afterAnswer = countsOnStrand(client);
+
+  client.stop();
+  net::asio::dispatch(agent.executor(), [&agent] { agent.close(); });
+  work.reset();
+  for (auto& runner : runners) runner.join();
+
+  ASSERT_TRUE(whileAsked.has_value()) << "the strand never ran the read";
+  EXPECT_EQ(*whileAsked, (OutstandingCounts{.exchanges = 1}));
+  ASSERT_TRUE(answered) << "the request never completed";
+  EXPECT_FALSE(answer.get()) << "the request failed";
+  ASSERT_TRUE(afterAnswer.has_value()) << "the strand never ran the read";
+  EXPECT_EQ(*afterAnswer, OutstandingCounts{});
 }
 
 }  // namespace

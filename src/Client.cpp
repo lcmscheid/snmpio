@@ -2081,4 +2081,11 @@ detail::OutstandingCounts detail::OutstandingView::counts(const Client& client) 
   return client.m_impl->outstandingCounts();
 }
 
+void detail::OutstandingView::countsOnStrand(const Client& client,
+                                             std::function<void(const OutstandingCounts&)> then) {
+  net::asio::post(client.m_strand, [impl = client.m_impl, then = std::move(then)] {
+    then(impl->outstandingCounts());
+  });
+}
+
 }  // namespace snmpio

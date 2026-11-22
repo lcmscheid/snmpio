@@ -259,11 +259,11 @@ install(TARGETS snmpio snmpio_warnings snmpio_sanitizers
   LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
   RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 
-# detail/CacheView.hpp and detail/OutstandingView.hpp are the tests' windows onto a Client, not
-# API: Client.hpp only forward-declares them, so an installed snmpio is whole without them.
+# detail/*View.hpp -- CacheView, DeriverView, MessageIdView, OutstandingView -- are the tests'
+# windows onto a Client, not API: Client.hpp only forward-declares them, so an installed snmpio is
+# whole without them. A pattern rather than a list, so that the next view is left out too.
 install(DIRECTORY include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
-  PATTERN "CacheView.hpp" EXCLUDE
-  PATTERN "OutstandingView.hpp" EXCLUDE)
+  PATTERN "*View.hpp" EXCLUDE)
 
 install(EXPORT snmpioTargets
   FILE snmpioTargets.cmake

@@ -2,6 +2,7 @@
 #define SNMPIO_DETAIL_OUTSTANDINGVIEW_HPP
 
 #include <cstddef>
+#include <functional>
 
 #include <snmpio/Client.hpp>
 
@@ -31,11 +32,15 @@ struct OutstandingCounts {
 // public API shows only what reaches the wire. Not part of the API, and nothing outside the tests
 // calls it.
 //
-// It reads the Client directly rather than through its strand, so it is only safe while nothing
-// else is running that strand: once io_context::run() has returned, or from a handler on the same
-// single-threaded io_context.
+// counts() reads the Client directly rather than through its strand, so it is only safe while
+// nothing else is running that strand: once io_context::run() has returned, or from a handler on
+// the same single-threaded io_context. countsOnStrand() is the read for anywhere else: it posts to
+// the strand and hands the counts to `then` there, owning the Client's state until it has, so it
+// is safe from any thread while others run the Client, and even once the Client has gone.
 struct OutstandingView {
   [[nodiscard]] static OutstandingCounts counts(const Client& client);
+  static void countsOnStrand(const Client& client,
+                             std::function<void(const OutstandingCounts&)> then);
 };
 
 }  // namespace snmpio::detail

@@ -35,6 +35,7 @@ namespace {
 using test::atOnceLimit;
 using test::derivationHeld;
 using test::DeriverHold;
+using test::echoAnswer;
 using test::ScriptedV3Agent;
 using test::targetFor;
 using test::withMasterKeys;
@@ -61,15 +62,6 @@ Credentials asErnie(Credentials creds) {
 }
 
 // The data plane every well-behaved case here uses: echo the requested OIDs back with a value.
-Pdu echoAnswer(const Pdu& request) {
-  Pdu p;
-  p.type = PduType::Response;
-  for (const auto& vb : request.varbinds) {
-    p.varbinds.push_back(Varbind{vb.name, Octets{std::byte{'o'}, std::byte{'k'}}});
-  }
-  return p;
-}
-
 // Engine Discovery's two phases, told apart as the Client sends them: the identity phase names no
 // engineID (RFC 3414 section 4), and the time-sync phase names the discovered one with zero boots.
 bool isIdentityPhase(const ScriptedV3Agent::Request& req) {

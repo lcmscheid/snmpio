@@ -14,36 +14,22 @@
 set -euo pipefail
 source "$(dirname "$0")/hardening-lib.sh"
 
-usage='usage: hardening-reached.sh [--library-only] BUILD [FLAG...]'
-dirs="src tests"
+dirs=(src tests)
 if [ "${1:-}" = --library-only ]; then
-  dirs="src"
+  dirs=(src)
   shift
 fi
-build=${1:?$usage}
+build=${1:?usage: hardening-reached.sh [--library-only] BUILD [FLAG...]}
 shift
 
-read_flags "$build/hardening/compile-flags.txt"
-compile=("${FLAGS[@]}" "$@")
-read_flags "$build/hardening/link-flags.txt"
-link=("${FLAGS[@]}")
-
-# The lists are what the checks below check against, so an emptied or broken list would pass them
-# having checked nothing. A flag from each half, and the x86_64 row where this is x86_64, must be
-# there.
-required=(-D_GLIBCXX_ASSERTIONS -D_FORTIFY_SOURCE=3 -Wl,-z,now)
-[ "$(uname -m)" = x86_64 ] && required+=(-fcf-protection=full)
-for flag in "${required[@]}"; do
-  printf '%s\n' "${compile[@]}" "${link[@]}" | grep -qxF -e "$flag" \
-    || { echo "$build/hardening/ does not list $flag: is SNMPIO_HARDENING on?"; exit 1; }
-done
-
-compile_lines_carry "$build/compile_commands.json" "$dirs" "${compile[@]}"
-link_lines_carry "$build/build.ninja" "${link[@]}"
+read_hardening_lists "$build"
+compile_lines_carry "$build/compile_commands.json" "${dirs[@]}" -- "${COMPILE[@]}" "$@"
+link_lines_carry "$build" "${LINK[@]}"
 binaries=()
-[ "$dirs" = src ] \
-  || mapfile -t binaries < <(find "$build/tests" -maxdepth 1 -type f -executable -name 'snmpio_*')
-mapfile -t -O "${#binaries[@]}" binaries \
-  < <(find "$build" -maxdepth 1 -type f -name 'libsnmpio.so*')
-elf_hardened "${binaries[@]}"
-echo "every compile and link line of ours carries all ${#compile[@]} + ${#link[@]} flags"
+if [ "${#dirs[@]}" -gt 1 ]; then
+  find_files "$build/tests" -executable -name 'snmpio_*'
+  binaries=("${FILES[@]}")
+fi
+find_files "$build" -name 'libsnmpio.so*'
+elf_hardened "${binaries[@]}" "${FILES[@]}"
+echo "every compile and link line of ours carries all $((${#COMPILE[@]} + $#)) + ${#LINK[@]} flags"

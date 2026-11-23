@@ -322,9 +322,10 @@ jobs:
         shell: bash
         run: |
           .github/scripts/hardening-reached.sh build -stdlib=libc++
-          binaries=$(find build/tests -maxdepth 1 -type f -executable -name 'snmpio_*' || true)
-          [ -n "$binaries" ] || { echo "no test binaries to check"; exit 1; }
-          for binary in $binaries; do
+          source .github/scripts/hardening-lib.sh
+          find_files build/tests -executable -name 'snmpio_*'
+          [ "${#FILES[@]}" -gt 0 ] || { echo "no test binaries to check"; exit 1; }
+          for binary in "${FILES[@]}"; do
             libs=$(ldd "$binary")
             grep -q 'libc++\.so' <<<"$libs" || { echo "$binary does not link libc++"; exit 1; }
             if grep -q 'libstdc++' <<<"$libs"; then

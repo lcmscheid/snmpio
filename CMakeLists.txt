@@ -38,12 +38,14 @@ if(SNMPIO_TSAN AND NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang")
 endif()
 
 # The OpenSSF set is GCC's and Clang's flags, and its linker half is GNU ld's -z options, which
-# only an ELF target has: AppleClang, and Clang on macOS or Windows, would configure and then fail
-# at link. _FORTIFY_SOURCE does nothing without optimisation, and glibc says so with a #warning that
-# SNMPIO_WERROR turns into a failed build; the OpenSSF set assumes -O2. A sanitizer replaces the
-# very functions _FORTIFY_SOURCE wraps, so the two would each be checking less than they claim.
+# only an ELF target has: AppleClang, and GCC or Clang on macOS, Windows or Cygwin, would configure
+# and then fail at link. Those are named rather than asking for ELF, because CMake documents no
+# variable that says what the target's object format is. _FORTIFY_SOURCE does nothing without
+# optimisation, and glibc says so with a #warning that SNMPIO_WERROR turns into a failed build; the
+# OpenSSF set assumes -O2. A sanitizer replaces the very functions _FORTIFY_SOURCE wraps, so the
+# two would each be checking less than they claim.
 if(SNMPIO_HARDENING)
-  if(NOT CMAKE_CXX_COMPILER_ID MATCHES "^(GNU|Clang)$" OR APPLE OR WIN32)
+  if(NOT CMAKE_CXX_COMPILER_ID MATCHES "^(GNU|Clang)$" OR APPLE OR WIN32 OR CYGWIN)
     message(FATAL_ERROR
       "SNMPIO_HARDENING is the OpenSSF flag set for GCC and Clang on an ELF target.")
   endif()
@@ -284,15 +286,20 @@ snmpio_harden(snmpio)
 # flag reached each of our compile and link lines (.github/scripts/hardening-reached.sh), and that
 # none reached a consumer (hardening-stays-ours.sh). CI reads them rather than naming the flags
 # itself, so this file is the only place the set is written down. The link options are written in
-# GCC's -Wl, spelling; CMake gives Clang -Xlinker instead, and the scripts read both.
-list(TRANSFORM SNMPIO_STDLIB_HARDENING PREPEND "-D" OUTPUT_VARIABLE SNMPIO_HARDENING_FLAGS)
-list(APPEND SNMPIO_HARDENING_FLAGS ${SNMPIO_HARDENING_COMPILE_OPTIONS})
-list(JOIN SNMPIO_HARDENING_FLAGS "\n" SNMPIO_HARDENING_FLAGS)
-file(WRITE "${PROJECT_BINARY_DIR}/hardening/compile-flags.txt" "${SNMPIO_HARDENING_FLAGS}\n")
-list(TRANSFORM SNMPIO_HARDENING_LINK_OPTIONS REPLACE "^LINKER:" "-Wl,"
-  OUTPUT_VARIABLE SNMPIO_HARDENING_FLAGS)
-list(JOIN SNMPIO_HARDENING_FLAGS "\n" SNMPIO_HARDENING_FLAGS)
-file(WRITE "${PROJECT_BINARY_DIR}/hardening/link-flags.txt" "${SNMPIO_HARDENING_FLAGS}\n")
+# GCC's -Wl, spelling; CMake gives Clang -Xlinker instead, and the scripts read both. Only with the
+# option on, and removed with it off, so a build reconfigured without it has no stale lists.
+if(SNMPIO_HARDENING)
+  list(TRANSFORM SNMPIO_STDLIB_HARDENING PREPEND "-D" OUTPUT_VARIABLE SNMPIO_COMPILE_FLAG_LIST)
+  list(APPEND SNMPIO_COMPILE_FLAG_LIST ${SNMPIO_HARDENING_COMPILE_OPTIONS})
+  list(JOIN SNMPIO_COMPILE_FLAG_LIST "\n" SNMPIO_COMPILE_FLAG_LINES)
+  file(WRITE "${PROJECT_BINARY_DIR}/hardening/compile-flags.txt" "${SNMPIO_COMPILE_FLAG_LINES}\n")
+  list(TRANSFORM SNMPIO_HARDENING_LINK_OPTIONS REPLACE "^LINKER:" "-Wl,"
+    OUTPUT_VARIABLE SNMPIO_LINK_FLAG_LIST)
+  list(JOIN SNMPIO_LINK_FLAG_LIST "\n" SNMPIO_LINK_FLAG_LINES)
+  file(WRITE "${PROJECT_BINARY_DIR}/hardening/link-flags.txt" "${SNMPIO_LINK_FLAG_LINES}\n")
+else()
+  file(REMOVE_RECURSE "${PROJECT_BINARY_DIR}/hardening")
+endif()
 
 # Asio hands freed handler and coroutine-frame memory to a thread-local cache and reuses it, so a
 # use-after-free in a sanitizer build touches a live recycled block and goes unreported. None of

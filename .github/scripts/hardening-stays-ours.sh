@@ -16,26 +16,18 @@
 set -euo pipefail
 source "$(dirname "$0")/hardening-lib.sh"
 
-library=${1:?usage: hardening-stays-ours.sh LIBRARY CONSUMER PREFIX}
-consumer=${2:?usage: hardening-stays-ours.sh LIBRARY CONSUMER PREFIX}
-prefix=${3:?usage: hardening-stays-ours.sh LIBRARY CONSUMER PREFIX}
+usage='usage: hardening-stays-ours.sh LIBRARY CONSUMER PREFIX'
+library=${1:?$usage}
+consumer=${2:?$usage}
+prefix=${3:?$usage}
 
-read_flags "$library/hardening/compile-flags.txt"
-compile=("${FLAGS[@]}")
-read_flags "$library/hardening/link-flags.txt"
-link=("${FLAGS[@]}")
-# An emptied list would find nothing and pass, so a flag from each half must be there.
-for flag in -D_GLIBCXX_ASSERTIONS -D_FORTIFY_SOURCE=3 -Wl,-z,now; do
-  printf '%s\n' "${compile[@]}" "${link[@]}" | grep -qxF -e "$flag" \
-    || { echo "$library/hardening/ does not list $flag: is SNMPIO_HARDENING on?"; exit 1; }
-done
-
-compile_lines_carry "$library/compile_commands.json" "src" "${compile[@]}"
+read_hardening_lists "$library"
+compile_lines_carry "$library/compile_commands.json" src -- "${COMPILE[@]}"
 
 shopt -s nullglob
 installed=("$prefix"/lib*/cmake/snmpio/*.cmake)
 shopt -u nullglob
 [ "${#installed[@]}" -gt 0 ] || { echo "nothing to check: no CMake files under $prefix"; exit 1; }
-absent "${compile[@]}" "${link[@]}" -- \
+absent "${COMPILE[@]}" "${LINK[@]}" -- \
   "$consumer/compile_commands.json" "$consumer/build.ninja" "${installed[@]}"
-echo "none of ${#compile[@]} + ${#link[@]} flags reached the consumer"
+echo "none of ${#COMPILE[@]} + ${#LINK[@]} flags reached the consumer"

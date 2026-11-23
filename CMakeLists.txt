@@ -25,6 +25,7 @@ option(SNMPIO_SANITIZE "Enable address and undefined-behaviour sanitizers" OFF)
 option(SNMPIO_TSAN "Enable the thread sanitizer (Clang; not together with SNMPIO_SANITIZE)" OFF)
 option(SNMPIO_WERROR "Treat warnings as errors" OFF)
 option(SNMPIO_CLANG_TIDY "Run clang-tidy as part of the build" OFF)
+option(SNMPIO_HARDENING "Build our own targets with the OpenSSF compiler hardening flags" OFF)
 
 # TSan and ASan cannot share a process, and GCC with TSan cannot build Asio warning-free: it warns
 # that TSan does not model std::atomic_thread_fence, which Asio's fenced blocks use (research note
@@ -34,6 +35,23 @@ if(SNMPIO_TSAN AND SNMPIO_SANITIZE)
 endif()
 if(SNMPIO_TSAN AND NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang")
   message(FATAL_ERROR "SNMPIO_TSAN requires Clang; configure with -DCMAKE_CXX_COMPILER=clang++.")
+endif()
+
+# _FORTIFY_SOURCE does nothing without optimisation, and glibc says so with a #warning that
+# SNMPIO_WERROR turns into a failed build; the OpenSSF set assumes -O2. A sanitizer replaces the
+# very functions _FORTIFY_SOURCE wraps, so the two would each be checking less than they claim.
+if(SNMPIO_HARDENING)
+  if(NOT CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    message(FATAL_ERROR "SNMPIO_HARDENING is the OpenSSF flag set for GCC and Clang.")
+  endif()
+  if(SNMPIO_SANITIZE OR SNMPIO_TSAN)
+    message(FATAL_ERROR "SNMPIO_HARDENING cannot be combined with a sanitizer; pick one.")
+  endif()
+  if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+    message(FATAL_ERROR
+      "SNMPIO_HARDENING needs an optimised build: _FORTIFY_SOURCE does nothing at -O0. "
+      "Use RelWithDebInfo, as the hardened preset does.")
+  endif()
 endif()
 
 # clang-tidy needs a compilation database whenever it is run out of band, so always emit one.
@@ -213,6 +231,40 @@ set(SNMPIO_STDLIB_HARDENING
   _GLIBCXX_ASSERTIONS
   _LIBCPP_HARDENING_MODE=_LIBCPP_HARDENING_MODE_FAST)
 target_compile_definitions(snmpio PRIVATE ${SNMPIO_STDLIB_HARDENING})
+
+# The OpenSSF Compiler Options Hardening Guide's TL;DR set, its x86_64 row and its production row
+# (research note 5.1; #46), behind SNMPIO_HARDENING. Opt-in and PRIVATE to our own targets for the
+# reason the standard-library macros are PRIVATE, only more so: most of these are the consumer's
+# build's business, and some -- -ftrivial-auto-var-init, -fno-strict-aliasing -- change what code
+# compiles to. Lists, not an INTERFACE target, for the same export reason. Empty when the option is
+# off, so applying them is unconditional.
+#
+# The set less what is already here: -Wall and -Wconversion are snmpio_warnings', and the two
+# standard-library macros are SNMPIO_STDLIB_HARDENING, on in every build. -O2 is RelWithDebInfo's,
+# and the configure above refuses Debug. -U first, as the guide has it, so a toolchain that
+# defines _FORTIFY_SOURCE itself, as Ubuntu's GCC does, is overridden rather than redefined.
+#
+# The link options matter wherever we link: the test binaries, and snmpio itself in a shared build.
+# A static archive is not linked, and CMake applies LINK_OPTIONS to the link step alone.
+set(SNMPIO_HARDENING_COMPILE_OPTIONS)
+set(SNMPIO_HARDENING_LINK_OPTIONS)
+if(SNMPIO_HARDENING)
+  set(SNMPIO_HARDENING_COMPILE_OPTIONS
+    -Wformat -Wformat=2 -Wimplicit-fallthrough -Werror=format-security
+    -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=3
+    -fstrict-flex-arrays=3 -fstack-clash-protection -fstack-protector-strong
+    # production
+    -fno-delete-null-pointer-checks -fno-strict-overflow -fno-strict-aliasing
+    -ftrivial-auto-var-init=zero)
+  if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$")
+    list(APPEND SNMPIO_HARDENING_COMPILE_OPTIONS -fcf-protection=full)
+  endif()
+  set(SNMPIO_HARDENING_LINK_OPTIONS
+    LINKER:-z,nodlopen LINKER:-z,noexecstack LINKER:-z,relro LINKER:-z,now
+    LINKER:--as-needed LINKER:--no-copy-dt-needed-entries)
+endif()
+target_compile_options(snmpio PRIVATE ${SNMPIO_HARDENING_COMPILE_OPTIONS})
+target_link_options(snmpio PRIVATE ${SNMPIO_HARDENING_LINK_OPTIONS})
 
 # Asio hands freed handler and coroutine-frame memory to a thread-local cache and reuses it, so a
 # use-after-free in a sanitizer build touches a live recycled block and goes unreported. None of

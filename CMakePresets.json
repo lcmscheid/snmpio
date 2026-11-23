@@ -52,6 +52,13 @@
       }
     },
     {
+      "name": "hardened",
+      "inherits": "default",
+      "displayName": "OpenSSF hardening flags",
+      "description": "The OpenSSF compiler hardening set on our own targets, never exported (#46).",
+      "cacheVariables": { "SNMPIO_HARDENING": "ON" }
+    },
+    {
       "name": "tidy",
       "inherits": "default",
       "displayName": "clang-tidy in the build",
@@ -77,6 +84,7 @@
     { "name": "debug", "configurePreset": "debug" },
     { "name": "asan", "configurePreset": "asan" },
     { "name": "tsan", "configurePreset": "tsan" },
+    { "name": "hardened", "configurePreset": "hardened" },
     { "name": "tidy", "configurePreset": "tidy" },
     { "name": "fuzz", "configurePreset": "fuzz" }
   ],
@@ -91,6 +99,7 @@
     { "name": "standalone", "inherits": "base", "configurePreset": "standalone" },
     { "name": "debug", "inherits": "base", "configurePreset": "debug" },
     { "name": "asan", "inherits": "base", "configurePreset": "asan" },
-    { "name": "tsan", "inherits": "base", "configurePreset": "tsan" }
+    { "name": "tsan", "inherits": "base", "configurePreset": "tsan" },
+    { "name": "hardened", "inherits": "base", "configurePreset": "hardened" }
   ]
 }

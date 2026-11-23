@@ -73,6 +73,80 @@ jobs:
       - name: Test
         run: ctest --test-dir build --output-on-failure
 
+  # The OpenSSF Compiler Options Hardening Guide's set -- its TL;DR, x86_64 and production rows --
+  # on our own targets, by the `hardened` preset this job is the proof of (#46). The guide counts
+  # code that cannot be built with them as a bug, so both compilers build it and run the suite.
+  # The flags are PRIVATE and opt-in (CMakeLists.txt says why); the package job checks that none
+  # reaches a consumer.
+  hardened:
+    name: ${{ matrix.compiler }} / boost / hardened
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        compiler: [gcc, clang]
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build libboost-system-dev libgtest-dev libssl-dev
+
+      - name: Configure
+        run: |
+          cmake --preset hardened \
+            -DCMAKE_CXX_COMPILER=${{ matrix.compiler == 'gcc' && 'g++' || 'clang++' }}
+
+      - name: Build
+        run: cmake --build --preset hardened
+
+      # A flag that stopped reaching the build would leave this job green: Ubuntu's GCC fortifies
+      # and protects the stack by default, so the binaries would look much the same. So every
+      # compile line of ours must carry a flag from each of the guide's three rows, and the test
+      # binaries must carry what the linker half asks for: full RELRO, bind-now and a stack that is
+      # not executable. -z nodlopen is not read back, as it marks shared objects only. A line is
+      # ours when its source file is under src/ or tests/, as in the libcxx job, which says why
+      # the step is bash and how jq's own failure is told from "no match".
+      #
+      # CompilerHardening.FortifySourceStopsAnOverflowingCopy is what fails if _FORTIFY_SOURCE is
+      # on the line and not honoured.
+      - name: Hardening reached the build
+        shell: bash
+        run: |
+          commands=build/hardened/compile_commands.json
+          jq empty "$commands" || { echo "no readable $commands"; exit 1; }
+          ours='[.[] | select(.file | startswith($root + "src/") or startswith($root + "tests/"))]'
+          for dir in src tests; do
+            jq -e --arg root "$PWD/" --arg dir "$PWD/$dir/" \
+                "$ours | any(.file | startswith(\$dir))" "$commands" \
+                > /dev/null || { echo "no compile line of ours under $dir/"; exit 1; }
+          done
+          for flag in -D_FORTIFY_SOURCE=3 -fstack-protector-strong -fcf-protection=full \
+              -ftrivial-auto-var-init=zero; do
+            missing=$(jq -r --arg root "$PWD/" --arg flag "$flag" "$ours | .[]
+                | select(.command | split(\" \") | index(\$flag) | not) | .file" "$commands")
+            if [ -n "$missing" ]; then
+              echo "built without $flag:"
+              echo "$missing"
+              exit 1
+            fi
+          done
+          binaries=$(find build/hardened/tests -maxdepth 1 -type f -executable -name 'snmpio_*' \
+              || true)
+          [ -n "$binaries" ] || { echo "no test binaries to check"; exit 1; }
+          for binary in $binaries; do
+            dynamic=$(readelf -dW "$binary")
+            segments=$(readelf -lW "$binary")
+            grep -q 'BIND_NOW' <<<"$dynamic" || { echo "$binary is not bind-now"; exit 1; }
+            grep -q 'GNU_RELRO' <<<"$segments" || { echo "$binary has no RELRO"; exit 1; }
+            stack=$(grep 'GNU_STACK' <<<"$segments") || { echo "$binary: no GNU_STACK"; exit 1; }
+            if grep -q 'RWE' <<<"$stack"; then echo "$binary has an executable stack"; exit 1; fi
+          done
+
+      - name: Test
+        run: ctest --preset hardened
+
   fuzz:
     name: fuzz (smoke)
     runs-on: ubuntu-24.04
@@ -259,7 +333,7 @@ jobs:
       # check cannot pass by having filtered everything of ours away.
       #
       # This is the libc++ half of the package job's "Hardening stays ours", kept here because no
-      # other job compiles against libc++.
+      # other job compiles against libc++. The hardened job does the same for the OpenSSF set.
       #
       # bash rather than the default sh -e, for pipefail: a jq that fails inside the command
       # substitution fails the step rather than passing on the output it never printed. jq's own
@@ -329,7 +403,7 @@ jobs:
       - name: Build and install
         run: |
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo \
-            -DSNMPIO_BUILD_TESTS=OFF -DSNMPIO_WERROR=ON
+            -DSNMPIO_BUILD_TESTS=OFF -DSNMPIO_WERROR=ON -DSNMPIO_HARDENING=ON
           cmake --build build
           cmake --install build --prefix "$RUNNER_TEMP/prefix"
 
@@ -339,24 +413,31 @@ jobs:
             -DCMAKE_PREFIX_PATH="$RUNNER_TEMP/prefix" -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
           cmake --build build/examples
 
-      # Standard-library hardening is PRIVATE to our own targets: choosing it for a consumer would
-      # be choosing their build flags. So the library must compile with it and the examples, which
-      # see only what the installed package exports, must not. grep exits 1 for "no match" and 2 for
-      # a file it could not read, and only the first is a pass -- a missing file proves nothing.
+      # Hardening is PRIVATE to our own targets: choosing it for a consumer would be choosing their
+      # build flags. That is standard-library hardening, on in every build, and SNMPIO_HARDENING's
+      # OpenSSF set, which this job turns on so that there is something to leak (#46). So the
+      # library must compile with both, and the examples, which see only what the installed
+      # package exports, with neither -- not on a compile line, not on a link line (build.ninja's),
+      # and not in the installed CMake files. grep exits 1 for "no match" and 2 for a file it could
+      # not read, and only the first is a pass -- a missing file proves nothing.
       #
-      # This checks for the macros, not that libc++'s mode reached every compile line: the libcxx
-      # job checks that, as the one job that compiles against libc++.
+      # This checks for the flags, not that they reached every compile line: the libcxx job checks
+      # that for libc++'s mode, and the hardened job for the OpenSSF set.
       - name: Hardening stays ours
         run: |
-          pattern='_GLIBCXX_ASSERTIONS|_LIBCPP_HARDENING_MODE'
-          grep -qE "$pattern" build/compile_commands.json \
-            || { echo "the library was built without standard-library hardening"; exit 1; }
+          for flag in _GLIBCXX_ASSERTIONS -D_FORTIFY_SOURCE=3; do
+            grep -qF -e "$flag" build/compile_commands.json \
+              || { echo "the library was built without $flag"; exit 1; }
+          done
+          pattern='_GLIBCXX_ASSERTIONS|_LIBCPP_HARDENING_MODE|_FORTIFY_SOURCE|-fstack-protector'
+          pattern="$pattern|-fstack-clash-protection|-fcf-protection|-fstrict-flex-arrays"
+          pattern="$pattern|-ftrivial-auto-var-init|-fno-strict-overflow|-z,(relro|now|nodlopen)"
           status=0
-          grep -qE "$pattern" build/examples/compile_commands.json \
+          grep -qE -e "$pattern" build/examples/compile_commands.json build/examples/build.ninja \
             "$RUNNER_TEMP"/prefix/lib*/cmake/snmpio/*.cmake || status=$?
           case $status in
             1) ;;
-            0) echo "an installed consumer inherited standard-library hardening"; exit 1 ;;
+            0) echo "an installed consumer inherited our hardening"; exit 1 ;;
             *) echo "nothing to check: the consumer's files are missing"; exit 1 ;;
           esac
 

@@ -20,6 +20,7 @@ add_executable(snmpio_tests
   TestClientExceptions.cpp
   TestClientLifetime.cpp
   TestClientV3.cpp
+  TestCompilerHardening.cpp
   TestDisruptionMatrix.cpp
   TestError.cpp
   TestInterop.cpp
@@ -49,6 +50,11 @@ set_property(SOURCE TestMessageIdGenerator.cpp APPEND PROPERTY INCLUDE_DIRECTORI
   ${PROJECT_SOURCE_DIR}/src)
 target_link_libraries(snmpio_tests PRIVATE OpenSSL::Crypto)
 target_compile_definitions(snmpio_tests PRIVATE ${SNMPIO_STDLIB_HARDENING})
+# SNMPIO_HARDENING's flags, and whether they are on: CompilerHardening's test skips without them.
+target_compile_options(snmpio_tests PRIVATE ${SNMPIO_HARDENING_COMPILE_OPTIONS})
+target_link_options(snmpio_tests PRIVATE ${SNMPIO_HARDENING_LINK_OPTIONS})
+target_compile_definitions(snmpio_tests PRIVATE
+  SNMPIO_TESTS_HARDENED=$<BOOL:${SNMPIO_HARDENING}>)
 
 # FailingAllocation.cpp replaces the global operator new. Clang links a sanitizer runtime into the
 # binary whole, its own operator new included, so a binary built with one cannot replace it too;
@@ -70,4 +76,6 @@ add_executable(snmpio_stress TestSoak.cpp)
 target_link_libraries(snmpio_stress PRIVATE snmpio snmpio_warnings GTest::gtest GTest::gtest_main)
 target_include_directories(snmpio_stress PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_compile_definitions(snmpio_stress PRIVATE ${SNMPIO_STDLIB_HARDENING})
+target_compile_options(snmpio_stress PRIVATE ${SNMPIO_HARDENING_COMPILE_OPTIONS})
+target_link_options(snmpio_stress PRIVATE ${SNMPIO_HARDENING_LINK_OPTIONS})
 gtest_discover_tests(snmpio_stress DISCOVERY_TIMEOUT 30 PROPERTIES LABELS stress)

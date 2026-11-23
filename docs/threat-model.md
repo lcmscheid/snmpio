@@ -133,7 +133,12 @@ libraries, tests and fuzzers build with standard-library hardening on: libstdc++
 (`_GLIBCXX_ASSERTIONS`) and libc++'s fast hardening mode. CI builds against libc++ too, running the
 whole suite against `snmpd` and the interop suite against both Simulators, and
 `StdlibHardening.StopsAnOutOfBoundsIndex` fails in any build where the mode for the library in use
-is not honoured (#44). The wider OpenSSF hardening flags are not yet applied: #46.
+is not honoured (#44). The OpenSSF Compiler Options Hardening Guide's flags — its TL;DR set with
+the x86_64 and production rows — are applied to snmpio's own targets by `SNMPIO_HARDENING`, and CI
+builds the `hardened` preset with GCC and Clang and runs the whole suite under it, checking that
+every compile line carries them and the test binaries are full-RELRO and bind-now;
+`CompilerHardening.FortifySourceStopsAnOverflowingCopy` fails where `_FORTIFY_SOURCE` is not
+honoured (#46). Like the standard-library macros, they are never exported.
 
 Each row's letter is its section's: **L**ifecycle, **C**oncurrency, **R**eplies, **E**ngine state,
 **W**ire confidentiality, resource **B**ounds, the codec (**K**, since C is taken) and **S**ecrets.

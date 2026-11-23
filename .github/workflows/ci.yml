@@ -211,7 +211,11 @@ jobs:
   # and its fast mode tripping on our code or on Asio's would go unseen (#44). Standalone Asio,
   # because Ubuntu's Boost is built against libstdc++, and so is its GoogleTest: the configure
   # refuses to look for a GoogleTest package at all, so tests/CMakeLists.txt builds it from
-  # source, against libc++ too, whatever the runner image happens to carry.
+  # source, against libc++ too, whatever the runner image happens to carry. The source is noble's
+  # googletest package, under /usr/src/googletest, which FETCHCONTENT_SOURCE_DIR_GOOGLETEST hands
+  # to FetchContent in place of its clone (#102): a clone from github.com in every cell turned
+  # main red once on a 403 that was GitHub's. That is GoogleTest 1.14 rather than the 1.17 the
+  # FetchContent pins, the version every libstdc++ cell already runs the suite against.
   #
   # One cell per Agent, as in the interop job: Agents we did not write take the decoder down paths
   # the Scripted Agent never does, the Simulators' misbehaviour most of all, and those paths should
@@ -231,24 +235,28 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y ninja-build clang libc++-dev libc++abi-dev libasio-dev libssl-dev
+          sudo apt-get install -y ninja-build clang libc++-dev libc++abi-dev libasio-dev libssl-dev \
+            googletest
 
       - name: Configure
         run: |
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo \
             -DCMAKE_CXX_COMPILER=clang++ -DCMAKE_CXX_FLAGS=-stdlib=libc++ \
             -DSNMP_USE_BOOST_ASIO=OFF -DSNMPIO_WERROR=ON -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
-            -DCMAKE_DISABLE_FIND_PACKAGE_GTest=ON
+            -DCMAKE_DISABLE_FIND_PACKAGE_GTest=ON \
+            -DFETCHCONTENT_SOURCE_DIR_GOOGLETEST=/usr/src/googletest
 
       - name: Build
         run: cmake --build build
 
       # Every compile line of ours must carry both -stdlib=libc++ and the hardening mode, and the
       # binaries must link libc++ and not libstdc++: a cell that fell back to libstdc++ would
-      # still go green, having compiled nothing this job exists for. A line is GoogleTest's when
-      # its source file is under _deps -- not when its command mentions _deps, which every test
-      # line does through GoogleTest's include path. Lines from src/ and tests/ must both be
-      # there, so the check cannot pass by having filtered everything of ours away.
+      # still go green, having compiled nothing this job exists for. A line is ours when its
+      # source file is under src/ or tests/ -- by where the file is, not by what the command
+      # mentions, since every test line names GoogleTest's include path. GoogleTest's own lines
+      # carry -stdlib=libc++ but not the hardening mode, which only our targets set, and they are
+      # left out wherever its source lives. Lines from src/ and tests/ must both be there, so the
+      # check cannot pass by having filtered everything of ours away.
       #
       # This is the libc++ half of the package job's "Hardening stays ours", kept here because no
       # other job compiles against libc++.
@@ -263,12 +271,13 @@ jobs:
         run: |
           commands=build/compile_commands.json
           jq empty "$commands" || { echo "no readable $commands"; exit 1; }
-          ours='[.[] | select(.file | contains("/_deps/") | not)]'
+          ours='[.[] | select(.file | startswith($root + "src/") or startswith($root + "tests/"))]'
           for dir in src tests; do
-            jq -e --arg dir "$PWD/$dir/" "$ours | any(.file | startswith(\$dir))" "$commands" \
+            jq -e --arg root "$PWD/" --arg dir "$PWD/$dir/" \
+                "$ours | any(.file | startswith(\$dir))" "$commands" \
                 > /dev/null || { echo "no compile line of ours under $dir/"; exit 1; }
           done
-          unhardened=$(jq -r "$ours | .[]
+          unhardened=$(jq -r --arg root "$PWD/" "$ours | .[]
               | select(.command | (contains(\"-stdlib=libc++\")
                   and contains(\"_LIBCPP_HARDENING_MODE=_LIBCPP_HARDENING_MODE_FAST\")) | not)
               | .file" "$commands")

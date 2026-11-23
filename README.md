@@ -263,6 +263,9 @@ SNMPIO_SOAK_SEED=1234 SNMPIO_SOAK_SECONDS=2 \
   ctest --preset default -L stress                       # replay what a failure printed
 ```
 
+`SNMPIO_SOAK_SECONDS` takes decimal seconds, `600` or `0.5`, down to a millisecond; an exponent such
+as `1e3` is refused, and the replay line never prints one.
+
 A replayed seed and duration repeat the same sequence of disruptions: the same requests,
 cancellations, stops and destructions, in the same order, each reaching the same Client — the same
 generation of the same slot — due at the same moments, and from the same threads. What the seed

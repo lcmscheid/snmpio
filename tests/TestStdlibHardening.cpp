@@ -1,7 +1,6 @@
 #include <gtest/gtest.h>
 
 #include <cstddef>
-#include <string>
 #include <vector>
 
 #if defined(_LIBCPP_VERSION)
@@ -9,6 +8,8 @@
 
 #include <csignal>
 #endif
+
+#include "FreshProcess.hpp"
 
 // Standard-library hardening (SNMPIO_STDLIB_HARDENING in CMakeLists.txt) is two macros, one per
 // library, and each library ignores the other's. Setting a macro proves nothing on its own: this
@@ -19,11 +20,11 @@
 // hardening. libstdc++ aborts with the failed precondition's text. libc++'s fast mode traps, with
 // no message: SIGILL where the trap is x86's ud2, SIGTRAP on Arm.
 
+namespace snmpio::test {
 namespace {
 
 TEST(StdlibHardening, StopsAnOutOfBoundsIndex) {
-  const std::string style = GTEST_FLAG_GET(death_test_style);
-  GTEST_FLAG_SET(death_test_style, "threadsafe");
+  const ScopedDeathTestStyle threadsafe("threadsafe");
   const std::vector<int> values(1);
   // volatile, so the compiler can neither see the index is out of range nor drop the read.
   const volatile std::size_t index = 1;
@@ -37,7 +38,7 @@ TEST(StdlibHardening, StopsAnOutOfBoundsIndex) {
 #else
   GTEST_SKIP() << "no hardening mode is set for this standard library";
 #endif
-  GTEST_FLAG_SET(death_test_style, style);
 }
 
 }  // namespace
+}  // namespace snmpio::test

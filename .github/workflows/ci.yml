@@ -80,15 +80,18 @@ jobs:
   # refuses to look for a GoogleTest package at all, so tests/CMakeLists.txt builds it from
   # source, against libc++ too, whatever the runner image happens to carry.
   #
-  # The suite runs whole against snmpd, and the interop half again against each Simulator: Agents
-  # we did not write take the decoder down paths the Scripted Agent never does, the Simulators'
-  # misbehaviour most of all, and those paths should meet libc++'s assertions as well. One build
-  # serves all three, since each start replaces the last Agent and every flag it printed.
-  # StdlibHardening.StopsAnOutOfBoundsIndex is what fails if the mode stopped being honoured; the
-  # step after the build says the compile lines asked for it.
+  # One cell per Agent, as in the interop job: Agents we did not write take the decoder down paths
+  # the Scripted Agent never does, the Simulators' misbehaviour most of all, and those paths should
+  # meet libc++'s assertions as well. The snmpd cell runs the whole suite, the others its interop
+  # half. StdlibHardening.StopsAnOutOfBoundsIndex is what fails if the mode stopped being honoured;
+  # the step after the build says the compile lines asked for it.
   libcxx:
-    name: clang / standalone / libc++
+    name: clang / standalone / libc++ (${{ matrix.agent }})
     runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        agent: [snmpd, simulator, simulator-release]
     steps:
       - uses: actions/checkout@v5
 
@@ -109,18 +112,30 @@ jobs:
 
       # Every compile line of ours must carry both -stdlib=libc++ and the hardening mode, and the
       # binaries must link libc++ and not libstdc++: a cell that fell back to libstdc++ would
-      # still go green, having compiled nothing this job exists for. GoogleTest's own sources are
-      # left out, since hardening is set on our targets alone.
+      # still go green, having compiled nothing this job exists for. A line is GoogleTest's when
+      # its source file is under _deps -- not when its command mentions _deps, which every test
+      # line does through GoogleTest's include path. Lines from src/ and tests/ must both be
+      # there, so the check cannot pass by having filtered everything of ours away.
+      #
+      # This is the libc++ half of the package job's "Hardening stays ours", kept here because no
+      # other job compiles against libc++.
       - name: libc++ hardening reached the compile lines
+        shell: bash
         run: |
-          lines=$(grep -E '"command": ' build/compile_commands.json | grep -v '/_deps/')
-          [ -n "$lines" ] || { echo "no compile lines to check"; exit 1; }
-          if echo "$lines" | grep -v -- '-stdlib=libc++' | grep -q .; then
-            echo "a compile line of ours is not built against libc++"; exit 1
-          fi
-          if echo "$lines" | grep -v '_LIBCPP_HARDENING_MODE=_LIBCPP_HARDENING_MODE_FAST' \
-              | grep -q .; then
-            echo "a compile line of ours is missing libc++'s hardening mode"; exit 1
+          ours='[.[] | select(.file | contains("/_deps/") | not)]'
+          for dir in src tests; do
+            jq -e --arg dir "/$dir/" "$ours | any(.file | contains(\$dir))" \
+                build/compile_commands.json > /dev/null \
+              || { echo "no compile line of ours under $dir/"; exit 1; }
+          done
+          unhardened=$(jq -r "$ours | .[]
+              | select(.command | (contains(\"-stdlib=libc++\")
+                  and contains(\"_LIBCPP_HARDENING_MODE=_LIBCPP_HARDENING_MODE_FAST\")) | not)
+              | .file" build/compile_commands.json)
+          if [ -n "$unhardened" ]; then
+            echo "built without -stdlib=libc++ or libc++'s hardening mode:"
+            echo "$unhardened"
+            exit 1
           fi
           binaries=$(find build/tests -maxdepth 1 -type f -executable -name 'snmpio_*')
           [ -n "$binaries" ] || { echo "no test binaries to check"; exit 1; }
@@ -132,25 +147,26 @@ jobs:
             fi
           done
 
-      # As in the interop job; the suite's own skips are why each Agent must answer before its
-      # tests run.
-      - name: Start snmpd
-        run: tests/interop/start-agent.sh snmpd >> "$GITHUB_ENV"
+      # As in the interop job, which says why each step is there.
+      - name: Start the Agent
+        run: tests/interop/start-agent.sh ${{ matrix.agent }} >> "$GITHUB_ENV"
 
       - name: Test
+        if: matrix.agent == 'snmpd'
         run: ctest --test-dir build --output-on-failure
 
-      - name: Start the Simulator
-        run: tests/interop/start-agent.sh simulator >> "$GITHUB_ENV"
-
-      - name: Interop, the Simulator
+      - name: Interop
+        if: matrix.agent != 'snmpd'
         run: ctest --test-dir build -R Interop --output-on-failure --no-tests=error
 
-      - name: Start the released Simulator
-        run: tests/interop/start-agent.sh simulator-release >> "$GITHUB_ENV"
-
-      - name: Interop, the released Simulator
-        run: ctest --test-dir build -R Interop --output-on-failure --no-tests=error
+      - name: Interop, addressing a user and a community by name
+        if: matrix.agent == 'snmpd'
+        env:
+          SNMPIO_INTEROP_COMMUNITY: netops-ro
+          SNMPIO_INTEROP_V3_USER: netops-legacy
+          SNMPIO_INTEROP_V3_AUTH: sha256
+          SNMPIO_INTEROP_V3_PRIV: aes
+        run: ctest --test-dir build -R 'Interop(V2c|V3)' --output-on-failure --no-tests=error
 
       - name: Agent log
         if: failure()
@@ -317,6 +333,9 @@ jobs:
       # be choosing their build flags. So the library must compile with it and the examples, which
       # see only what the installed package exports, must not. grep exits 1 for "no match" and 2 for
       # a file it could not read, and only the first is a pass -- a missing file proves nothing.
+      #
+      # This checks for the macros, not that libc++'s mode reached every compile line: the libcxx
+      # job checks that, as the one job that compiles against libc++.
       - name: Hardening stays ours
         run: |
           pattern='_GLIBCXX_ASSERTIONS|_LIBCPP_HARDENING_MODE'

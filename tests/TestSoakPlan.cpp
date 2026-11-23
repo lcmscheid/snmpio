@@ -192,6 +192,33 @@ TEST(SoakEnvironment, ParsesADurationInSeconds) {
   EXPECT_FALSE(parseSeconds("1.2.3").has_value());
   EXPECT_FALSE(parseSeconds("+2").has_value());
   EXPECT_FALSE(parseSeconds(" 2").has_value());
+  EXPECT_EQ(parseSeconds(".5"), std::optional<milliseconds>(500));
+  EXPECT_EQ(parseSeconds("5."), std::optional<milliseconds>(5000));
+  EXPECT_EQ(parseSeconds("31536000.0004"), std::optional<milliseconds>(31'536'000'000));
+  EXPECT_FALSE(parseSeconds("31536000.0005").has_value());
+  // Decimal only, as the replay line prints it: an exponent is not a form formatSeconds writes.
+  EXPECT_FALSE(parseSeconds("1e3").has_value());
+  EXPECT_FALSE(parseSeconds("1.5e3").has_value());
+}
+
+TEST(SoakEnvironment, FormatsADurationAsDecimalSeconds) {
+  EXPECT_EQ(formatSeconds(milliseconds(2000)), "2");
+  EXPECT_EQ(formatSeconds(milliseconds(1500)), "1.5");
+  EXPECT_EQ(formatSeconds(milliseconds(250)), "0.25");
+  EXPECT_EQ(formatSeconds(milliseconds(1)), "0.001");
+  EXPECT_EQ(formatSeconds(milliseconds(1'000'000'000)), "1000000");
+  EXPECT_EQ(formatSeconds(milliseconds(1'234'567'891)), "1234567.891");
+}
+
+// The replay line is printed with formatSeconds and read back with parseSeconds, so every
+// duration the soak accepts has to survive the trip -- a million seconds and up included, which a
+// double streamed with its default precision writes as 1e+06.
+TEST(SoakEnvironment, APrintedDurationReadsBackUnchanged) {
+  for (const auto ms :
+       {1LL, 10LL, 999LL, 2000LL, 1'000'000'000LL, 1'234'567'891LL, 31'536'000'000LL}) {
+    EXPECT_EQ(parseSeconds(formatSeconds(milliseconds(ms))), std::optional<milliseconds>(ms))
+        << ms << " ms";
+  }
 }
 
 TEST(SoakPlan, DescribesARequestForAFailureMessage) {

@@ -73,6 +73,72 @@ jobs:
       - name: Test
         run: ctest --test-dir build --output-on-failure
 
+  # SNMPIO_STDLIB_HARDENING sets a macro for each standard library, and every other cell builds
+  # against libstdc++, clang's included -- so without this one, libc++'s half is never compiled,
+  # and its fast mode tripping on our code or on Asio's would go unseen (#44). Standalone Asio,
+  # because Ubuntu's Boost is built against libstdc++, and so is its GoogleTest: the configure
+  # refuses to look for a GoogleTest package at all, so tests/CMakeLists.txt builds it from
+  # source, against libc++ too, whatever the runner image happens to carry.
+  #
+  # The suite runs whole, interop included against snmpd: an Agent we did not write takes the
+  # decoder down paths the Scripted Agent never does, and those paths should meet libc++'s
+  # assertions as well. StdlibHardening.StopsAnOutOfBoundsIndex is what fails if the mode stopped
+  # being honoured; the step after the build says the compile lines asked for it.
+  libcxx:
+    name: clang / standalone / libc++
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build clang libc++-dev libc++abi-dev libasio-dev libssl-dev
+
+      - name: Configure
+        run: |
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DCMAKE_CXX_COMPILER=clang++ -DCMAKE_CXX_FLAGS=-stdlib=libc++ \
+            -DSNMP_USE_BOOST_ASIO=OFF -DSNMPIO_WERROR=ON -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
+            -DCMAKE_DISABLE_FIND_PACKAGE_GTest=ON
+
+      - name: Build
+        run: cmake --build build
+
+      # Every compile line of ours must carry both -stdlib=libc++ and the hardening mode, and the
+      # binaries must link libc++ and not libstdc++: a cell that fell back to libstdc++ would
+      # still go green, having compiled nothing this job exists for. GoogleTest's own sources are
+      # left out, since hardening is set on our targets alone.
+      - name: libc++ hardening reached the compile lines
+        run: |
+          lines=$(grep -E '"command": ' build/compile_commands.json | grep -v '/_deps/')
+          [ -n "$lines" ] || { echo "no compile lines to check"; exit 1; }
+          if echo "$lines" | grep -v -- '-stdlib=libc++' | grep -q .; then
+            echo "a compile line of ours is not built against libc++"; exit 1
+          fi
+          if echo "$lines" | grep -v '_LIBCPP_HARDENING_MODE=_LIBCPP_HARDENING_MODE_FAST' \
+              | grep -q .; then
+            echo "a compile line of ours is missing libc++'s hardening mode"; exit 1
+          fi
+          for binary in build/tests/snmpio_tests build/tests/snmpio_stress; do
+            ldd "$binary" | grep -q 'libc++\.so' \
+              || { echo "$binary does not link libc++"; exit 1; }
+            if ldd "$binary" | grep -q 'libstdc++'; then
+              echo "$binary links libstdc++"; exit 1
+            fi
+          done
+
+      # As in the interop job; the suite's own skips are why it must answer before the tests run.
+      - name: Start the Agent
+        run: tests/interop/start-agent.sh snmpd >> "$GITHUB_ENV"
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
+      - name: Agent log
+        if: failure()
+        run: docker logs snmpio-interop
+
   fuzz:
     name: fuzz (smoke)
     runs-on: ubuntu-24.04

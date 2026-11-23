@@ -5,7 +5,6 @@
 #include <array>
 #include <charconv>
 #include <chrono>
-#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <optional>
@@ -225,15 +224,37 @@ inline Behaviour drawBehaviour(Rng& rng) {
   return seed;
 }
 
-// Seconds, fractions allowed, at least a millisecond and at most a year.
+// Seconds, fractions allowed, at least a millisecond and at most a year: digits, then optionally a
+// point and more digits. Read as two integers, because integer from_chars is all every standard
+// library here has -- libc++ before 20 has no floating-point overload (#44).
 [[nodiscard]] inline std::optional<std::chrono::milliseconds> parseSeconds(std::string_view text) {
-  double seconds = 0;
-  const auto* const last = text.data() + text.size();
-  const auto [end, ec] = std::from_chars(text.data(), last, seconds);
-  if (text.empty() || ec != std::errc{} || end != last) return std::nullopt;
-  // Written so that NaN, which compares false with everything, fails it.
-  if (!(seconds >= 0.001 && seconds <= 365.0 * 24 * 3600)) return std::nullopt;
-  return std::chrono::milliseconds(std::llround(seconds * 1000));
+  constexpr std::uint64_t maxSeconds = 365ULL * 24 * 3600;
+  const auto isDigits = [](std::string_view s) {
+    return std::ranges::all_of(s, [](char c) { return c >= '0' && c <= '9'; });
+  };
+  const auto point = text.find('.');
+  const auto whole = text.substr(0, point);
+  const auto fraction =
+      point == std::string_view::npos ? std::string_view{} : text.substr(point + 1);
+  if (whole.empty() && fraction.empty()) return std::nullopt;
+  if (!isDigits(whole) || !isDigits(fraction)) return std::nullopt;
+
+  std::uint64_t seconds = 0;
+  if (!whole.empty()) {
+    const auto [end, ec] = std::from_chars(whole.data(), whole.data() + whole.size(), seconds);
+    if (ec != std::errc{} || seconds > maxSeconds) return std::nullopt;
+  }
+  // The first three fraction digits are milliseconds, padded with zeros; the fourth rounds them.
+  std::uint64_t millis = 0;
+  for (std::size_t i = 0; i < 3; ++i) {
+    millis =
+        millis * 10 + (i < fraction.size() ? static_cast<std::uint64_t>(fraction[i] - '0') : 0);
+  }
+  const auto truncated = (seconds * 1000) + millis;
+  const bool roundUp = fraction.size() > 3 && fraction[3] >= '5';
+  const auto rounded = truncated + (roundUp ? 1 : 0);
+  if (truncated < 1 || rounded > maxSeconds * 1000) return std::nullopt;
+  return std::chrono::milliseconds(static_cast<std::chrono::milliseconds::rep>(rounded));
 }
 
 [[nodiscard]] inline std::string_view nameOf(Operation op) {

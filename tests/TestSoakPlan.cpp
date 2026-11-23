@@ -182,6 +182,16 @@ TEST(SoakEnvironment, ParsesADurationInSeconds) {
   EXPECT_FALSE(parseSeconds("-2").has_value());
   EXPECT_FALSE(parseSeconds("2s").has_value());
   EXPECT_FALSE(parseSeconds("nan").has_value());
+  EXPECT_EQ(parseSeconds("0.001"), std::optional<milliseconds>(1));
+  EXPECT_EQ(parseSeconds("31536000"), std::optional<milliseconds>(31'536'000'000));
+  EXPECT_EQ(parseSeconds("0.0015"), std::optional<milliseconds>(2));
+  EXPECT_FALSE(parseSeconds("0.0004").has_value());
+  EXPECT_FALSE(parseSeconds("31536001").has_value());
+  EXPECT_FALSE(parseSeconds("99999999999999999999").has_value());
+  EXPECT_FALSE(parseSeconds(".").has_value());
+  EXPECT_FALSE(parseSeconds("1.2.3").has_value());
+  EXPECT_FALSE(parseSeconds("+2").has_value());
+  EXPECT_FALSE(parseSeconds(" 2").has_value());
 }
 
 TEST(SoakPlan, DescribesARequestForAFailureMessage) {

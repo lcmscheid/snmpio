@@ -395,10 +395,11 @@ claims to:
   `tsan` build switches them off and the configure log says so. Use a current Clang: the CI cell is
   on clang-20, because clang 18 predates the fix for a coroutine race of the compiler's own making
   (llvm#72006).
-- **Standard-library hardening** — `_GLIBCXX_ASSERTIONS`, and libc++'s fast hardening mode where
-  libc++ is used — is on for this repository's own targets in every build, so an out-of-bounds
-  `operator[]` aborts instead of reading on. It is never exported: a consumer of the installed
-  package builds with whatever flags they choose, and CI's install-and-consume job checks that.
+- **Standard-library hardening** — `_GLIBCXX_ASSERTIONS` with libstdc++, libc++'s fast hardening
+  mode with libc++, both compiled and tested in CI — is on for this repository's own targets in
+  every build, so an out-of-bounds `operator[]` aborts instead of reading on. It is never exported:
+  a consumer of the installed package builds with whatever flags they choose, and CI's
+  install-and-consume job checks that.
 
 `docs/research/snmpio-safety-threats.md` cites the source for each: §3.4 for the compiler bug, §4–5
 for the rest. The one addition is sizing Asio's recycling cache to zero, which older Asio needs

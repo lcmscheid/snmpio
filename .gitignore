@@ -2,13 +2,16 @@
 build/
 build-*/
 out/
-cmake-build-*/          # CLion
-_deps/                  # CMake FetchContent downloads
+# CLion
+cmake-build-*/
+# CMake FetchContent downloads
+_deps/
 
 # --- CMake generated ---
 CMakeCache.txt
 CMakeFiles/
-CMakeUserPresets.json   # personal presets; CMakePresets.json IS tracked
+# personal presets; CMakePresets.json IS tracked
+CMakeUserPresets.json
 cmake_install.cmake
 CTestTestfile.cmake
 Testing/
@@ -28,8 +31,10 @@ install_manifest.txt
 *.pdb
 
 # --- Tooling ---
-compile_commands.json   # generated; regenerate rather than commit
-.cache/                 # clangd index
+# generated; regenerate rather than commit
+compile_commands.json
+# clangd index
+.cache/
 *.gcda
 *.gcno
 *.gcov
@@ -79,10 +84,12 @@ fuzz/**/fuzz-*.log
 # credentials.
 .claude/settings.local.json
 .claude/*.local.json
-.claude/projects/        # session transcripts; may contain anything that was pasted in
+# session transcripts; may contain anything that was pasted in
+.claude/projects/
 .claude/shell-snapshots/
 .claude/todos/
 .claude/statsig/
-.mcp.local.json          # MCP server config with tokens; .mcp.json may be tracked if clean
+# MCP server config with tokens; .mcp.json may be tracked if clean
+.mcp.local.json
 .aider*
 .cursorignore

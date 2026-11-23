@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include <cstddef>
+#include <string>
 #include <vector>
 
 #if defined(_LIBCPP_VERSION)
@@ -21,6 +22,7 @@
 namespace {
 
 TEST(StdlibHardening, StopsAnOutOfBoundsIndex) {
+  const std::string style = GTEST_FLAG_GET(death_test_style);
   GTEST_FLAG_SET(death_test_style, "threadsafe");
   const std::vector<int> values(1);
   // volatile, so the compiler can neither see the index is out of range nor drop the read.
@@ -35,6 +37,7 @@ TEST(StdlibHardening, StopsAnOutOfBoundsIndex) {
 #else
   GTEST_SKIP() << "no hardening mode is set for this standard library";
 #endif
+  GTEST_FLAG_SET(death_test_style, style);
 }
 
 }  // namespace

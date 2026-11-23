@@ -80,10 +80,12 @@ jobs:
   # refuses to look for a GoogleTest package at all, so tests/CMakeLists.txt builds it from
   # source, against libc++ too, whatever the runner image happens to carry.
   #
-  # The suite runs whole, interop included against snmpd: an Agent we did not write takes the
-  # decoder down paths the Scripted Agent never does, and those paths should meet libc++'s
-  # assertions as well. StdlibHardening.StopsAnOutOfBoundsIndex is what fails if the mode stopped
-  # being honoured; the step after the build says the compile lines asked for it.
+  # The suite runs whole against snmpd, and the interop half again against each Simulator: Agents
+  # we did not write take the decoder down paths the Scripted Agent never does, the Simulators'
+  # misbehaviour most of all, and those paths should meet libc++'s assertions as well. One build
+  # serves all three, since each start replaces the last Agent and every flag it printed.
+  # StdlibHardening.StopsAnOutOfBoundsIndex is what fails if the mode stopped being honoured; the
+  # step after the build says the compile lines asked for it.
   libcxx:
     name: clang / standalone / libc++
     runs-on: ubuntu-24.04
@@ -120,7 +122,9 @@ jobs:
               | grep -q .; then
             echo "a compile line of ours is missing libc++'s hardening mode"; exit 1
           fi
-          for binary in build/tests/snmpio_tests build/tests/snmpio_stress; do
+          binaries=$(find build/tests -maxdepth 1 -type f -executable -name 'snmpio_*')
+          [ -n "$binaries" ] || { echo "no test binaries to check"; exit 1; }
+          for binary in $binaries; do
             ldd "$binary" | grep -q 'libc++\.so' \
               || { echo "$binary does not link libc++"; exit 1; }
             if ldd "$binary" | grep -q 'libstdc++'; then
@@ -128,12 +132,25 @@ jobs:
             fi
           done
 
-      # As in the interop job; the suite's own skips are why it must answer before the tests run.
-      - name: Start the Agent
+      # As in the interop job; the suite's own skips are why each Agent must answer before its
+      # tests run.
+      - name: Start snmpd
         run: tests/interop/start-agent.sh snmpd >> "$GITHUB_ENV"
 
       - name: Test
         run: ctest --test-dir build --output-on-failure
+
+      - name: Start the Simulator
+        run: tests/interop/start-agent.sh simulator >> "$GITHUB_ENV"
+
+      - name: Interop, the Simulator
+        run: ctest --test-dir build -R Interop --output-on-failure --no-tests=error
+
+      - name: Start the released Simulator
+        run: tests/interop/start-agent.sh simulator-release >> "$GITHUB_ENV"
+
+      - name: Interop, the released Simulator
+        run: ctest --test-dir build -R Interop --output-on-failure --no-tests=error
 
       - name: Agent log
         if: failure()

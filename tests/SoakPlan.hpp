@@ -229,6 +229,7 @@ inline Behaviour drawBehaviour(Rng& rng) {
 // library here has -- libc++ before 20 has no floating-point overload (#44).
 [[nodiscard]] inline std::optional<std::chrono::milliseconds> parseSeconds(std::string_view text) {
   constexpr std::uint64_t maxSeconds = 365ULL * 24 * 3600;
+  constexpr std::size_t millisDigits = 3;
   const auto isDigits = [](std::string_view s) {
     return std::ranges::all_of(s, [](char c) { return c >= '0' && c <= '9'; });
   };
@@ -246,12 +247,12 @@ inline Behaviour drawBehaviour(Rng& rng) {
   }
   // The first three fraction digits are milliseconds, padded with zeros; the fourth rounds them.
   std::uint64_t millis = 0;
-  for (std::size_t i = 0; i < 3; ++i) {
+  for (std::size_t i = 0; i < millisDigits; ++i) {
     millis =
         millis * 10 + (i < fraction.size() ? static_cast<std::uint64_t>(fraction[i] - '0') : 0);
   }
   const auto truncated = (seconds * 1000) + millis;
-  const bool roundUp = fraction.size() > 3 && fraction[3] >= '5';
+  const bool roundUp = fraction.size() > millisDigits && fraction[millisDigits] >= '5';
   const auto rounded = truncated + (roundUp ? 1 : 0);
   if (truncated < 1 || rounded > maxSeconds * 1000) return std::nullopt;
   return std::chrono::milliseconds(static_cast<std::chrono::milliseconds::rep>(rounded));

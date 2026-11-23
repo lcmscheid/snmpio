@@ -2,16 +2,44 @@
 
 include(CMakeFindDependencyMacro)
 
+# What snmpio was built against, and the minimum versions its build demanded: a dependency older
+# than these is one the library itself would have refused.
 set(SNMPIO_USE_BOOST_ASIO @SNMP_USE_BOOST_ASIO@)
+set(SNMPIO_ASIO_FROM_PACKAGE @SNMPIO_ASIO_FROM_PACKAGE@)
 
+# Every dependency is resolved before the targets are created, so a failure leaves no half-made
+# snmpio::snmpio behind; find_dependency() itself return()s on failure the same way.
 if(SNMPIO_USE_BOOST_ASIO)
-  find_dependency(Boost 1.74 CONFIG OPTIONAL_COMPONENTS system)
+  find_dependency(Boost @SNMPIO_BOOST_MIN_VERSION@ CONFIG OPTIONAL_COMPONENTS system)
+elseif(SNMPIO_ASIO_FROM_PACKAGE)
+  find_dependency(asio @SNMPIO_ASIO_MIN_VERSION@ CONFIG)
 else()
-  find_dependency(asio CONFIG)
+  # Built against a bare standalone Asio header tree: the package exports no Asio target and
+  # carries none of the build machine's paths, so the headers are looked for here, on the
+  # consumer's machine, with find_path() and a cache variable the consumer can set.
+  find_path(SNMPIO_ASIO_INCLUDE_DIR asio.hpp)
+  if(NOT SNMPIO_ASIO_INCLUDE_DIR)
+    set(snmpio_FOUND FALSE)
+    string(CONCAT snmpio_NOT_FOUND_MESSAGE
+      "snmpio was built against standalone Asio, and asio.hpp was not found. "
+      "Install Asio, or set SNMPIO_ASIO_INCLUDE_DIR to the directory that holds asio.hpp.")
+    return()
+  endif()
 endif()
 find_dependency(Threads)
-find_dependency(OpenSSL 3.0)
+find_dependency(OpenSSL @SNMPIO_OPENSSL_MIN_VERSION@)
 
 include("${CMAKE_CURRENT_LIST_DIR}/snmpioTargets.cmake")
+
+# Appended once: snmpioTargets.cmake creates the target only on a first find_package(snmpio), and
+# a second call would otherwise add the directory again.
+if(SNMPIO_ASIO_INCLUDE_DIR AND NOT SNMPIO_USE_BOOST_ASIO AND NOT SNMPIO_ASIO_FROM_PACKAGE)
+  get_target_property(_snmpio_includes snmpio::snmpio INTERFACE_INCLUDE_DIRECTORIES)
+  if(NOT SNMPIO_ASIO_INCLUDE_DIR IN_LIST _snmpio_includes)
+    set_property(TARGET snmpio::snmpio APPEND PROPERTY
+      INTERFACE_INCLUDE_DIRECTORIES "${SNMPIO_ASIO_INCLUDE_DIR}")
+  endif()
+  unset(_snmpio_includes)
+endif()
 
 check_required_components(snmpio)

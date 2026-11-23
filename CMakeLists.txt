@@ -47,10 +47,13 @@ if(SNMPIO_HARDENING)
   if(SNMPIO_SANITIZE OR SNMPIO_TSAN)
     message(FATAL_ERROR "SNMPIO_HARDENING cannot be combined with a sanitizer; pick one.")
   endif()
-  if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+  # A multi-config generator chooses Debug at build time, past where this could refuse it.
+  get_property(SNMPIO_MULTI_CONFIG GLOBAL PROPERTY GENERATOR_IS_MULTI_CONFIG)
+  if(SNMPIO_MULTI_CONFIG OR CMAKE_BUILD_TYPE STREQUAL "Debug")
     message(FATAL_ERROR
-      "SNMPIO_HARDENING needs an optimised build: _FORTIFY_SOURCE does nothing at -O0. "
-      "Use RelWithDebInfo, as the hardened preset does.")
+      "SNMPIO_HARDENING needs an optimised build, chosen at configure time: _FORTIFY_SOURCE does "
+      "nothing at -O0. Use a single-config generator and RelWithDebInfo, as the hardened preset "
+      "does.")
   endif()
 endif()
 
@@ -230,7 +233,6 @@ target_link_libraries(snmpio PRIVATE snmpio_warnings)
 set(SNMPIO_STDLIB_HARDENING
   _GLIBCXX_ASSERTIONS
   _LIBCPP_HARDENING_MODE=_LIBCPP_HARDENING_MODE_FAST)
-target_compile_definitions(snmpio PRIVATE ${SNMPIO_STDLIB_HARDENING})
 
 # The OpenSSF Compiler Options Hardening Guide's TL;DR set, its x86_64 row and its production row
 # (research note 5.1; #46), behind SNMPIO_HARDENING. Opt-in and PRIVATE to our own targets for the
@@ -263,8 +265,20 @@ if(SNMPIO_HARDENING)
     LINKER:-z,nodlopen LINKER:-z,noexecstack LINKER:-z,relro LINKER:-z,now
     LINKER:--as-needed LINKER:--no-copy-dt-needed-entries)
 endif()
-target_compile_options(snmpio PRIVATE ${SNMPIO_HARDENING_COMPILE_OPTIONS})
-target_link_options(snmpio PRIVATE ${SNMPIO_HARDENING_LINK_OPTIONS})
+
+# Both kinds of hardening, PRIVATE, on one of our own targets: snmpio here, the test binaries in
+# tests/. One call per target, so a new target cannot take one kind and miss the other. fuzz/'s
+# instrumented copy sets the standard-library macros itself, beside its sanitizer's, and refuses
+# SNMPIO_HARDENING by way of the sanitizer check above.
+#
+# ci.yml's hardened job checks that every flag reached our compile lines, and the package job that
+# none reached a consumer. Both name the flags, so a flag added here is added there too.
+function(snmpio_harden target)
+  target_compile_definitions(${target} PRIVATE ${SNMPIO_STDLIB_HARDENING})
+  target_compile_options(${target} PRIVATE ${SNMPIO_HARDENING_COMPILE_OPTIONS})
+  target_link_options(${target} PRIVATE ${SNMPIO_HARDENING_LINK_OPTIONS})
+endfunction()
+snmpio_harden(snmpio)
 
 # Asio hands freed handler and coroutine-frame memory to a thread-local cache and reuses it, so a
 # use-after-free in a sanitizer build touches a live recycled block and goes unreported. None of

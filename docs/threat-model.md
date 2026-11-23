@@ -135,8 +135,9 @@ whole suite against `snmpd` and the interop suite against both Simulators, and
 `StdlibHardening.StopsAnOutOfBoundsIndex` fails in any build where the mode for the library in use
 is not honoured (#44). The OpenSSF Compiler Options Hardening Guide's flags — its TL;DR set with
 the x86_64 and production rows — are applied to snmpio's own targets by `SNMPIO_HARDENING`, and CI
-builds the `hardened` preset with GCC and Clang and runs the whole suite under it, checking that
-every compile line carries them and the test binaries are full-RELRO and bind-now;
+builds the `hardened` preset with GCC and Clang and runs the suite under it, less the interop
+tests, which need an Agent. It checks that every compile line carries every flag and that the test
+binaries are bind-now;
 `CompilerHardening.FortifySourceStopsAnOverflowingCopy` fails where `_FORTIFY_SOURCE` is not
 honoured (#46). Like the standard-library macros, they are never exported.
 

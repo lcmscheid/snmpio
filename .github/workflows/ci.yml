@@ -103,12 +103,14 @@ jobs:
 
       # A flag that stopped reaching the build would leave this job green: Ubuntu's GCC fortifies
       # and protects the stack by default, so the binaries would look much the same. So every
-      # compile line of ours must carry a flag from each of the guide's three rows, and the test
-      # binaries must carry what the linker half asks for: full RELRO, bind-now and a stack that is
-      # not executable. -z nodlopen is not read back, as it marks shared objects only. A line is
-      # ours when its source file is under src/ or tests/, as in the libcxx job, which says why
-      # the step is bash and how jq's own failure is told from "no match".
+      # compile line of ours must carry every flag of SNMPIO_HARDENING_COMPILE_OPTIONS -- the list
+      # below is that one, and changes with it. A line is ours when its source file is under src/
+      # or tests/, as in the libcxx job, which says why the step is bash and how jq's own failure
+      # is told from "no match".
       #
+      # Of the linker's half, bind-now is what the binaries can show: Ubuntu's linker emits RELRO
+      # and a non-executable stack whatever it is asked, so those two are read back only so that
+      # a binary worse than the default fails, and -z nodlopen marks shared objects only.
       # CompilerHardening.FortifySourceStopsAnOverflowingCopy is what fails if _FORTIFY_SOURCE is
       # on the line and not honoured.
       - name: Hardening reached the build
@@ -122,8 +124,11 @@ jobs:
                 "$ours | any(.file | startswith(\$dir))" "$commands" \
                 > /dev/null || { echo "no compile line of ours under $dir/"; exit 1; }
           done
-          for flag in -D_FORTIFY_SOURCE=3 -fstack-protector-strong -fcf-protection=full \
-              -ftrivial-auto-var-init=zero; do
+          for flag in -Wformat -Wformat=2 -Wimplicit-fallthrough -Werror=format-security \
+              -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=3 -fstrict-flex-arrays=3 \
+              -fstack-clash-protection -fstack-protector-strong \
+              -fno-delete-null-pointer-checks -fno-strict-overflow -fno-strict-aliasing \
+              -ftrivial-auto-var-init=zero -fcf-protection=full; do
             missing=$(jq -r --arg root "$PWD/" --arg flag "$flag" "$ours | .[]
                 | select(.command | split(\" \") | index(\$flag) | not) | .file" "$commands")
             if [ -n "$missing" ]; then
@@ -144,6 +149,8 @@ jobs:
             if grep -q 'RWE' <<<"$stack"; then echo "$binary has an executable stack"; exit 1; fi
           done
 
+      # The interop tests skip here, as in the build job: they need an Agent, and the interop
+      # and libcxx jobs are where one runs.
       - name: Test
         run: ctest --preset hardened
 
@@ -420,6 +427,10 @@ jobs:
       # package exports, with neither -- not on a compile line, not on a link line (build.ninja's),
       # and not in the installed CMake files. grep exits 1 for "no match" and 2 for a file it could
       # not read, and only the first is a pass -- a missing file proves nothing.
+      #
+      # The pattern names a flag from each part of both lists in CMakeLists.txt, and changes with
+      # them. The link half finds a link option only if the export carried one: the library is
+      # static here, and a static library's own link options reach no one.
       #
       # This checks for the flags, not that they reached every compile line: the libcxx job checks
       # that for libc++'s mode, and the hardened job for the OpenSSF set.

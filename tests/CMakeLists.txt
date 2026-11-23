@@ -49,10 +49,8 @@ target_include_directories(snmpio_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 set_property(SOURCE TestMessageIdGenerator.cpp APPEND PROPERTY INCLUDE_DIRECTORIES
   ${PROJECT_SOURCE_DIR}/src)
 target_link_libraries(snmpio_tests PRIVATE OpenSSL::Crypto)
-target_compile_definitions(snmpio_tests PRIVATE ${SNMPIO_STDLIB_HARDENING})
-# SNMPIO_HARDENING's flags, and whether they are on: CompilerHardening's test skips without them.
-target_compile_options(snmpio_tests PRIVATE ${SNMPIO_HARDENING_COMPILE_OPTIONS})
-target_link_options(snmpio_tests PRIVATE ${SNMPIO_HARDENING_LINK_OPTIONS})
+snmpio_harden(snmpio_tests)
+# Whether SNMPIO_HARDENING is on: CompilerHardening's test skips without it.
 target_compile_definitions(snmpio_tests PRIVATE
   SNMPIO_TESTS_HARDENED=$<BOOL:${SNMPIO_HARDENING}>)
 
@@ -75,7 +73,5 @@ gtest_discover_tests(snmpio_tests DISCOVERY_TIMEOUT 30)
 add_executable(snmpio_stress TestSoak.cpp)
 target_link_libraries(snmpio_stress PRIVATE snmpio snmpio_warnings GTest::gtest GTest::gtest_main)
 target_include_directories(snmpio_stress PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-target_compile_definitions(snmpio_stress PRIVATE ${SNMPIO_STDLIB_HARDENING})
-target_compile_options(snmpio_stress PRIVATE ${SNMPIO_HARDENING_COMPILE_OPTIONS})
-target_link_options(snmpio_stress PRIVATE ${SNMPIO_HARDENING_LINK_OPTIONS})
+snmpio_harden(snmpio_stress)
 gtest_discover_tests(snmpio_stress DISCOVERY_TIMEOUT 30 PROPERTIES LABELS stress)

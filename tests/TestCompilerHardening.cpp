@@ -9,7 +9,7 @@
 // SNMPIO_HARDENING (CMakeLists.txt) applies the OpenSSF hardening flags to our own targets (#46).
 // As with StdlibHardening, a flag on the compile line proves nothing on its own: this test fails if
 // _FORTIFY_SOURCE stopped reaching the compile line, or stopped being honoured. It is the one flag
-// in the set whose effect a test can observe; the hardened CI cell reads the linker's half off the
+// in the set whose effect a test can observe; the hardened CI job reads the linker's half off the
 // binaries instead. Without SNMPIO_HARDENING the test skips -- glibc's fortification is the
 // toolchain's default on some distributions and not on others, so an unhardened build has no
 // outcome to pin.

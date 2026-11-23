@@ -53,10 +53,11 @@
 //
 // The seed is printed, and SNMPIO_SOAK_SEED replays it: the same requests, cancellations, stops
 // and destructions, in the same order, reaching the same generation of the same slot's Client,
-// due at the same moments, and from the same threads. SNMPIO_SOAK_SECONDS sets the duration, two
-// seconds by default. When each lands relative to the others is the scheduler's -- a thread that
-// waits on an initiation, or on a Batch handler running elsewhere, falls behind the plan -- so a
-// seed that failed once fails again more often than not, rather than every time.
+// due at the same moments, and from the same threads. SNMPIO_SOAK_SECONDS sets the duration in
+// decimal seconds -- 600, 0.5, never an exponent -- two seconds by default. When each lands
+// relative to the others is the scheduler's -- a thread that waits on an initiation, or on a Batch
+// handler running elsewhere, falls behind the plan -- so a seed that failed once fails again more
+// often than not, rather than every time.
 
 namespace snmpio::test::soak {
 namespace {
@@ -872,7 +873,7 @@ TEST(Soak, ShapedLikeTheDeployment) {
   const auto plan = makePlan(seed, duration);
   std::cout << "[ SOAK     ] seed " << seed << " for " << duration.count()
             << " ms: " << summary(plan) << "\n[ SOAK     ] replay with SNMPIO_SOAK_SEED=" << seed
-            << " SNMPIO_SOAK_SECONDS=" << static_cast<double>(duration.count()) / 1000 << "\n"
+            << " SNMPIO_SOAK_SECONDS=" << formatSeconds(duration) << "\n"
             << std::flush;
   RecordProperty("seed", std::to_string(seed));
   SCOPED_TRACE(testing::Message() << "SNMPIO_SOAK_SEED=" << seed);

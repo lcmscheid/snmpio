@@ -7,6 +7,8 @@
 
 #include <gtest/gtest.h>
 
+#include "ScopedDeathTestStyle.hpp"
+
 namespace snmpio::test {
 
 // Runs `body` in a process of its own -- this test binary re-executed to run this one test, by
@@ -17,8 +19,7 @@ namespace snmpio::test {
 // child leaves through std::exit, so it also runs every static destructor snmpio has.
 template <typename Body>
 void expectInFreshProcess(Body body) {
-  const std::string style = GTEST_FLAG_GET(death_test_style);
-  GTEST_FLAG_SET(death_test_style, "threadsafe");
+  const ScopedDeathTestStyle threadsafe("threadsafe");
   EXPECT_EXIT(
       {
         const std::string wrong = body();
@@ -26,7 +27,6 @@ void expectInFreshProcess(Body body) {
         std::exit(wrong.empty() ? EXIT_SUCCESS : EXIT_FAILURE);
       },
       ::testing::ExitedWithCode(EXIT_SUCCESS), "");
-  GTEST_FLAG_SET(death_test_style, style);
 }
 
 }  // namespace snmpio::test

@@ -129,9 +129,11 @@ or Handled instead. **Held** means a test or fuzzer named in the row fails if th
 and says when the code breaks the invariant today. Tests are named as gtest prints them
 (`Suite.Name`) and fuzzers by their harness's name. Since #28, CI runs every test under both
 ASan+UBSan and TSan, and runs the interop suite against `snmpd` under ASan+UBSan. snmpio's own
-libraries, tests and fuzzers build with the standard library's assertions on; libc++'s mode is set
-too, but no CI cell compiles against libc++ yet (#44). The wider OpenSSF hardening flags are not yet
-applied: #46.
+libraries, tests and fuzzers build with standard-library hardening on: libstdc++'s assertions
+(`_GLIBCXX_ASSERTIONS`) and libc++'s fast hardening mode. CI builds against libc++ too, running the
+whole suite against `snmpd` and the interop suite against both Simulators, and
+`StdlibHardening.StopsAnOutOfBoundsIndex` fails in any build where the mode for the library in use
+is not honoured (#44). The wider OpenSSF hardening flags are not yet applied: #46.
 
 Each row's letter is its section's: **L**ifecycle, **C**oncurrency, **R**eplies, **E**ngine state,
 **W**ire confidentiality, resource **B**ounds, the codec (**K**, since C is taken) and **S**ecrets.

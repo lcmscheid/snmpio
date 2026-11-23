@@ -263,6 +263,9 @@ SNMPIO_SOAK_SEED=1234 SNMPIO_SOAK_SECONDS=2 \
   ctest --preset default -L stress                       # replay what a failure printed
 ```
 
+`SNMPIO_SOAK_SECONDS` takes decimal seconds, `600` or `0.5`, down to a millisecond; an exponent such
+as `1e3` is refused, and the replay line never prints one.
+
 A replayed seed and duration repeat the same sequence of disruptions: the same requests,
 cancellations, stops and destructions, in the same order, each reaching the same Client — the same
 generation of the same slot — due at the same moments, and from the same threads. What the seed
@@ -395,10 +398,11 @@ claims to:
   `tsan` build switches them off and the configure log says so. Use a current Clang: the CI cell is
   on clang-20, because clang 18 predates the fix for a coroutine race of the compiler's own making
   (llvm#72006).
-- **Standard-library hardening** — `_GLIBCXX_ASSERTIONS`, and libc++'s fast hardening mode where
-  libc++ is used — is on for this repository's own targets in every build, so an out-of-bounds
-  `operator[]` aborts instead of reading on. It is never exported: a consumer of the installed
-  package builds with whatever flags they choose, and CI's install-and-consume job checks that.
+- **Standard-library hardening** — `_GLIBCXX_ASSERTIONS` with libstdc++, libc++'s fast hardening
+  mode with libc++, both compiled and tested in CI — is on for this repository's own targets in
+  every build, so an out-of-bounds `operator[]` aborts instead of reading on. It is never exported:
+  a consumer of the installed package builds with whatever flags they choose, and CI's
+  install-and-consume job checks that.
 
 `docs/research/snmpio-safety-threats.md` cites the source for each: §3.4 for the compiler bug, §4–5
 for the rest. The one addition is sizing Asio's recycling cache to zero, which older Asio needs

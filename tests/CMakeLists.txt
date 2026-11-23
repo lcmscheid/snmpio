@@ -35,6 +35,7 @@ add_executable(snmpio_tests
   TestPdu.cpp
   TestSecrets.cpp
   TestSoakPlan.cpp
+  TestStdlibHardening.cpp
   TestUsm.cpp
   TestV3Message.cpp
   TestValue.cpp)

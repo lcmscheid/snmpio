@@ -382,7 +382,7 @@ CLion, Qt Creator) will offer these directly.
 | `SNMPIO_BUILD_FUZZERS` | `OFF` | Build the libFuzzer targets (Clang only) |
 | `SNMPIO_SANITIZE` | `OFF` | Address and undefined-behaviour sanitizers |
 | `SNMPIO_TSAN` | `OFF` | Thread sanitizer (Clang only; not with `SNMPIO_SANITIZE`) |
-| `SNMPIO_HARDENING` | `OFF` | The OpenSSF compiler hardening flags, on this repository's own targets only (GCC or Clang; not with a sanitizer or in `Debug`) |
+| `SNMPIO_HARDENING` | `OFF` | The OpenSSF compiler hardening flags, on this repository's own targets only (GCC or Clang on an ELF target; not with a sanitizer, in `Debug` or with a multi-config generator) |
 | `SNMPIO_WERROR` | `OFF` | Treat warnings as errors |
 
 The Asio choice appears in every public signature, so it is resolved at configure time rather than
@@ -429,10 +429,12 @@ claims to:
   [Compiler Options Hardening Guide](https://github.com/ossf/wg-best-practices-os-developers/blob/main/docs/Compiler-Hardening-Guides/Compiler-Options-Hardening-Guide-for-C-and-C++.md)'s
   TL;DR set with its x86_64 and production rows: `_FORTIFY_SOURCE=3`, stack protector and
   stack-clash protection, `-fcf-protection=full`, zero-initialised automatic variables, full RELRO
-  and the rest. CI builds the `hardened` preset with GCC and Clang and runs the whole suite. The
-  flags are opt-in (`SNMPIO_HARDENING`) and, like the standard-library macros, never exported:
-  whether your binary is built with them is your build's choice, and the same install-and-consume
-  job checks that none reaches you.
+  and the rest. CI builds the `hardened` preset with GCC and Clang and runs the test suite under
+  it, less the interop tests, which need an Agent; the libc++ job builds with the set too, and runs
+  the whole suite against `snmpd`. The fuzzers run under sanitizers instead, which the set cannot be
+  combined with. The flags are opt-in (`SNMPIO_HARDENING`) and, like the standard-library macros,
+  never exported: whether your binary is built with them is your build's choice, and the same
+  install-and-consume job checks that none reaches you.
 
 `docs/research/snmpio-safety-threats.md` cites the source for each: §3.4 for the compiler bug, §4–5
 for the rest. The one addition is sizing Asio's recycling cache to zero, which older Asio needs

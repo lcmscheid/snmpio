@@ -37,12 +37,15 @@ if(SNMPIO_TSAN AND NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang")
   message(FATAL_ERROR "SNMPIO_TSAN requires Clang; configure with -DCMAKE_CXX_COMPILER=clang++.")
 endif()
 
-# _FORTIFY_SOURCE does nothing without optimisation, and glibc says so with a #warning that
+# The OpenSSF set is GCC's and Clang's flags, and its linker half is GNU ld's -z options, which
+# only an ELF target has: AppleClang, and Clang on macOS or Windows, would configure and then fail
+# at link. _FORTIFY_SOURCE does nothing without optimisation, and glibc says so with a #warning that
 # SNMPIO_WERROR turns into a failed build; the OpenSSF set assumes -O2. A sanitizer replaces the
 # very functions _FORTIFY_SOURCE wraps, so the two would each be checking less than they claim.
 if(SNMPIO_HARDENING)
-  if(NOT CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-    message(FATAL_ERROR "SNMPIO_HARDENING is the OpenSSF flag set for GCC and Clang.")
+  if(NOT CMAKE_CXX_COMPILER_ID MATCHES "^(GNU|Clang)$" OR APPLE OR WIN32)
+    message(FATAL_ERROR
+      "SNMPIO_HARDENING is the OpenSSF flag set for GCC and Clang on an ELF target.")
   endif()
   if(SNMPIO_SANITIZE OR SNMPIO_TSAN)
     message(FATAL_ERROR "SNMPIO_HARDENING cannot be combined with a sanitizer; pick one.")
@@ -270,15 +273,26 @@ endif()
 # tests/. One call per target, so a new target cannot take one kind and miss the other. fuzz/'s
 # instrumented copy sets the standard-library macros itself, beside its sanitizer's, and refuses
 # SNMPIO_HARDENING by way of the sanitizer check above.
-#
-# ci.yml's hardened job checks that every flag reached our compile lines, and the package job that
-# none reached a consumer. Both name the flags, so a flag added here is added there too.
 function(snmpio_harden target)
   target_compile_definitions(${target} PRIVATE ${SNMPIO_STDLIB_HARDENING})
   target_compile_options(${target} PRIVATE ${SNMPIO_HARDENING_COMPILE_OPTIONS})
   target_link_options(${target} PRIVATE ${SNMPIO_HARDENING_LINK_OPTIONS})
 endfunction()
 snmpio_harden(snmpio)
+
+# Both lists as they reach a command line, one flag per line, for CI to check against: that every
+# flag reached each of our compile and link lines (.github/scripts/hardening-reached.sh), and that
+# none reached a consumer (hardening-stays-ours.sh). CI reads them rather than naming the flags
+# itself, so this file is the only place the set is written down. The link options are written in
+# GCC's -Wl, spelling; CMake gives Clang -Xlinker instead, and the scripts read both.
+list(TRANSFORM SNMPIO_STDLIB_HARDENING PREPEND "-D" OUTPUT_VARIABLE SNMPIO_HARDENING_FLAGS)
+list(APPEND SNMPIO_HARDENING_FLAGS ${SNMPIO_HARDENING_COMPILE_OPTIONS})
+list(JOIN SNMPIO_HARDENING_FLAGS "\n" SNMPIO_HARDENING_FLAGS)
+file(WRITE "${PROJECT_BINARY_DIR}/hardening/compile-flags.txt" "${SNMPIO_HARDENING_FLAGS}\n")
+list(TRANSFORM SNMPIO_HARDENING_LINK_OPTIONS REPLACE "^LINKER:" "-Wl,"
+  OUTPUT_VARIABLE SNMPIO_HARDENING_FLAGS)
+list(JOIN SNMPIO_HARDENING_FLAGS "\n" SNMPIO_HARDENING_FLAGS)
+file(WRITE "${PROJECT_BINARY_DIR}/hardening/link-flags.txt" "${SNMPIO_HARDENING_FLAGS}\n")
 
 # Asio hands freed handler and coroutine-frame memory to a thread-local cache and reuses it, so a
 # use-after-free in a sanitizer build touches a live recycled block and goes unreported. None of

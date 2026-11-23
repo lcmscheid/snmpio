@@ -211,11 +211,11 @@ jobs:
   # and its fast mode tripping on our code or on Asio's would go unseen (#44). Standalone Asio,
   # because Ubuntu's Boost is built against libstdc++, and so is its GoogleTest: the configure
   # refuses to look for a GoogleTest package at all, so tests/CMakeLists.txt builds it from
-  # source, against libc++ too, whatever the runner image happens to carry. The source is noble's
-  # googletest package, under /usr/src/googletest, which FETCHCONTENT_SOURCE_DIR_GOOGLETEST hands
-  # to FetchContent in place of its clone (#102): a clone from github.com in every cell turned
-  # main red once on a 403 that was GitHub's. That is GoogleTest 1.14 rather than the 1.17 the
-  # FetchContent pins, the version every libstdc++ cell already runs the suite against.
+  # source, against libc++ too. The source is Ubuntu's googletest package, which
+  # FETCHCONTENT_SOURCE_DIR_GOOGLETEST hands to FetchContent in place of its clone (#102): a clone
+  # from github.com in every cell turned main red once on a 403 that was GitHub's. That is
+  # GoogleTest 1.14 rather than the 1.17 tests/CMakeLists.txt pins -- the version every libstdc++
+  # cell already runs the suite against.
   #
   # One cell per Agent, as in the interop job: Agents we did not write take the decoder down paths
   # the Scripted Agent never does, the Simulators' misbehaviour most of all, and those paths should
@@ -235,8 +235,8 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y ninja-build clang libc++-dev libc++abi-dev libasio-dev libssl-dev \
-            googletest
+          sudo apt-get install -y ninja-build clang libc++-dev libc++abi-dev libasio-dev \
+            libssl-dev googletest
 
       - name: Configure
         run: |

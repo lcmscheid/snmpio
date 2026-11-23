@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cassert>
 #include <charconv>
 #include <chrono>
 #include <cstddef>
@@ -224,13 +225,17 @@ inline Behaviour drawBehaviour(Rng& rng) {
   return seed;
 }
 
+// A duration's text is decimal seconds with at most this many fraction digits kept, for
+// parseSeconds and formatSeconds alike.
+inline constexpr std::size_t millisDigits = 3;
+inline constexpr std::uint64_t millisPerSecond = 1000;
+
 // Seconds, fractions allowed, at least a millisecond and at most a year: digits, then optionally a
 // point and more digits. Decimal only, the form formatSeconds prints, so no sign and no exponent.
 // Read as two integers, because integer from_chars is all every standard library here has --
 // libc++ before 20 has no floating-point overload (#44).
 [[nodiscard]] inline std::optional<std::chrono::milliseconds> parseSeconds(std::string_view text) {
   constexpr std::uint64_t maxSeconds = 365ULL * 24 * 3600;
-  constexpr std::size_t millisDigits = 3;
   const auto isDigits = [](std::string_view s) {
     return std::ranges::all_of(s, [](char c) { return c >= '0' && c <= '9'; });
   };
@@ -252,21 +257,22 @@ inline Behaviour drawBehaviour(Rng& rng) {
     millis =
         millis * 10 + (i < fraction.size() ? static_cast<std::uint64_t>(fraction[i] - '0') : 0);
   }
-  const auto totalMillis = (seconds * 1000) + millis;
+  const auto truncatedMillis = (seconds * millisPerSecond) + millis;
   const bool roundUp = fraction.size() > millisDigits && fraction[millisDigits] >= '5';
-  const auto rounded = totalMillis + (roundUp ? 1 : 0);
-  if (totalMillis < 1 || rounded > maxSeconds * 1000) return std::nullopt;
+  const auto rounded = truncatedMillis + (roundUp ? 1 : 0);
+  if (truncatedMillis < 1 || rounded > maxSeconds * millisPerSecond) return std::nullopt;
   return std::chrono::milliseconds(static_cast<std::chrono::milliseconds::rep>(rounded));
 }
 
 // parseSeconds' inverse, for the replay line: whole seconds, then the milliseconds after a point
 // with their trailing zeros dropped. Integers throughout, so that no duration parseSeconds accepts
-// prints in a form it refuses -- a double streamed at its default precision writes 1e+06.
+// prints in a form it refuses -- a double streamed at its default precision writes 1e+06. It takes
+// what parseSeconds returns, a positive duration; zero would print as "0", which is refused.
 [[nodiscard]] inline std::string formatSeconds(std::chrono::milliseconds duration) {
-  constexpr std::chrono::milliseconds::rep perSecond = 1000;
-  constexpr std::size_t millisDigits = 3;
-  std::string text = std::to_string(duration.count() / perSecond);
-  const auto millis = duration.count() % perSecond;
+  assert(duration.count() > 0);
+  const auto whole = std::chrono::duration_cast<std::chrono::seconds>(duration);
+  std::string text = std::to_string(whole.count());
+  const auto millis = (duration - whole).count();
   if (millis == 0) return text;
   std::string fraction = std::to_string(millis);
   fraction.insert(0, millisDigits - fraction.size(), '0');

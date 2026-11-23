@@ -73,105 +73,6 @@ jobs:
       - name: Test
         run: ctest --test-dir build --output-on-failure
 
-  # SNMPIO_STDLIB_HARDENING sets a macro for each standard library, and every other cell builds
-  # against libstdc++, clang's included -- so without this one, libc++'s half is never compiled,
-  # and its fast mode tripping on our code or on Asio's would go unseen (#44). Standalone Asio,
-  # because Ubuntu's Boost is built against libstdc++, and so is its GoogleTest: the configure
-  # refuses to look for a GoogleTest package at all, so tests/CMakeLists.txt builds it from
-  # source, against libc++ too, whatever the runner image happens to carry.
-  #
-  # One cell per Agent, as in the interop job: Agents we did not write take the decoder down paths
-  # the Scripted Agent never does, the Simulators' misbehaviour most of all, and those paths should
-  # meet libc++'s assertions as well. The snmpd cell runs the whole suite, the others its interop
-  # half. StdlibHardening.StopsAnOutOfBoundsIndex is what fails if the mode stopped being honoured;
-  # the step after the build says the compile lines asked for it.
-  libcxx:
-    name: clang / standalone / libc++ (${{ matrix.agent }})
-    runs-on: ubuntu-24.04
-    strategy:
-      fail-fast: false
-      matrix:
-        agent: [snmpd, simulator, simulator-release]
-    steps:
-      - uses: actions/checkout@v5
-
-      - name: Install dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y ninja-build clang libc++-dev libc++abi-dev libasio-dev libssl-dev
-
-      - name: Configure
-        run: |
-          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo \
-            -DCMAKE_CXX_COMPILER=clang++ -DCMAKE_CXX_FLAGS=-stdlib=libc++ \
-            -DSNMP_USE_BOOST_ASIO=OFF -DSNMPIO_WERROR=ON -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
-            -DCMAKE_DISABLE_FIND_PACKAGE_GTest=ON
-
-      - name: Build
-        run: cmake --build build
-
-      # Every compile line of ours must carry both -stdlib=libc++ and the hardening mode, and the
-      # binaries must link libc++ and not libstdc++: a cell that fell back to libstdc++ would
-      # still go green, having compiled nothing this job exists for. A line is GoogleTest's when
-      # its source file is under _deps -- not when its command mentions _deps, which every test
-      # line does through GoogleTest's include path. Lines from src/ and tests/ must both be
-      # there, so the check cannot pass by having filtered everything of ours away.
-      #
-      # This is the libc++ half of the package job's "Hardening stays ours", kept here because no
-      # other job compiles against libc++.
-      - name: libc++ hardening reached the compile lines
-        shell: bash
-        run: |
-          ours='[.[] | select(.file | contains("/_deps/") | not)]'
-          for dir in src tests; do
-            jq -e --arg dir "/$dir/" "$ours | any(.file | contains(\$dir))" \
-                build/compile_commands.json > /dev/null \
-              || { echo "no compile line of ours under $dir/"; exit 1; }
-          done
-          unhardened=$(jq -r "$ours | .[]
-              | select(.command | (contains(\"-stdlib=libc++\")
-                  and contains(\"_LIBCPP_HARDENING_MODE=_LIBCPP_HARDENING_MODE_FAST\")) | not)
-              | .file" build/compile_commands.json)
-          if [ -n "$unhardened" ]; then
-            echo "built without -stdlib=libc++ or libc++'s hardening mode:"
-            echo "$unhardened"
-            exit 1
-          fi
-          binaries=$(find build/tests -maxdepth 1 -type f -executable -name 'snmpio_*')
-          [ -n "$binaries" ] || { echo "no test binaries to check"; exit 1; }
-          for binary in $binaries; do
-            ldd "$binary" | grep -q 'libc++\.so' \
-              || { echo "$binary does not link libc++"; exit 1; }
-            if ldd "$binary" | grep -q 'libstdc++'; then
-              echo "$binary links libstdc++"; exit 1
-            fi
-          done
-
-      # As in the interop job, which says why each step is there.
-      - name: Start the Agent
-        run: tests/interop/start-agent.sh ${{ matrix.agent }} >> "$GITHUB_ENV"
-
-      - name: Test
-        if: matrix.agent == 'snmpd'
-        run: ctest --test-dir build --output-on-failure
-
-      - name: Interop
-        if: matrix.agent != 'snmpd'
-        run: ctest --test-dir build -R Interop --output-on-failure --no-tests=error
-
-      - name: Interop, addressing a user and a community by name
-        if: matrix.agent == 'snmpd'
-        env:
-          SNMPIO_INTEROP_COMMUNITY: netops-ro
-          SNMPIO_INTEROP_V3_USER: netops-legacy
-          SNMPIO_INTEROP_V3_AUTH: sha256
-          SNMPIO_INTEROP_V3_PRIV: aes
-        run: ctest --test-dir build -R 'Interop(V2c|V3)' --output-on-failure --no-tests=error
-
-      - name: Agent log
-        if: failure()
-        run: docker logs snmpio-interop
-
   fuzz:
     name: fuzz (smoke)
     runs-on: ubuntu-24.04
@@ -275,7 +176,8 @@ jobs:
 
       # It returns once the Agent answers, and fails with the Agent's log if it never does. The
       # password is the script's default: it authorizes a loopback Agent this job starts and kills.
-      - name: Start the Agent
+      - &start-agent
+        name: Start the Agent
         run: tests/interop/start-agent.sh ${{ matrix.agent }} >> "$GITHUB_ENV"
 
       # -R Interop is the live half only, and every test in it needs an Agent -- so a green run
@@ -289,7 +191,8 @@ jobs:
       # name says nothing about what it carries, and `netops-ro` a community other than `public`,
       # which is what a Target we did not configure looks like. Without this the path is
       # documented and never run.
-      - name: Interop, addressing a user and a community by name
+      - &by-name
+        name: Interop, addressing a user and a community by name
         if: matrix.agent == 'snmpd'
         env:
           SNMPIO_INTEROP_COMMUNITY: netops-ro
@@ -298,9 +201,107 @@ jobs:
           SNMPIO_INTEROP_V3_PRIV: aes
         run: ctest --test-dir build -R 'Interop(V2c|V3)' --verbose --no-tests=error
 
-      - name: Agent log
+      - &agent-log
+        name: Agent log
         if: failure()
         run: docker logs snmpio-interop
+
+  # SNMPIO_STDLIB_HARDENING sets a macro for each standard library, and every other cell builds
+  # against libstdc++, clang's included -- so without this one, libc++'s half is never compiled,
+  # and its fast mode tripping on our code or on Asio's would go unseen (#44). Standalone Asio,
+  # because Ubuntu's Boost is built against libstdc++, and so is its GoogleTest: the configure
+  # refuses to look for a GoogleTest package at all, so tests/CMakeLists.txt builds it from
+  # source, against libc++ too, whatever the runner image happens to carry.
+  #
+  # One cell per Agent, as in the interop job: Agents we did not write take the decoder down paths
+  # the Scripted Agent never does, the Simulators' misbehaviour most of all, and those paths should
+  # meet libc++'s assertions as well. The snmpd cell runs the whole suite, the others its interop
+  # half. StdlibHardening.StopsAnOutOfBoundsIndex is what fails if the mode stopped being honoured;
+  # the step after the build says the compile lines asked for it.
+  libcxx:
+    name: clang / standalone / libc++ (${{ matrix.agent }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        agent: [snmpd, simulator, simulator-release]
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build clang libc++-dev libc++abi-dev libasio-dev libssl-dev
+
+      - name: Configure
+        run: |
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DCMAKE_CXX_COMPILER=clang++ -DCMAKE_CXX_FLAGS=-stdlib=libc++ \
+            -DSNMP_USE_BOOST_ASIO=OFF -DSNMPIO_WERROR=ON -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
+            -DCMAKE_DISABLE_FIND_PACKAGE_GTest=ON
+
+      - name: Build
+        run: cmake --build build
+
+      # Every compile line of ours must carry both -stdlib=libc++ and the hardening mode, and the
+      # binaries must link libc++ and not libstdc++: a cell that fell back to libstdc++ would
+      # still go green, having compiled nothing this job exists for. A line is GoogleTest's when
+      # its source file is under _deps -- not when its command mentions _deps, which every test
+      # line does through GoogleTest's include path. Lines from src/ and tests/ must both be
+      # there, so the check cannot pass by having filtered everything of ours away.
+      #
+      # This is the libc++ half of the package job's "Hardening stays ours", kept here because no
+      # other job compiles against libc++.
+      #
+      # bash rather than the default sh -e, for pipefail: a jq that fails inside the command
+      # substitution fails the step rather than passing on the output it never printed. jq's own
+      # failure is ruled out first, so that its exit code means only "no match" after that. Each
+      # ldd is captured before grep reads it: grep -q leaving early under pipefail could otherwise
+      # fail the first test on ldd's SIGPIPE, and pass the second.
+      - name: libc++ hardening reached the compile lines
+        shell: bash
+        run: |
+          commands=build/compile_commands.json
+          jq empty "$commands" || { echo "no readable $commands"; exit 1; }
+          ours='[.[] | select(.file | contains("/_deps/") | not)]'
+          for dir in src tests; do
+            jq -e --arg dir "$PWD/$dir/" "$ours | any(.file | startswith(\$dir))" "$commands" \
+                > /dev/null || { echo "no compile line of ours under $dir/"; exit 1; }
+          done
+          unhardened=$(jq -r "$ours | .[]
+              | select(.command | (contains(\"-stdlib=libc++\")
+                  and contains(\"_LIBCPP_HARDENING_MODE=_LIBCPP_HARDENING_MODE_FAST\")) | not)
+              | .file" "$commands")
+          if [ -n "$unhardened" ]; then
+            echo "built without -stdlib=libc++ or libc++'s hardening mode:"
+            echo "$unhardened"
+            exit 1
+          fi
+          binaries=$(find build/tests -maxdepth 1 -type f -executable -name 'snmpio_*' || true)
+          [ -n "$binaries" ] || { echo "no test binaries to check"; exit 1; }
+          for binary in $binaries; do
+            libs=$(ldd "$binary")
+            grep -q 'libc++\.so' <<<"$libs" || { echo "$binary does not link libc++"; exit 1; }
+            if grep -q 'libstdc++' <<<"$libs"; then
+              echo "$binary links libstdc++"; exit 1
+            fi
+          done
+
+      # The interop job's own steps, by YAML anchor, where they are the same; it says why each is
+      # there.
+      - *start-agent
+
+      - name: Test
+        if: matrix.agent == 'snmpd'
+        run: ctest --test-dir build --output-on-failure
+
+      - name: Interop
+        if: matrix.agent != 'snmpd'
+        run: ctest --test-dir build -R Interop --verbose --no-tests=error
+
+      - *by-name
+
+      - *agent-log
 
   package:
     name: install + consume

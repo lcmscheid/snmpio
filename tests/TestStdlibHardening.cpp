@@ -9,7 +9,7 @@
 #include <csignal>
 #endif
 
-#include "FreshProcess.hpp"
+#include "ScopedDeathTestStyle.hpp"
 
 // Standard-library hardening (SNMPIO_STDLIB_HARDENING in CMakeLists.txt) is two macros, one per
 // library, and each library ignores the other's. Setting a macro proves nothing on its own: this

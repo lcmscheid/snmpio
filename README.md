@@ -9,7 +9,8 @@ each safety invariant, is in the [threat model](docs/threat-model.md).
 
 ## Status
 
-**Stage 4 of 7.** SNMPv2c and SNMPv3 both work end to end over UDP: GET, GETNEXT, GETBULK, SET and
+**Stages 0–4 and 6 of 7 are done**; stage 5's hardware checklist and stage 7 (docs, packaging and
+release) remain. SNMPv2c and SNMPv3 both work end to end over UDP: GET, GETNEXT, GETBULK, SET and
 Walk, at all three Security Levels. Engine Discovery, time synchronisation and Report routing happen
 underneath and are never surfaced. `authPriv` speaks DES, AES-128, and AES-192/256 under both the
 Blumenthal and the Reeder key extension. Stage 5's automated half is done too: every operation
@@ -37,6 +38,7 @@ The first two snippets below are condensed from [`examples/`](examples/), which 
 CMake project that `find_package()`s an installed snmpio — so building it is what proves the
 install rules work, and CI builds it on every push: the examples and the package cannot drift
 apart. There is one example per operation; the [table below](#the-examples) says what each shows.
+To pull snmpio into your own project, see [Installing and linking](#installing-and-linking).
 
 A v2c GET, in the callback form:
 
@@ -384,6 +386,24 @@ CLion, Qt Creator) will offer these directly.
 The Asio choice appears in every public signature, so it is resolved at configure time rather than
 at first use — a consumer who gets it wrong finds out from CMake instead of from a page of template
 errors. CI builds both.
+
+### Installing and linking
+
+Install a build, then point your project's `CMAKE_PREFIX_PATH` at the prefix:
+
+```sh
+cmake --install build/default --prefix /opt/snmpio
+```
+
+```cmake
+find_package(snmpio REQUIRED)
+target_link_libraries(myapp PRIVATE snmpio::snmpio)
+```
+
+The package finds its own dependencies — Boost.Asio or standalone Asio, whichever it was built
+against, plus OpenSSL and Threads — so a consumer needs only these two lines. The package's
+version check accepts any release with the same major version. [`examples/`](examples/) is a
+complete consumer, and CI builds it against a fresh install on every push.
 
 ### Sanitizer and hardening builds
 

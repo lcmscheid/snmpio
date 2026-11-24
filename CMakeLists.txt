@@ -199,8 +199,8 @@ function(snmpio_configure_library target)
   # object of its own would export our symbols from it. PUBLIC, so it travels with the target; a
   # consumer never sets it, as Boost's CMake package sets BOOST_<LIB>_DYN_LINK for its consumers in
   # the other direction.
-  get_target_property(type ${target} TYPE)
-  if(type STREQUAL "STATIC_LIBRARY")
+  get_target_property(library_type ${target} TYPE)
+  if(library_type STREQUAL "STATIC_LIBRARY")
     target_compile_definitions(${target} PUBLIC SNMPIO_STATIC_DEFINE)
   endif()
   target_link_libraries(${target} PUBLIC ${SNMPIO_ASIO_TARGET} Threads::Threads)
@@ -226,6 +226,10 @@ endfunction()
 # copy of these sources, as fuzz/ always does for its own, rather than export more for them.
 add_library(snmpio ${SNMPIO_SOURCES})
 add_library(snmpio::snmpio ALIAS snmpio)
+# Which of the two BUILD_SHARED_LIBS made snmpio, read once for tests/, which links a static copy
+# when it is not STATIC_LIBRARY. snmpio_configure_library() asks the same of each target it is
+# given rather than of this, since fuzz/'s and tests/' copies are static whatever snmpio is.
+get_target_property(SNMPIO_LIBRARY_TYPE snmpio TYPE)
 
 set_target_properties(snmpio PROPERTIES
   VERSION ${PROJECT_VERSION}

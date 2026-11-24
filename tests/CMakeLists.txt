@@ -15,15 +15,14 @@ endif()
 # (#106). So a shared build compiles a static copy of the sources for them, as fuzz/ does for its
 # instrumented one, configured as snmpio is in everything but its visibility; a static build links
 # snmpio itself rather than compile the sources twice.
-get_target_property(SNMPIO_LIBRARY_TYPE snmpio TYPE)
-if(SNMPIO_LIBRARY_TYPE STREQUAL "SHARED_LIBRARY")
+if(SNMPIO_LIBRARY_TYPE STREQUAL "STATIC_LIBRARY")
+  set(SNMPIO_TEST_LIBRARY snmpio)
+else()
   add_library(snmpio_tested STATIC ${SNMPIO_SOURCES})
   snmpio_configure_library(snmpio_tested)
   target_link_libraries(snmpio_tested PUBLIC snmpio_sanitizers PRIVATE snmpio_warnings)
   snmpio_harden(snmpio_tested)
   set(SNMPIO_TEST_LIBRARY snmpio_tested)
-else()
-  set(SNMPIO_TEST_LIBRARY snmpio)
 endif()
 
 add_executable(snmpio_tests

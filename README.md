@@ -407,11 +407,15 @@ against, plus OpenSSL and Threads — so a consumer needs only these two lines. 
 version check accepts any release with the same major version. [`examples/`](examples/) is a
 complete consumer, and CI builds it against a fresh install on every push.
 
-snmpio builds as a static library by default. Shared builds are supported too: configure with
-`-DBUILD_SHARED_LIBS=ON`, as with any CMake project, and install as above. The consumer's two lines
-stay the same. A shared `libsnmpio.so` exports the public API and keeps the rest hidden. Its soname
-carries the major version, so the same-major rule above applies to it as well. CI builds the
-examples against both kinds of install.
+snmpio builds as a static library by default. Shared builds are supported too, on ELF platforms
+with GCC or Clang: configure with `-DBUILD_SHARED_LIBS=ON`, as with any CMake project, and install
+as above. The consumer's two lines stay the same. A Windows DLL is not supported yet. A shared
+`libsnmpio.so` exports the public API and keeps the rest hidden, apart from one internal helper,
+`snmpio::detail::cleanse`. The inline allocator that wipes `SecretOctets` calls it from your own
+code, so it has to be exported, but it is not part of the API. The soname carries the major
+version, so the same-major rule above applies to it as well. CI builds the examples against both
+kinds of install, checks that the shared library exports everything the public headers declare,
+and runs a small consumer, [`tests/consumer/`](tests/consumer/), against both.
 
 ### Sanitizer and hardening builds
 

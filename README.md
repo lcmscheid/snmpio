@@ -466,26 +466,34 @@ Clang's.
 because it was noisy once is a check that will not catch the real defect later.
 
 ```sh
-cmake --preset tidy                             # Clang's command line, as CI reads it
+cmake --preset tidy                  # writes build/tidy/compile_commands.json with clang++'s flags
 clang-tidy -p build/tidy src/*.cpp tests/*.cpp
-cmake --preset fuzz                             # fuzz/ has its own flags (-UNDEBUG)
+cmake --preset fuzz                  # fuzz/ gets its own database: its flags differ (-UNDEBUG)
 clang-tidy -p build/fuzz fuzz/*.cpp
 ```
 
-These are the commands CI's `style` job runs. Configuring writes `compile_commands.json` and builds
-nothing. The `tidy` preset also sets `SNMPIO_CLANG_TIDY`, which requires clang-tidy at configure
-time and runs it on every compile, so `cmake --build --preset tidy` folds the same pass into the
-build. That preset builds no fuzzers, so `fuzz/` needs the flag on its own configure:
-`cmake --preset fuzz -DSNMPIO_CLANG_TIDY=ON`. `tests/` and `fuzz/` carry an overlay relaxing what
-only applies to library code (GoogleTest's do-while macros, fixture tables,
+These are the commands CI's `style` job runs. Configuring writes the compile database and builds
+nothing. `fuzz/` is linted against its own configure because the `tidy` preset leaves the fuzzers
+out of its database: clang-tidy would guess their flags from a neighbour, `-DNDEBUG` included, and
+their asserts — the oracles — would compile out unseen. `src/` is still linted under `-DNDEBUG`
+alone, fine while the library has no `assert()` of its own; the first one wants the same care.
+
+The `tidy` preset also sets `SNMPIO_CLANG_TIDY`, which requires clang-tidy at configure time and
+runs it on every compile, so `cmake --build --preset tidy` folds the same pass into the build. For
+`fuzz/`, add the flag to its own configure: `cmake --preset fuzz -DSNMPIO_CLANG_TIDY=ON`. The `tidy`
+preset's `SNMPIO_WERROR` puts `-Werror` on the `src/` and `tests/` entries (the fuzz targets do not
+link `snmpio_warnings`, which carries it). That changes no lint result: `WarningsAsErrors: '*'`
+already fails on every compiler warning clang-tidy reports. `tests/` and `fuzz/` carry an overlay
+relaxing what only applies to library code (GoogleTest's do-while macros, fixture tables,
 `*Oid::parse("1.3.6.1")` on a literal).
 
 Both clang tools are whatever Arch's `clang` package ships; CI runs them in an `archlinux:latest`
 container, so they follow Arch rather than a pin. Their output changes between major versions, so a
 major LLVM bump gets its own commit. On another distro, expect disagreements with CI whenever your
 LLVM major differs from Arch's. A clang-tidy from PyPI earlier on `PATH` (usually `~/.local/bin`)
-shadows Arch's, for the commands above and for the preset's lookup alike; check with
-`command -v clang-tidy`, and pin the preset with `-DSNMPIO_CLANG_TIDY_EXE=/usr/bin/clang-tidy`.
+shadows Arch's, for the commands above and for the preset's lookup alike. Check with
+`command -v clang-tidy`; if it is not `/usr/bin/clang-tidy`, call that path in the commands above
+and pin the preset with `-DSNMPIO_CLANG_TIDY_EXE=/usr/bin/clang-tidy`.
 
 Each `NOLINT` carries its reason at the site: `make_error_code`, whose spelling is fixed by the
 standard because both `error_code` types call it unqualified through ADL; the

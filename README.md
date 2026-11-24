@@ -414,8 +414,8 @@ as above. The consumer's two lines stay the same. A Windows DLL is not supported
 `snmpio::detail::cleanse`. The inline allocator that wipes `SecretOctets` calls it from your own
 code, so it has to be exported, but it is not part of the API. The soname carries the major
 version, so the same-major rule above applies to it as well. CI builds the examples against both
-kinds of install, checks that the shared library exports everything the public headers declare,
-and runs a small consumer, [`tests/consumer/`](tests/consumer/), against both.
+kinds of install, checks that the shared library exports everything the public API defines out of
+line, and runs a small consumer, [`tests/consumer/`](tests/consumer/), against both.
 
 ### Sanitizer and hardening builds
 

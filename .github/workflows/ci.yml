@@ -358,7 +358,7 @@ jobs:
     # building them here is the only thing that exercises the install rules and
     # snmpioConfig.cmake. A consumer whose build broke would otherwise find out before we did.
     # tests/consumer/ is a second consumer, one that runs: the examples need a Target, and it
-    # needs nothing. Twice: static, the default, and shared.
+    # brings its own on loopback. Twice: static, the default, and shared.
     steps:
       - uses: actions/checkout@v5
 
@@ -400,9 +400,9 @@ jobs:
       # The same install and consume, shared (#106). A shared snmpio exports only what SNMPIO_EXPORT
       # marks, so an unmarked function the examples call fails to link them. The script catches the
       # ones they don't: it checks the export list both ways -- everything the static install's
-      # archive defines in namespace snmpio present, snmpio::detail absent -- and that each example
-      # loads the library from the prefix. The consumer then runs against it, which is what shows
-      # the error categories stayed single instances across the boundary.
+      # archive defines out of line in namespace snmpio present, snmpio::detail absent -- and that
+      # each example loads the library from the prefix. The consumer then runs against it, which is
+      # what shows the error categories stayed single instances across the boundary.
       - name: Build and install, shared
         run: |
           cmake -S . -B build-shared -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo \
@@ -419,7 +419,7 @@ jobs:
       - name: Shared library exports the API
         run: |
           .github/scripts/shared-library.sh "$RUNNER_TEMP/prefix-shared" \
-            "$RUNNER_TEMP/prefix/lib/libsnmpio.a" build-shared/examples
+            "$RUNNER_TEMP/prefix" build-shared/examples
 
       - name: Run a consumer against the shared install
         run: |

@@ -113,16 +113,18 @@ jobs:
       - name: Test
         run: ctest --preset hardened
 
-      # The library's own link line exists only in a shared build, and the tests cannot link one:
-      # they reach into symbols the library hides. So the library alone, shared, and its link line
-      # and libsnmpio.so checked the same way -- -z nodlopen is visible only here, on a shared
-      # object.
+      # The library's own link line exists only in a shared build, and -z nodlopen is visible only
+      # there, on a shared object. So the same again, shared: every line and binary checked the
+      # same way, libsnmpio.so among them, and the suite run. The tests link a static copy of the
+      # sources rather than libsnmpio.so, since they reach into what it hides
+      # (tests/CMakeLists.txt), so this is also the job that builds and runs that copy.
       - name: Shared library
         run: |
-          cmake --preset hardened -B build/shared -DBUILD_SHARED_LIBS=ON -DSNMPIO_BUILD_TESTS=OFF \
+          cmake --preset hardened -B build/shared -DBUILD_SHARED_LIBS=ON \
             -DCMAKE_CXX_COMPILER=${{ matrix.compiler == 'gcc' && 'g++' || 'clang++' }}
           cmake --build build/shared
-          .github/scripts/hardening-reached.sh --library-only build/shared
+          .github/scripts/hardening-reached.sh build/shared
+          ctest --test-dir build/shared --output-on-failure
 
   fuzz:
     name: fuzz (smoke)
@@ -355,6 +357,8 @@ jobs:
     # The examples are a separate CMake project that find_package()s an installed snmpio, so
     # building them here is the only thing that exercises the install rules and
     # snmpioConfig.cmake. A consumer whose build broke would otherwise find out before we did.
+    # tests/consumer/ is a second consumer, one that runs: the examples need a Target, and it
+    # brings its own on loopback. Twice: static, the default, and shared.
     steps:
       - uses: actions/checkout@v5
 
@@ -376,6 +380,13 @@ jobs:
             -DCMAKE_PREFIX_PATH="$RUNNER_TEMP/prefix" -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
           cmake --build build/examples
 
+      - name: Run a consumer against it
+        run: |
+          cmake -S tests/consumer -B build/consumer -G Ninja \
+            -DCMAKE_PREFIX_PATH="$RUNNER_TEMP/prefix"
+          cmake --build build/consumer
+          build/consumer/snmpio-consumer
+
       # Hardening is PRIVATE to our own targets: choosing it for a consumer would be choosing their
       # build flags. That is standard-library hardening, on in every build, and SNMPIO_HARDENING's
       # OpenSSF set, which this job turns on so that there is something to leak (#46). The library
@@ -385,6 +396,37 @@ jobs:
       # static library's link half does catch.
       - name: Hardening stays ours
         run: .github/scripts/hardening-stays-ours.sh build build/examples "$RUNNER_TEMP/prefix"
+
+      # The same install and consume, shared (#106). A shared snmpio exports only what SNMPIO_EXPORT
+      # marks, so an unmarked function the examples call fails to link them. The script catches the
+      # ones they don't: it checks the export list both ways -- everything the static install's
+      # archive defines out of line in namespace snmpio present, snmpio::detail absent -- and that
+      # each example loads the library from the prefix. The consumer then runs against it, which is
+      # what shows the error categories stayed single instances across the boundary.
+      - name: Build and install, shared
+        run: |
+          cmake -S . -B build-shared -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DSNMPIO_BUILD_TESTS=OFF -DSNMPIO_WERROR=ON -DBUILD_SHARED_LIBS=ON
+          cmake --build build-shared
+          cmake --install build-shared --prefix "$RUNNER_TEMP/prefix-shared"
+
+      - name: Build the examples against the shared install
+        run: |
+          cmake -S examples -B build-shared/examples -G Ninja \
+            -DCMAKE_PREFIX_PATH="$RUNNER_TEMP/prefix-shared"
+          cmake --build build-shared/examples
+
+      - name: Shared library exports the API
+        run: |
+          .github/scripts/shared-library.sh "$RUNNER_TEMP/prefix-shared" \
+            "$RUNNER_TEMP/prefix" build-shared/examples
+
+      - name: Run a consumer against the shared install
+        run: |
+          cmake -S tests/consumer -B build-shared/consumer -G Ninja \
+            -DCMAKE_PREFIX_PATH="$RUNNER_TEMP/prefix-shared"
+          cmake --build build-shared/consumer
+          build-shared/consumer/snmpio-consumer
 
   style:
     name: clang-format + clang-tidy

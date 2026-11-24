@@ -9,6 +9,7 @@
 #include <vector>
 
 #include <snmpio/Error.hpp>
+#include <snmpio/Export.hpp>
 #include <snmpio/Pdu.hpp>
 #include <snmpio/Usm.hpp>
 #include <snmpio/Value.hpp>
@@ -80,8 +81,8 @@ struct V3Message {
   std::size_t authParamsOffset = 0;
 };
 
-void encodeScopedPdu(ber::Writer& w, const ScopedPdu& s);
-std::optional<ScopedPdu> decodeScopedPdu(ber::Reader& r);
+SNMPIO_EXPORT void encodeScopedPdu(ber::Writer& w, const ScopedPdu& s);
+SNMPIO_EXPORT std::optional<ScopedPdu> decodeScopedPdu(ber::Reader& r);
 
 // Encodes a whole message: encrypts the ScopedPDU if header.level is authPriv, and fills in the
 // digest if it is authenticated at all. The privacy parameters it chose are written into the
@@ -89,21 +90,22 @@ std::optional<ScopedPdu> decodeScopedPdu(ber::Reader& r);
 //
 // The privacy arguments are trailing and defaulted so that the noAuthNoPriv and authNoPriv call
 // sites -- which are most of them -- say nothing about a protocol they do not use.
-std::vector<std::byte> encodeV3Message(const V3Header& header, const UsmParameters& usm,
-                                       const ScopedPdu& scoped, AuthProtocol auth,
-                                       std::span<const std::byte> localizedKey, net::ErrorCode& ec,
-                                       PrivProtocol priv = PrivProtocol::None,
-                                       std::span<const std::byte> privKey = {});
+SNMPIO_EXPORT std::vector<std::byte> encodeV3Message(
+    const V3Header& header, const UsmParameters& usm, const ScopedPdu& scoped, AuthProtocol auth,
+    std::span<const std::byte> localizedKey, net::ErrorCode& ec,
+    PrivProtocol priv = PrivProtocol::None, std::span<const std::byte> privKey = {});
 
-std::optional<V3Message> decodeV3Message(std::span<const std::byte> datagram, net::ErrorCode& ec);
+SNMPIO_EXPORT std::optional<V3Message> decodeV3Message(std::span<const std::byte> datagram,
+                                                       net::ErrorCode& ec);
 
 // Recomputes the digest over the datagram with msgAuthenticationParameters blanked and compares
 // it in constant time. `msg` must be what decodeV3Message returned for this same datagram.
 //
 // Timeliness -- engine boots, time and the 150-second Time Window -- is deliberately not checked
 // here. It needs the Engine's cached boots/time, which the Client holds.
-bool verifyAuth(std::span<const std::byte> datagram, const V3Message& msg, AuthProtocol auth,
-                std::span<const std::byte> localizedKey, net::ErrorCode& ec);
+SNMPIO_EXPORT bool verifyAuth(std::span<const std::byte> datagram, const V3Message& msg,
+                              AuthProtocol auth, std::span<const std::byte> localizedKey,
+                              net::ErrorCode& ec);
 
 // Decrypts msg.encryptedPdu in place, filling msg.scoped. Separate from decodeV3Message because
 // the key is a property of the request this message answers, and finding that request needs the
@@ -111,8 +113,8 @@ bool verifyAuth(std::span<const std::byte> datagram, const V3Message& msg, AuthP
 //
 // Fails with Errc::DecryptionFailed for a payload this key does not open -- including one that
 // decrypts to something that is not a ScopedPDU, which is the same thing said later.
-bool decryptScopedPdu(V3Message& msg, PrivProtocol priv, std::span<const std::byte> privKey,
-                      net::ErrorCode& ec);
+SNMPIO_EXPORT bool decryptScopedPdu(V3Message& msg, PrivProtocol priv,
+                                    std::span<const std::byte> privKey, net::ErrorCode& ec);
 
 }  // namespace snmpio
 

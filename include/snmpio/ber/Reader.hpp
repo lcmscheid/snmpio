@@ -8,6 +8,7 @@
 #include <vector>
 
 #include <snmpio/Error.hpp>
+#include <snmpio/Export.hpp>
 #include <snmpio/Oid.hpp>
 #include <snmpio/Value.hpp>
 #include <snmpio/ber/Tag.hpp>
@@ -26,7 +27,7 @@ namespace snmpio::ber {
 // past the end of the element it is inside, and the guard reports leftover bytes as TrailingData.
 //
 // The Reader does not own the buffer. It must not outlive the bytes it was constructed over.
-class Reader {
+class SNMPIO_EXPORT Reader {
  public:
   explicit Reader(std::span<const std::byte> input) noexcept : m_buf(input), m_end(input.size()) {}
 
@@ -113,7 +114,7 @@ class Reader {
 // Decodes an OBJECT IDENTIFIER's content Octets (i.e. the V of the TLV). Exposed because the
 // message layer meets bare OID content in a few places, and because it is the single most
 // fiddly decoder in the codec and deserves to be directly testable.
-std::optional<Oid> decodeOidContent(std::span<const std::byte> content, Errc& out);
+SNMPIO_EXPORT std::optional<Oid> decodeOidContent(std::span<const std::byte> content, Errc& out);
 
 }  // namespace snmpio::ber
 

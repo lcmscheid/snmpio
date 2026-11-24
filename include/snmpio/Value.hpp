@@ -8,6 +8,7 @@
 #include <variant>
 #include <vector>
 
+#include <snmpio/Export.hpp>
 #include <snmpio/Oid.hpp>
 
 namespace snmpio {
@@ -58,7 +59,7 @@ enum class ValueException : std::uint8_t {
   EndOfMibView,
 };
 
-std::string_view toString(ValueException e) noexcept;
+SNMPIO_EXPORT std::string_view toString(ValueException e) noexcept;
 
 // Everything a Varbind can carry.
 using Value = std::variant<NullType,      //
@@ -90,7 +91,7 @@ inline bool isException(const Value& v) noexcept {
 // Human-readable rendering, for logs and test failure messages. Not a display-hint implementation:
 // with no MIB there is nothing to hint with, so OCTET STRINGs are rendered as hex unless they are
 // entirely printable.
-std::string toString(const Value& v);
+SNMPIO_EXPORT std::string toString(const Value& v);
 
 }  // namespace snmpio
 

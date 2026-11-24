@@ -5,6 +5,7 @@
 #include <string>
 #include <string_view>
 
+#include <snmpio/Export.hpp>
 #include <snmpio/SecretOctets.hpp>
 
 namespace snmpio {
@@ -39,7 +40,7 @@ inline constexpr std::size_t minimumPasswordLength = 8;
 // Implicit from std::string and from a string literal, so that a Credentials initialiser names a
 // password as it always could. Read it through view(); nothing converts it back to a std::string
 // implicitly, which would be an unwiped copy.
-class Password {
+class SNMPIO_EXPORT Password {
  public:
   Password() noexcept = default;
   // NOLINTBEGIN(cppcoreguidelines-explicit-constructor,misc-explicit-constructor): see above

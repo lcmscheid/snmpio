@@ -12,7 +12,7 @@
 # is the point: the mistake this catches is the one that exports them -- a list made PUBLIC or
 # INTERFACE, or moved onto an INTERFACE target -- and a static library exports those to every
 # consumer's link line just as a shared one would. The hardened job checks the shared library's own
-# link line, since its consumers cannot link it yet.
+# link line.
 set -euo pipefail
 source "$(dirname "$0")/hardening-lib.sh"
 

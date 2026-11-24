@@ -9,6 +9,7 @@
 #include <string_view>
 
 #include <snmpio/Error.hpp>
+#include <snmpio/Export.hpp>
 #include <snmpio/Password.hpp>
 #include <snmpio/SecretOctets.hpp>
 #include <snmpio/Value.hpp>
@@ -66,15 +67,15 @@ enum class SecurityLevel : std::uint8_t {
 
 // Octets of key material the protocol's hash produces. Both the Master Key and the Localized Key
 // are one full digest wide; only the digest *in the message* is truncated.
-[[nodiscard]] std::size_t keySize(AuthProtocol p) noexcept;
+[[nodiscard]] SNMPIO_EXPORT std::size_t keySize(AuthProtocol p) noexcept;
 
 // Octets of msgAuthenticationParameters -- the HMAC, truncated. 12 for the RFC 3414 protocols;
 // RFC 7860 section 4.2 sets its own width per hash, and the widths are not the hash's own.
-[[nodiscard]] std::size_t authParamsSize(AuthProtocol p) noexcept;
+[[nodiscard]] SNMPIO_EXPORT std::size_t authParamsSize(AuthProtocol p) noexcept;
 
 // Octets of key material the cipher takes. DES's 16 is 8 of key and 8 of pre-IV (RFC 3414
 // section 8.1.1.1), which is why it is not the 8 the cipher itself uses.
-[[nodiscard]] std::size_t privKeySize(PrivProtocol p) noexcept;
+[[nodiscard]] SNMPIO_EXPORT std::size_t privKeySize(PrivProtocol p) noexcept;
 
 // The user, the level they authenticate at, and the secrets behind it.
 //
@@ -116,14 +117,16 @@ struct Credentials {
 //
 // This and the derivations below return SecretOctets, so that a key wipes itself in the caller's
 // keeping as it does in snmpio's (threat model S5).
-[[nodiscard]] SecretOctets passwordToKey(AuthProtocol p, std::string_view password,
-                                         net::ErrorCode& ec);
+[[nodiscard]] SNMPIO_EXPORT SecretOctets passwordToKey(AuthProtocol p, std::string_view password,
+                                                       net::ErrorCode& ec);
 
 // RFC 3414 section 2.6: hash(masterKey || engineId || masterKey). Binds a Master Key to one
 // Authoritative Engine, so a key lifted from one Engine is useless against another. One short
 // hash: this is the authentication key's whole per-Engine cost once the Master Key is known.
-[[nodiscard]] SecretOctets localizeKey(AuthProtocol p, std::span<const std::byte> masterKey,
-                                       std::span<const std::byte> engineId, net::ErrorCode& ec);
+[[nodiscard]] SNMPIO_EXPORT SecretOctets localizeKey(AuthProtocol p,
+                                                     std::span<const std::byte> masterKey,
+                                                     std::span<const std::byte> engineId,
+                                                     net::ErrorCode& ec);
 
 // The privacy key for one Engine, from the privacy secret's Master Key: localizeKey under the
 // authentication protocol's hash, extended if the privacy protocol needs more key material than
@@ -132,21 +135,21 @@ struct Credentials {
 // The extension is the whole of the Blumenthal/Reeder difference. Blumenthal appends the hash of
 // the key so far; Reeder appends the key so far run back through password-to-key and localized
 // again -- a megabyte per Engine whatever the caller supplied, which is why its caller caches it.
-[[nodiscard]] SecretOctets localizedPrivKey(AuthProtocol auth, PrivProtocol priv,
-                                            std::span<const std::byte> masterKey,
-                                            std::span<const std::byte> engineId,
-                                            net::ErrorCode& ec);
+[[nodiscard]] SNMPIO_EXPORT SecretOctets localizedPrivKey(AuthProtocol auth, PrivProtocol priv,
+                                                          std::span<const std::byte> masterKey,
+                                                          std::span<const std::byte> engineId,
+                                                          net::ErrorCode& ec);
 
 // The same two keys from Credentials: the Master Key they carry, or else the one their password
 // derives to, localized to one Engine. Each derivation from a password is the megabyte hash, and
 // is deliberately not cached here, because a cache without an owner is a leak; the Client caches
 // per Master Key and engineID.
-[[nodiscard]] SecretOctets localizedAuthKey(const Credentials& creds,
-                                            std::span<const std::byte> engineId,
-                                            net::ErrorCode& ec);
-[[nodiscard]] SecretOctets localizedPrivKey(const Credentials& creds,
-                                            std::span<const std::byte> engineId,
-                                            net::ErrorCode& ec);
+[[nodiscard]] SNMPIO_EXPORT SecretOctets localizedAuthKey(const Credentials& creds,
+                                                          std::span<const std::byte> engineId,
+                                                          net::ErrorCode& ec);
+[[nodiscard]] SNMPIO_EXPORT SecretOctets localizedPrivKey(const Credentials& creds,
+                                                          std::span<const std::byte> engineId,
+                                                          net::ErrorCode& ec);
 
 // Encrypts a ScopedPDU and writes the msgPrivacyParameters it chose into `privParams`. The salt is
 // this library's to pick -- RFC 3826 section 3.1.2.1 asks only that it never repeat for one key --
@@ -155,24 +158,27 @@ struct Credentials {
 // `boots` and `time` are the Authoritative Engine's, and travel in the message: AES puts them in
 // the IV, DES uses the boots half in the salt, and both sides therefore derive the same IV from
 // what the message already carries.
-[[nodiscard]] Octets privEncrypt(PrivProtocol p, std::span<const std::byte> privKey,
-                                 std::int32_t boots, std::int32_t time,
-                                 std::span<const std::byte> plaintext, Octets& privParams,
-                                 net::ErrorCode& ec);
+[[nodiscard]] SNMPIO_EXPORT Octets privEncrypt(PrivProtocol p, std::span<const std::byte> privKey,
+                                               std::int32_t boots, std::int32_t time,
+                                               std::span<const std::byte> plaintext,
+                                               Octets& privParams, net::ErrorCode& ec);
 
 // The inverse. The plaintext keeps whatever padding DES needed: RFC 3414 section 8.1.1.2 leaves
 // the pad Octets unspecified, so there is nothing here that could strip them -- the BER decoder
 // stops at the end of the ScopedPDU's own SEQUENCE and never looks at them.
-[[nodiscard]] Octets privDecrypt(PrivProtocol p, std::span<const std::byte> privKey,
-                                 std::int32_t boots, std::int32_t time,
-                                 std::span<const std::byte> privParams,
-                                 std::span<const std::byte> ciphertext, net::ErrorCode& ec);
+[[nodiscard]] SNMPIO_EXPORT Octets privDecrypt(PrivProtocol p, std::span<const std::byte> privKey,
+                                               std::int32_t boots, std::int32_t time,
+                                               std::span<const std::byte> privParams,
+                                               std::span<const std::byte> ciphertext,
+                                               net::ErrorCode& ec);
 
 // HMAC over a whole message, truncated to authParamsSize(p). The caller is responsible for having
 // zeroed msgAuthenticationParameters first: RFC 3414 section 6.3.1 hashes the message with the
 // digest field present but blank, which is why the field's width is fixed per protocol.
-[[nodiscard]] Octets authDigest(AuthProtocol p, std::span<const std::byte> localizedKey,
-                                std::span<const std::byte> message, net::ErrorCode& ec);
+[[nodiscard]] SNMPIO_EXPORT Octets authDigest(AuthProtocol p,
+                                              std::span<const std::byte> localizedKey,
+                                              std::span<const std::byte> message,
+                                              net::ErrorCode& ec);
 
 }  // namespace snmpio
 

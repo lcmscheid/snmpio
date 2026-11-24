@@ -10,6 +10,8 @@
 #include <string_view>
 #include <vector>
 
+#include <snmpio/Export.hpp>
+
 namespace snmpio {
 
 // An object identifier: a sequence of 32-bit sub-identifiers.
@@ -20,7 +22,7 @@ namespace snmpio {
 //
 // Comparison is lexicographic on sub-identifiers, which is exactly SNMP's ordering, so the walk
 // loop's "is this OID greater than the last one" check is a plain operator<.
-class Oid {
+class SNMPIO_EXPORT Oid {
  public:
   using ValueType = std::uint32_t;
   using Container = std::vector<ValueType>;

@@ -6,13 +6,20 @@
 #include <type_traits>
 #include <vector>
 
+#include <snmpio/Export.hpp>
+
 namespace snmpio {
 
 namespace detail {
 
 // OPENSSL_cleanse (ADR-0001), declared here so that no installed header includes OpenSSL's: zeros
 // that dead-store elimination cannot remove, as a memset before a free may be.
-void cleanse(void* p, std::size_t n) noexcept;
+//
+// The one snmpio::detail function a shared build exports (#106). CleansingAllocator::deallocate
+// calls it, and that is compiled wherever a SecretOctets is freed -- in a consumer's own code
+// whenever it destroys a Credentials -- so the consumer has to be able to link it. It is still not
+// API: the name, like everything in detail, can change without notice.
+SNMPIO_EXPORT void cleanse(void* p, std::size_t n) noexcept;
 
 // An allocator that wipes every buffer it hands back, before handing it on to Upstream. Botan's
 // secure_vector is the same arrangement: a std::vector whose allocator cleanses, which covers the

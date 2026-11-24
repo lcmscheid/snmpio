@@ -8,6 +8,7 @@
 #include <vector>
 
 #include <snmpio/Error.hpp>
+#include <snmpio/Export.hpp>
 #include <snmpio/Oid.hpp>
 #include <snmpio/Value.hpp>
 #include <snmpio/ber/Tag.hpp>
@@ -24,7 +25,7 @@ namespace snmpio::ber {
 //
 // Errors are sticky, matching Reader: encoding something unencodable records the fault and turns
 // subsequent writes into no-ops, so a caller checks once at the end.
-class Writer {
+class SNMPIO_EXPORT Writer {
  public:
   Writer() = default;
   explicit Writer(std::size_t reserveBytes) { m_buf.reserve(reserveBytes); }
@@ -89,7 +90,7 @@ class Writer {
 
 // Number of Octets objectIdentifier() would emit for o, Header included. Returns 0 if o is not
 // encodable. The message layer needs this to size buffers before it commits to an encoding.
-std::size_t encodedOidSize(const Oid& o) noexcept;
+SNMPIO_EXPORT std::size_t encodedOidSize(const Oid& o) noexcept;
 
 }  // namespace snmpio::ber
 

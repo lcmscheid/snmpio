@@ -150,10 +150,11 @@ find_package(OpenSSL ${SNMPIO_OPENSSL_MIN_VERSION} REQUIRED)
 # ---------------------------------------------------------------------------
 # The library
 # ---------------------------------------------------------------------------
-# Two targets compile these sources: snmpio, and fuzz/'s snmpio_fuzzed, an instrumented copy for
-# coverage feedback. Both take the list and snmpio_configure_library() from here, so a new source
-# file, header directory or dependency is one edit. Absolute paths, because fuzz/ resolves relative
-# ones against itself.
+# Up to three targets compile these sources: snmpio; fuzz/'s snmpio_fuzzed, an instrumented copy
+# for coverage feedback; and, in a shared build, snmpio_tested, the static copy tests/ links
+# because the tests reach into what a shared snmpio hides. All take the list and
+# snmpio_configure_library() from here, so a new source file, header directory or dependency is one
+# edit. Absolute paths, because fuzz/ and tests/ resolve relative ones against themselves.
 set(SNMPIO_SOURCES
   ${CMAKE_CURRENT_SOURCE_DIR}/src/BerReader.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/BerWriter.cpp
@@ -168,11 +169,11 @@ set(SNMPIO_SOURCES
   ${CMAKE_CURRENT_SOURCE_DIR}/src/Value.cpp)
 
 # What a target compiling SNMPIO_SOURCES needs: the headers, the Asio flavour (ADR-0002), threads,
-# OpenSSL and C++20. It reads SNMP_USE_BOOST_ASIO, SNMPIO_ASIO_TARGET, SNMPIO_ASIO_INCLUDE_DIRS and
-# GNUInstallDirs' CMAKE_INSTALL_INCLUDEDIR from the caller's scope, as CMake functions do, so it is
-# for this directory and its children (fuzz/); a project that add_subdirectory()s snmpio sees the
-# function, since CMake has none private -- the snmpio_ prefix is its namespace -- but not the
-# variables, and links snmpio::snmpio instead.
+# OpenSSL and C++20. It reads SNMP_USE_BOOST_ASIO, SNMPIO_ASIO_TARGET, SNMPIO_ASIO_INCLUDE_DIRS,
+# SNMPIO_GENERATED_INCLUDE_DIR and GNUInstallDirs' CMAKE_INSTALL_INCLUDEDIR from the caller's
+# scope, as CMake functions do, so it is for this directory and its children (fuzz/, tests/); a
+# project that add_subdirectory()s snmpio sees the function, since CMake has none private -- the
+# snmpio_ prefix is its namespace -- but not the variables, and links snmpio::snmpio instead.
 #
 # The Asio flavour is PUBLIC: Asio types appear in public signatures, so whatever links the target
 # has to be built against the same flavour. Threads are PUBLIC because Asio's headers, compiled in
@@ -181,15 +182,27 @@ set(SNMPIO_SOURCES
 # snmpioConfig.cmake finds it -- a static archive carries its private links to the linker.
 #
 # The header directory is the directory of this file (CMAKE_CURRENT_FUNCTION_LIST_DIR), not the
-# caller's, so fuzz/ finds the same one. The Asio include directory, when the find_path() fallback
-# under Dependencies supplied one, is BUILD_INTERFACE only: it is this machine's path, which the
-# installed snmpio must not carry. snmpio_fuzzed is never installed, so for it the wrapper changes
-# nothing.
+# caller's, so fuzz/ finds the same one. The generated one, which holds <snmpio/Export.hpp>, is
+# BUILD_INTERFACE only: installed, that header sits beside the others. The Asio include directory,
+# when the find_path() fallback under Dependencies supplied one, is BUILD_INTERFACE only too: it is
+# this machine's path, which the installed snmpio must not carry. snmpio_fuzzed and snmpio_tested
+# are never installed, so for them the wrappers change nothing.
 function(snmpio_configure_library target)
   target_include_directories(${target}
     PUBLIC
       $<BUILD_INTERFACE:${CMAKE_CURRENT_FUNCTION_LIST_DIR}/include>
+      $<BUILD_INTERFACE:${SNMPIO_GENERATED_INCLUDE_DIR}>
       $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
+  # SNMPIO_EXPORT is empty in a static library, and the generated header asks for that by
+  # SNMPIO_STATIC_DEFINE: without it the archive's objects, and the declarations a consumer
+  # compiles, would carry default visibility, and a consumer linking the archive into a shared
+  # object of its own would export our symbols from it. PUBLIC, so it travels with the target; a
+  # consumer never sets it, as Boost's CMake package sets BOOST_<LIB>_DYN_LINK for its consumers in
+  # the other direction.
+  get_target_property(type ${target} TYPE)
+  if(type STREQUAL "STATIC_LIBRARY")
+    target_compile_definitions(${target} PUBLIC SNMPIO_STATIC_DEFINE)
+  endif()
   target_link_libraries(${target} PUBLIC ${SNMPIO_ASIO_TARGET} Threads::Threads)
   if(SNMPIO_ASIO_INCLUDE_DIRS)
     target_include_directories(${target} SYSTEM PUBLIC
@@ -204,15 +217,28 @@ function(snmpio_configure_library target)
   target_compile_features(${target} PUBLIC cxx_std_20)
 endfunction()
 
+# Static by default, shared with -DBUILD_SHARED_LIBS=ON (#106). Either way, hidden is the default
+# visibility and the public API is what SNMPIO_EXPORT marks -- the precedent is Boost's compiled
+# libraries, whose BOOST_<LIB>_DECL is BOOST_SYMBOL_EXPORT or BOOST_SYMBOL_IMPORT. The macro comes
+# from GenerateExportHeader as <snmpio/Export.hpp>, generated into the build tree and installed
+# beside the other headers. snmpio::detail stays hidden, but for detail::cleanse (SecretOctets.hpp
+# says why). The tests reach further in than any consumer, so a shared build compiles them a static
+# copy of these sources, as fuzz/ always does for its own, rather than export more for them.
 add_library(snmpio ${SNMPIO_SOURCES})
 add_library(snmpio::snmpio ALIAS snmpio)
-snmpio_configure_library(snmpio)
 
 set_target_properties(snmpio PROPERTIES
   VERSION ${PROJECT_VERSION}
   SOVERSION ${PROJECT_VERSION_MAJOR}
   CXX_VISIBILITY_PRESET hidden
   VISIBILITY_INLINES_HIDDEN ON)
+
+include(GenerateExportHeader)
+set(SNMPIO_GENERATED_INCLUDE_DIR "${PROJECT_BINARY_DIR}/include")
+generate_export_header(snmpio
+  EXPORT_FILE_NAME "${SNMPIO_GENERATED_INCLUDE_DIR}/snmpio/Export.hpp"
+  INCLUDE_GUARD_NAME SNMPIO_EXPORT_HPP)
+snmpio_configure_library(snmpio)
 
 add_library(snmpio_warnings INTERFACE)
 # /we4062 and -Werror=switch are not gated on SNMPIO_WERROR: the classification switches in
@@ -384,6 +410,8 @@ install(TARGETS snmpio snmpio_warnings snmpio_sanitizers
 # whole without them. A pattern rather than a list, so that the next view is left out too.
 install(DIRECTORY include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
   PATTERN "*View.hpp" EXCLUDE)
+install(FILES "${SNMPIO_GENERATED_INCLUDE_DIR}/snmpio/Export.hpp"
+  DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/snmpio)
 
 install(EXPORT snmpioTargets
   FILE snmpioTargets.cmake

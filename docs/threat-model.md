@@ -138,11 +138,11 @@ the x86_64 and production rows — are applied to snmpio's own targets by `SNMPI
 builds the `hardened` preset with GCC and Clang against libstdc++ and runs the suite under it, less
 the interop tests, which need an Agent; the libc++ job builds with the set too, the one build where
 its libc++ macro does anything. Each checks that every compile and link line of ours carries every
-flag and reads the linker's half back off the binaries, and a shared build of the library is
-checked the same way. `CompilerHardening.FortifySourceStopsAnOverflowingCopy` fails where
-`_FORTIFY_SOURCE` is not honoured (#46). The fuzzers are not built with the set: they run under
-sanitizers, which replace the functions `_FORTIFY_SOURCE` wraps. Like the standard-library macros,
-the flags are never exported.
+flag and reads the linker's half back off the binaries, and a shared build of the library, its
+tests included, is checked the same way. `CompilerHardening.FortifySourceStopsAnOverflowingCopy`
+fails where `_FORTIFY_SOURCE` is not honoured (#46). The fuzzers are not built with the set: they
+run under sanitizers, which replace the functions `_FORTIFY_SOURCE` wraps. Like the
+standard-library macros, the flags are never exported.
 
 Each row's letter is its section's: **L**ifecycle, **C**oncurrency, **R**eplies, **E**ngine state,
 **W**ire confidentiality, resource **B**ounds, the codec (**K**, since C is taken) and **S**ecrets.

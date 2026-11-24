@@ -12,6 +12,7 @@
 #include <variant>
 #include <vector>
 
+#include <snmpio/Export.hpp>
 #include <snmpio/Oid.hpp>
 #include <snmpio/Pdu.hpp>
 #include <snmpio/Target.hpp>
@@ -113,11 +114,11 @@ class Client {
   // the two wait for each other forever. Nothing detects that.
   using BatchHandler = std::function<bool(std::span<const Varbind>)>;
 
-  explicit Client(const net::Executor& ex);
+  SNMPIO_EXPORT explicit Client(const net::Executor& ex);
   // Stops the Client (see stop()). Waits only for a Batch handler already running on another
   // thread (see BatchHandler), never for the outstanding operations: they complete later, on their
   // own executors.
-  ~Client();
+  SNMPIO_EXPORT ~Client();
 
   // Neither copyable nor movable (ADR-0009). A caller who needs to move one holds a
   // std::unique_ptr<Client>.
@@ -146,7 +147,7 @@ class Client {
   // If scheduling the cleanup on the strand throws, stop() lets the exception out, and the Client
   // is unusable: its strand runs nothing again, so no operation, outstanding or initiated
   // afterwards, ever completes (ADR-0009's amendment, #66).
-  void stop();
+  SNMPIO_EXPORT void stop();
 
   // GET: fetch each named instance. Completion: void(ErrorCode, Response).
   template <typename Token>
@@ -313,18 +314,22 @@ class Client {
   using WalkResult = std::tuple<net::ErrorCode>;
   using CollectResult = std::tuple<net::ErrorCode, std::vector<Varbind>>;
 
-  static std::vector<Varbind> toVarbinds(std::vector<Oid> oids);
-  static Pdu makePdu(PduType type, std::vector<Varbind> varbinds);
-  static Pdu makeBulkPdu(std::vector<Varbind> varbinds, std::int32_t nonRepeaters,
-                         std::int32_t maxRepetitions);
+  // These six are what the templates above call, and so, with the constructor, the destructor and
+  // stop(), what a shared build exports (#106): member by member rather than the class whole, which
+  // would export the nested Impl and every instantiation over it. Client has no vtable or typeinfo
+  // for a consumer to need.
+  SNMPIO_EXPORT static std::vector<Varbind> toVarbinds(std::vector<Oid> oids);
+  SNMPIO_EXPORT static Pdu makePdu(PduType type, std::vector<Varbind> varbinds);
+  SNMPIO_EXPORT static Pdu makeBulkPdu(std::vector<Varbind> varbinds, std::int32_t nonRepeaters,
+                                       std::int32_t maxRepetitions);
 
   // Not coroutines themselves: each hands back one of Impl's, which owns a share of the state, so
   // nothing that runs later holds a pointer to this Client.
-  net::Awaitable<RequestResult> doRequest(Target target, Auth auth, Pdu pdu);
-  net::Awaitable<WalkResult> doWalk(Target target, Auth auth, Oid base, WalkOptions options,
-                                    BatchHandler onBatch);
-  net::Awaitable<CollectResult> doWalkCollect(Target target, Auth auth, Oid base,
-                                              WalkOptions options);
+  SNMPIO_EXPORT net::Awaitable<RequestResult> doRequest(Target target, Auth auth, Pdu pdu);
+  SNMPIO_EXPORT net::Awaitable<WalkResult> doWalk(Target target, Auth auth, Oid base,
+                                                  WalkOptions options, BatchHandler onBatch);
+  SNMPIO_EXPORT net::Awaitable<CollectResult> doWalkCollect(Target target, Auth auth, Oid base,
+                                                            WalkOptions options);
 
   // Runs coro on the strand and delivers its result tuple through the completion token, on the
   // token's own executor rather than ours -- which is the whole reason this is not a bare

@@ -10,6 +10,7 @@
 #include <vector>
 
 #include <snmpio/Error.hpp>
+#include <snmpio/Export.hpp>
 #include <snmpio/Value.hpp>
 #include <snmpio/ber/Reader.hpp>
 #include <snmpio/ber/Tag.hpp>
@@ -28,7 +29,7 @@ enum class PduType : ber::TagType {
   Report = ber::tag::report,
 };
 
-[[nodiscard]] bool isPduTag(ber::TagType t) noexcept;
+[[nodiscard]] SNMPIO_EXPORT bool isPduTag(ber::TagType t) noexcept;
 
 // RFC 3416 section 4.2 error-status. Its own enumeration and its own error category rather than
 // more Errc values: the numbering is the Agent's, fixed by the RFC, and folding it into ours would
@@ -55,11 +56,11 @@ enum class ErrorStatus : std::int32_t {
   InconsistentName = 18,
 };
 
-const net::ErrorCategory& agentErrorCategory() noexcept;
+SNMPIO_EXPORT const net::ErrorCategory& agentErrorCategory() noexcept;
 
 // See the note on snmpio::make_error_code(Errc): the spelling is the standard's, not ours.
 // NOLINTNEXTLINE(readability-identifier-naming)
-net::ErrorCode make_error_code(ErrorStatus e) noexcept;
+SNMPIO_EXPORT net::ErrorCode make_error_code(ErrorStatus e) noexcept;
 
 // A Protocol Data Unit.
 //
@@ -82,11 +83,11 @@ struct Pdu {
   }
 };
 
-void encodePdu(ber::Writer& w, const Pdu& p);
+SNMPIO_EXPORT void encodePdu(ber::Writer& w, const Pdu& p);
 
 // Decodes one PDU TLV, whichever of the six types it is. Failures land in the Reader's sticky
 // error, as everywhere else in the codec.
-std::optional<Pdu> decodePdu(ber::Reader& r);
+SNMPIO_EXPORT std::optional<Pdu> decodePdu(ber::Reader& r);
 
 // RFC 3416 section 3: SNMPv2c is version 1 on the wire. The off-by-one is the specification's.
 inline constexpr std::int32_t versionV2c = 1;
@@ -99,12 +100,14 @@ struct V2cMessage {
 // The version field of any SNMP message, without decoding the rest of it. The receive loop has to
 // choose a decoder before it knows which protocol arrived, and guessing from the length or the
 // shape would be guessing.
-std::optional<std::int32_t> messageVersion(std::span<const std::byte> datagram) noexcept;
+SNMPIO_EXPORT std::optional<std::int32_t> messageVersion(
+    std::span<const std::byte> datagram) noexcept;
 
 // SEQUENCE { version INTEGER, community OCTET STRING, PDU }.
-std::vector<std::byte> encodeV2cMessage(std::string_view community, const Pdu& pdu,
-                                        net::ErrorCode& ec);
-std::optional<V2cMessage> decodeV2cMessage(std::span<const std::byte> datagram, net::ErrorCode& ec);
+SNMPIO_EXPORT std::vector<std::byte> encodeV2cMessage(std::string_view community, const Pdu& pdu,
+                                                      net::ErrorCode& ec);
+SNMPIO_EXPORT std::optional<V2cMessage> decodeV2cMessage(std::span<const std::byte> datagram,
+                                                         net::ErrorCode& ec);
 
 }  // namespace snmpio
 

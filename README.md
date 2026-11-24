@@ -407,6 +407,12 @@ against, plus OpenSSL and Threads — so a consumer needs only these two lines. 
 version check accepts any release with the same major version. [`examples/`](examples/) is a
 complete consumer, and CI builds it against a fresh install on every push.
 
+snmpio builds as a static library by default. Shared builds are supported too: configure with
+`-DBUILD_SHARED_LIBS=ON`, as with any CMake project, and install as above. The consumer's two lines
+stay the same. A shared `libsnmpio.so` exports the public API and keeps the rest hidden. Its soname
+carries the major version, so the same-major rule above applies to it as well. CI builds the
+examples against both kinds of install.
+
 ### Sanitizer and hardening builds
 
 A green sanitizer run should mean the sanitizer looked, so each build is set up to see what it

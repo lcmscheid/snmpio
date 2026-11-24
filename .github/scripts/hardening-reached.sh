@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# hardening-reached.sh [--library-only] BUILD [FLAG...]: a build with SNMPIO_HARDENING on carries
-# the whole set, on every compile and link line of ours and in the binaries -- and each FLAG
-# besides on every compile line, as the libcxx job asks of -stdlib=libc++.
+# hardening-reached.sh BUILD [FLAG...]: a build with SNMPIO_HARDENING on carries the whole set, on
+# every compile and link line of ours and in the binaries -- and each FLAG besides on every compile
+# line, as the libcxx job asks of -stdlib=libc++.
 #
-# The binaries are the test executables, and libsnmpio.so in a shared build. --library-only is for
-# a build without the tests, which must then be a shared one: a static archive has no link line,
-# so there would be nothing of the linker's half to check.
+# The binaries are the test executables, and libsnmpio.so in a shared build. A shared build's
+# tests link their own static copy of the library (tests/CMakeLists.txt), whose compile lines are
+# under src/ like the library's and so checked with them.
 #
 # A flag that stopped reaching the build would leave CI green: Ubuntu's GCC fortifies and protects
 # the stack by default, so the binaries would look much the same.
@@ -14,22 +14,14 @@
 set -euo pipefail
 source "$(dirname "$0")/hardening-lib.sh"
 
-dirs=(src tests)
-if [ "${1:-}" = --library-only ]; then
-  dirs=(src)
-  shift
-fi
-build=${1:?usage: hardening-reached.sh [--library-only] BUILD [FLAG...]}
+build=${1:?usage: hardening-reached.sh BUILD [FLAG...]}
 shift
 
 read_hardening_lists "$build"
-compile_lines_carry "$build/compile_commands.json" "${dirs[@]}" -- "${COMPILE[@]}" "$@"
+compile_lines_carry "$build/compile_commands.json" src tests -- "${COMPILE[@]}" "$@"
 link_lines_carry "$build" "${LINK[@]}"
-binaries=()
-if [ "${#dirs[@]}" -gt 1 ]; then
-  find_files "$build/tests" -executable -name 'snmpio_*'
-  binaries=("${FILES[@]}")
-fi
+find_files "$build/tests" -executable -name 'snmpio_*'
+binaries=("${FILES[@]}")
 find_files "$build" -name 'libsnmpio.so*'
 elf_hardened "${binaries[@]}" "${FILES[@]}"
 echo "every compile and link line of ours carries all $((${#COMPILE[@]} + $#)) + ${#LINK[@]} flags"

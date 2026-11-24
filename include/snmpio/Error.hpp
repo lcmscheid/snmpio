@@ -1,6 +1,7 @@
 #ifndef SNMPIO_ERROR_HPP
 #define SNMPIO_ERROR_HPP
 
+#include <snmpio/Export.hpp>
 #include <snmpio/detail/Asio.hpp>
 
 namespace snmpio {
@@ -138,15 +139,15 @@ enum class ErrorClass {
 };
 
 // The one entry point. Safe to call on a success code, which classifies as Ok.
-[[nodiscard]] ErrorClass classify(const net::ErrorCode& ec) noexcept;
+[[nodiscard]] SNMPIO_EXPORT ErrorClass classify(const net::ErrorCode& ec) noexcept;
 
-const net::ErrorCategory& errorCategory() noexcept;
+SNMPIO_EXPORT const net::ErrorCategory& errorCategory() noexcept;
 
 // Not makeErrorCode: this is an ADL customisation point. Both std::error_code and
 // boost::system::error_code call `make_error_code(e)` unqualified when converting from a
 // registered enum, so the spelling is fixed by the standard, not by us.
 // NOLINTNEXTLINE(readability-identifier-naming)
-net::ErrorCode make_error_code(Errc e) noexcept;
+SNMPIO_EXPORT net::ErrorCode make_error_code(Errc e) noexcept;
 
 }  // namespace snmpio
 

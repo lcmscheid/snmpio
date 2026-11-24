@@ -413,15 +413,18 @@ jobs:
             | xargs clang-format --dry-run --Werror
 
       # Static analysis, plus the naming convention the formatter cannot check. tests/ and fuzz/
-      # carry their own overlay relaxing the checks that only make sense for library code. fuzz/
-      # is linted against its own configure: the plain one leaves the fuzzers out of the compile
+      # carry their own overlay relaxing the checks that only make sense for library code. Both
+      # compile databases come from presets, the same commands the README gives, so a local run
+      # reads the Clang command line this job reads (#57). The tidy preset only configures here:
+      # SNMPIO_CLANG_TIDY acts during a build, and this step builds nothing. fuzz/ is linted
+      # against its own configure: the tidy preset leaves the fuzzers out of the compile
       # database, so clang-tidy would guess their flags from a neighbour, -DNDEBUG included, and
       # their asserts -- the oracles -- would compile out unseen. Configuring builds nothing, so
       # the second configure costs seconds. src/ is still linted under -DNDEBUG alone, which is
       # fine while the library has no assert() of its own; the first one wants the same care.
       - name: clang-tidy
         run: |
-          cmake -S . -B build -G Ninja -DCMAKE_CXX_COMPILER=clang++
-          clang-tidy -p build src/*.cpp tests/*.cpp
+          cmake --preset tidy
+          clang-tidy -p build/tidy src/*.cpp tests/*.cpp
           cmake --preset fuzz
           clang-tidy -p build/fuzz fuzz/*.cpp

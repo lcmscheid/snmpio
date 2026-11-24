@@ -466,11 +466,15 @@ Clang's.
 because it was noisy once is a check that will not catch the real defect later.
 
 ```sh
-cmake --preset default                          # always writes compile_commands.json
-clang-tidy -p build/default src/*.cpp tests/*.cpp
+cmake --preset tidy                             # Clang's command line, as CI reads it
+clang-tidy -p build/tidy src/*.cpp tests/*.cpp
 cmake --preset fuzz                             # fuzz/ has its own flags (-UNDEBUG)
 clang-tidy -p build/fuzz fuzz/*.cpp
 ```
+
+These are the commands CI's `style` job runs. Configuring writes `compile_commands.json` and builds
+nothing, so the `tidy` preset's own clang-tidy pass, which runs only during a build, stays out of
+the way.
 
 Both clang tools are whatever Arch's `clang` package ships; CI runs them in an `archlinux:latest`
 container, so they follow Arch rather than a pin. Their output changes between major versions, so a

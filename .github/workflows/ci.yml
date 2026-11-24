@@ -412,16 +412,13 @@ jobs:
           find include src tests fuzz examples -name '*.hpp' -o -name '*.cpp' \
             | xargs clang-format --dry-run --Werror
 
-      # Static analysis, plus the naming convention the formatter cannot check. tests/ and fuzz/
-      # carry their own overlay relaxing the checks that only make sense for library code. fuzz/
-      # is linted against its own configure: the plain one leaves the fuzzers out of the compile
-      # database, so clang-tidy would guess their flags from a neighbour, -DNDEBUG included, and
-      # their asserts -- the oracles -- would compile out unseen. Configuring builds nothing, so
-      # the second configure costs seconds. src/ is still linted under -DNDEBUG alone, which is
-      # fine while the library has no assert() of its own; the first one wants the same care.
+      # Static analysis, plus the naming convention the formatter cannot check. The README's
+      # Static analysis section gives these commands and explains them, so a local run reads the
+      # Clang command line this job reads (#57). Before #57 this step configured by hand, without
+      # -Werror; the README says why the preset's -Werror leaves the result unchanged.
       - name: clang-tidy
         run: |
-          cmake -S . -B build -G Ninja -DCMAKE_CXX_COMPILER=clang++
-          clang-tidy -p build src/*.cpp tests/*.cpp
+          cmake --preset tidy
+          clang-tidy -p build/tidy src/*.cpp tests/*.cpp
           cmake --preset fuzz
           clang-tidy -p build/fuzz fuzz/*.cpp

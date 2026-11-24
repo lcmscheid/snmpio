@@ -368,6 +368,7 @@ To avoid the Boost dependency, use the `standalone` preset — standalone Asio i
 | `debug` | Boost.Asio, `Debug` |
 | `asan` | Boost.Asio, `Debug`, address + undefined-behaviour sanitizers |
 | `tsan` | Clang, Boost.Asio, `Debug`, thread sanitizer |
+| `hardened` | Boost.Asio, `RelWithDebInfo`, the OpenSSF compiler hardening flags |
 | `tidy` | Clang with `clang-tidy` folded into the build |
 | `fuzz` | Clang, fuzzers on, tests off |
 
@@ -381,6 +382,7 @@ CLion, Qt Creator) will offer these directly.
 | `SNMPIO_BUILD_FUZZERS` | `OFF` | Build the libFuzzer targets (Clang only) |
 | `SNMPIO_SANITIZE` | `OFF` | Address and undefined-behaviour sanitizers |
 | `SNMPIO_TSAN` | `OFF` | Thread sanitizer (Clang only; not with `SNMPIO_SANITIZE`) |
+| `SNMPIO_HARDENING` | `OFF` | The OpenSSF compiler hardening flags, on this repository's own targets only (GCC or Clang on an ELF target; not with a sanitizer, in `Debug` or with a multi-config generator) |
 | `SNMPIO_WERROR` | `OFF` | Treat warnings as errors |
 
 The Asio choice appears in every public signature, so it is resolved at configure time rather than
@@ -423,6 +425,16 @@ claims to:
   every build, so an out-of-bounds `operator[]` aborts instead of reading on. It is never exported:
   a consumer of the installed package builds with whatever flags they choose, and CI's
   install-and-consume job checks that.
+- **snmpio is tested under the OpenSSF compiler hardening flags** — the
+  [Compiler Options Hardening Guide](https://github.com/ossf/wg-best-practices-os-developers/blob/main/docs/Compiler-Hardening-Guides/Compiler-Options-Hardening-Guide-for-C-and-C++.md)'s
+  TL;DR set with its x86_64 and production rows: `_FORTIFY_SOURCE=3`, stack protector and
+  stack-clash protection, `-fcf-protection=full`, zero-initialised automatic variables, full RELRO
+  and the rest. CI builds the `hardened` preset with GCC and Clang and runs the test suite under
+  it, less the interop tests, which need an Agent; the libc++ job builds with the set too, and runs
+  the whole suite against `snmpd`. The fuzzers run under sanitizers instead, which the set cannot be
+  combined with. The flags are opt-in (`SNMPIO_HARDENING`) and, like the standard-library macros,
+  never exported: whether your binary is built with them is your build's choice, and the same
+  install-and-consume job checks that none reaches you.
 
 `docs/research/snmpio-safety-threats.md` cites the source for each: §3.4 for the compiler bug, §4–5
 for the rest. The one addition is sizing Asio's recycling cache to zero, which older Asio needs

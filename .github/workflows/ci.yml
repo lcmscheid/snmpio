@@ -73,6 +73,57 @@ jobs:
       - name: Test
         run: ctest --test-dir build --output-on-failure
 
+  # The OpenSSF Compiler Options Hardening Guide's set -- its TL;DR, x86_64 and production rows --
+  # on our own targets, by the `hardened` preset this job is the proof of (#46). The guide counts
+  # code that cannot be built with them as a bug, so both compilers build it and run the suite.
+  # Both against libstdc++: the set's libc++ macro is compiled in the libcxx job, which builds with
+  # the set too. The flags are PRIVATE and opt-in (CMakeLists.txt says why); the package job checks
+  # that none reaches a consumer.
+  hardened:
+    name: ${{ matrix.compiler }} / boost / hardened
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        compiler: [gcc, clang]
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build libboost-system-dev libgtest-dev libssl-dev
+
+      - name: Configure
+        run: |
+          cmake --preset hardened \
+            -DCMAKE_CXX_COMPILER=${{ matrix.compiler == 'gcc' && 'g++' || 'clang++' }}
+
+      - name: Build
+        run: cmake --build --preset hardened
+
+      # Every flag, on every compile and link line of ours, and the linker's half read back off the
+      # test binaries. The script reads the set from the lists CMakeLists.txt writes into the build,
+      # so it is written down once, and says what each check can and cannot see.
+      - name: Hardening reached the build
+        run: .github/scripts/hardening-reached.sh build/hardened
+
+      # The interop tests skip here, as in the build job: they need an Agent, and the interop
+      # and libcxx jobs are where one runs.
+      - name: Test
+        run: ctest --preset hardened
+
+      # The library's own link line exists only in a shared build, and the tests cannot link one:
+      # they reach into symbols the library hides. So the library alone, shared, and its link line
+      # and libsnmpio.so checked the same way -- -z nodlopen is visible only here, on a shared
+      # object.
+      - name: Shared library
+        run: |
+          cmake --preset hardened -B build/shared -DBUILD_SHARED_LIBS=ON -DSNMPIO_BUILD_TESTS=OFF \
+            -DCMAKE_CXX_COMPILER=${{ matrix.compiler == 'gcc' && 'g++' || 'clang++' }}
+          cmake --build build/shared
+          .github/scripts/hardening-reached.sh --library-only build/shared
+
   fuzz:
     name: fuzz (smoke)
     runs-on: ubuntu-24.04
@@ -217,13 +268,17 @@ jobs:
   # GoogleTest 1.14 rather than the 1.17 tests/CMakeLists.txt pins -- the version every libstdc++
   # cell already runs the suite against.
   #
+  # SNMPIO_HARDENING is on here as well: the OpenSSF set names libc++'s fast mode beside its other
+  # flags, and this is the one job where that macro does anything, so this is where the set as the
+  # guide gives it is built and run whole (#46).
+  #
   # One cell per Agent, as in the interop job: Agents we did not write take the decoder down paths
   # the Scripted Agent never does, the Simulators' misbehaviour most of all, and those paths should
   # meet libc++'s assertions as well. The snmpd cell runs the whole suite, the others its interop
   # half. StdlibHardening.StopsAnOutOfBoundsIndex is what fails if the mode stopped being honoured;
   # the step after the build says the compile lines asked for it.
   libcxx:
-    name: clang / standalone / libc++ (${{ matrix.agent }})
+    name: clang / standalone / libc++ / hardened (${{ matrix.agent }})
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
@@ -243,52 +298,34 @@ jobs:
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo \
             -DCMAKE_CXX_COMPILER=clang++ -DCMAKE_CXX_FLAGS=-stdlib=libc++ \
             -DSNMP_USE_BOOST_ASIO=OFF -DSNMPIO_WERROR=ON -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
+            -DSNMPIO_HARDENING=ON \
             -DCMAKE_DISABLE_FIND_PACKAGE_GTest=ON \
             -DFETCHCONTENT_SOURCE_DIR_GOOGLETEST=/usr/src/googletest
 
       - name: Build
         run: cmake --build build
 
-      # Every compile line of ours must carry both -stdlib=libc++ and the hardening mode, and the
-      # binaries must link libc++ and not libstdc++: a cell that fell back to libstdc++ would
-      # still go green, having compiled nothing this job exists for. A line is ours when its
-      # source file is under src/ or tests/ -- by where the file is, not by what the command
-      # mentions, since every test line names GoogleTest's include path. GoogleTest's own lines
-      # carry -stdlib=libc++ but not the hardening mode, which only our targets set, and they are
-      # left out wherever its source lives. Lines from src/ and tests/ must both be there, so the
-      # check cannot pass by having filtered everything of ours away.
+      # Every compile line of ours must carry -stdlib=libc++ and the whole hardening set, libc++'s
+      # mode included, and the binaries must link libc++ and not libstdc++: a cell that fell back to
+      # libstdc++ would still go green, having compiled nothing this job exists for. The script is
+      # the hardened job's, which says how a line is told to be ours; GoogleTest's own lines carry
+      # -stdlib=libc++ but not the set, which only our targets take, and are left out wherever its
+      # source lives.
       #
       # This is the libc++ half of the package job's "Hardening stays ours", kept here because no
       # other job compiles against libc++.
       #
-      # bash rather than the default sh -e, for pipefail: a jq that fails inside the command
-      # substitution fails the step rather than passing on the output it never printed. jq's own
-      # failure is ruled out first, so that its exit code means only "no match" after that. Each
-      # ldd is captured before grep reads it: grep -q leaving early under pipefail could otherwise
-      # fail the first test on ldd's SIGPIPE, and pass the second.
-      - name: libc++ hardening reached the compile lines
+      # bash rather than the default sh -e, for pipefail. Each ldd is captured before grep reads
+      # it: grep -q leaving early under pipefail could otherwise fail the first test on ldd's
+      # SIGPIPE, and pass the second.
+      - name: libc++ and hardening reached the build
         shell: bash
         run: |
-          commands=build/compile_commands.json
-          jq empty "$commands" || { echo "no readable $commands"; exit 1; }
-          ours='[.[] | select(.file | startswith($root + "src/") or startswith($root + "tests/"))]'
-          for dir in src tests; do
-            jq -e --arg root "$PWD/" --arg dir "$PWD/$dir/" \
-                "$ours | any(.file | startswith(\$dir))" "$commands" \
-                > /dev/null || { echo "no compile line of ours under $dir/"; exit 1; }
-          done
-          unhardened=$(jq -r --arg root "$PWD/" "$ours | .[]
-              | select(.command | (contains(\"-stdlib=libc++\")
-                  and contains(\"_LIBCPP_HARDENING_MODE=_LIBCPP_HARDENING_MODE_FAST\")) | not)
-              | .file" "$commands")
-          if [ -n "$unhardened" ]; then
-            echo "built without -stdlib=libc++ or libc++'s hardening mode:"
-            echo "$unhardened"
-            exit 1
-          fi
-          binaries=$(find build/tests -maxdepth 1 -type f -executable -name 'snmpio_*' || true)
-          [ -n "$binaries" ] || { echo "no test binaries to check"; exit 1; }
-          for binary in $binaries; do
+          .github/scripts/hardening-reached.sh build -stdlib=libc++
+          source .github/scripts/hardening-lib.sh
+          find_files build/tests -executable -name 'snmpio_*'
+          [ "${#FILES[@]}" -gt 0 ] || { echo "no test binaries to check"; exit 1; }
+          for binary in "${FILES[@]}"; do
             libs=$(ldd "$binary")
             grep -q 'libc++\.so' <<<"$libs" || { echo "$binary does not link libc++"; exit 1; }
             if grep -q 'libstdc++' <<<"$libs"; then
@@ -329,7 +366,7 @@ jobs:
       - name: Build and install
         run: |
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo \
-            -DSNMPIO_BUILD_TESTS=OFF -DSNMPIO_WERROR=ON
+            -DSNMPIO_BUILD_TESTS=OFF -DSNMPIO_WERROR=ON -DSNMPIO_HARDENING=ON
           cmake --build build
           cmake --install build --prefix "$RUNNER_TEMP/prefix"
 
@@ -339,26 +376,15 @@ jobs:
             -DCMAKE_PREFIX_PATH="$RUNNER_TEMP/prefix" -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
           cmake --build build/examples
 
-      # Standard-library hardening is PRIVATE to our own targets: choosing it for a consumer would
-      # be choosing their build flags. So the library must compile with it and the examples, which
-      # see only what the installed package exports, must not. grep exits 1 for "no match" and 2 for
-      # a file it could not read, and only the first is a pass -- a missing file proves nothing.
-      #
-      # This checks for the macros, not that libc++'s mode reached every compile line: the libcxx
-      # job checks that, as the one job that compiles against libc++.
+      # Hardening is PRIVATE to our own targets: choosing it for a consumer would be choosing their
+      # build flags. That is standard-library hardening, on in every build, and SNMPIO_HARDENING's
+      # OpenSSF set, which this job turns on so that there is something to leak (#46). The library
+      # must compile with every flag of both, and the examples, which see only what the installed
+      # package exports, with none -- on a compile line, a link line or in the installed CMake
+      # files. The script reads the set from the lists CMakeLists.txt writes, and says what a
+      # static library's link half does catch.
       - name: Hardening stays ours
-        run: |
-          pattern='_GLIBCXX_ASSERTIONS|_LIBCPP_HARDENING_MODE'
-          grep -qE "$pattern" build/compile_commands.json \
-            || { echo "the library was built without standard-library hardening"; exit 1; }
-          status=0
-          grep -qE "$pattern" build/examples/compile_commands.json \
-            "$RUNNER_TEMP"/prefix/lib*/cmake/snmpio/*.cmake || status=$?
-          case $status in
-            1) ;;
-            0) echo "an installed consumer inherited standard-library hardening"; exit 1 ;;
-            *) echo "nothing to check: the consumer's files are missing"; exit 1 ;;
-          esac
+        run: .github/scripts/hardening-stays-ours.sh build build/examples "$RUNNER_TEMP/prefix"
 
   style:
     name: clang-format + clang-tidy

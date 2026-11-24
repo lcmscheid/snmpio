@@ -25,6 +25,7 @@ option(SNMPIO_SANITIZE "Enable address and undefined-behaviour sanitizers" OFF)
 option(SNMPIO_TSAN "Enable the thread sanitizer (Clang; not together with SNMPIO_SANITIZE)" OFF)
 option(SNMPIO_WERROR "Treat warnings as errors" OFF)
 option(SNMPIO_CLANG_TIDY "Run clang-tidy as part of the build" OFF)
+option(SNMPIO_HARDENING "Build our own targets with the OpenSSF compiler hardening flags" OFF)
 
 # TSan and ASan cannot share a process, and GCC with TSan cannot build Asio warning-free: it warns
 # that TSan does not model std::atomic_thread_fence, which Asio's fenced blocks use (research note
@@ -34,6 +35,31 @@ if(SNMPIO_TSAN AND SNMPIO_SANITIZE)
 endif()
 if(SNMPIO_TSAN AND NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang")
   message(FATAL_ERROR "SNMPIO_TSAN requires Clang; configure with -DCMAKE_CXX_COMPILER=clang++.")
+endif()
+
+# The OpenSSF set is GCC's and Clang's flags, and its linker half is GNU ld's -z options, which
+# only an ELF target has: AppleClang, and GCC or Clang on macOS, Windows or Cygwin, would configure
+# and then fail at link. Those are named rather than asking for ELF, because CMake documents no
+# variable that says what the target's object format is. _FORTIFY_SOURCE does nothing without
+# optimisation, and glibc says so with a #warning that SNMPIO_WERROR turns into a failed build; the
+# OpenSSF set assumes -O2. A sanitizer replaces the very functions _FORTIFY_SOURCE wraps, so the
+# two would each be checking less than they claim.
+if(SNMPIO_HARDENING)
+  if(NOT CMAKE_CXX_COMPILER_ID MATCHES "^(GNU|Clang)$" OR APPLE OR WIN32 OR CYGWIN)
+    message(FATAL_ERROR
+      "SNMPIO_HARDENING is the OpenSSF flag set for GCC and Clang on an ELF target.")
+  endif()
+  if(SNMPIO_SANITIZE OR SNMPIO_TSAN)
+    message(FATAL_ERROR "SNMPIO_HARDENING cannot be combined with a sanitizer; pick one.")
+  endif()
+  # A multi-config generator chooses Debug at build time, past where this could refuse it.
+  get_property(SNMPIO_MULTI_CONFIG GLOBAL PROPERTY GENERATOR_IS_MULTI_CONFIG)
+  if(SNMPIO_MULTI_CONFIG OR CMAKE_BUILD_TYPE STREQUAL "Debug")
+    message(FATAL_ERROR
+      "SNMPIO_HARDENING needs an optimised build, chosen at configure time: _FORTIFY_SOURCE does "
+      "nothing at -O0. Use a single-config generator and RelWithDebInfo, as the hardened preset "
+      "does.")
+  endif()
 endif()
 
 # clang-tidy needs a compilation database whenever it is run out of band, so always emit one.
@@ -212,7 +238,68 @@ target_link_libraries(snmpio PRIVATE snmpio_warnings)
 set(SNMPIO_STDLIB_HARDENING
   _GLIBCXX_ASSERTIONS
   _LIBCPP_HARDENING_MODE=_LIBCPP_HARDENING_MODE_FAST)
-target_compile_definitions(snmpio PRIVATE ${SNMPIO_STDLIB_HARDENING})
+
+# The OpenSSF Compiler Options Hardening Guide's TL;DR set, its x86_64 row and its production row
+# (research note 5.1; #46), behind SNMPIO_HARDENING. Opt-in and PRIVATE to our own targets for the
+# reason the standard-library macros are PRIVATE, only more so: most of these are the consumer's
+# build's business, and some -- -ftrivial-auto-var-init, -fno-strict-aliasing -- change what code
+# compiles to. Lists, not an INTERFACE target, for the same export reason. Empty when the option is
+# off, so applying them is unconditional.
+#
+# The set less what is already here: -Wall and -Wconversion are snmpio_warnings', and the two
+# standard-library macros are SNMPIO_STDLIB_HARDENING, on in every build. -O2 is RelWithDebInfo's,
+# and the configure above refuses Debug. -U first, as the guide has it, so a toolchain that
+# defines _FORTIFY_SOURCE itself, as Ubuntu's GCC does, is overridden rather than redefined.
+#
+# The link options matter wherever we link: the test binaries, and snmpio itself in a shared build.
+# A static archive is not linked, and CMake applies LINK_OPTIONS to the link step alone.
+set(SNMPIO_HARDENING_COMPILE_OPTIONS)
+set(SNMPIO_HARDENING_LINK_OPTIONS)
+if(SNMPIO_HARDENING)
+  set(SNMPIO_HARDENING_COMPILE_OPTIONS
+    -Wformat -Wformat=2 -Wimplicit-fallthrough -Werror=format-security
+    -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=3
+    -fstrict-flex-arrays=3 -fstack-clash-protection -fstack-protector-strong
+    # production
+    -fno-delete-null-pointer-checks -fno-strict-overflow -fno-strict-aliasing
+    -ftrivial-auto-var-init=zero)
+  if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$")
+    list(APPEND SNMPIO_HARDENING_COMPILE_OPTIONS -fcf-protection=full)
+  endif()
+  set(SNMPIO_HARDENING_LINK_OPTIONS
+    LINKER:-z,nodlopen LINKER:-z,noexecstack LINKER:-z,relro LINKER:-z,now
+    LINKER:--as-needed LINKER:--no-copy-dt-needed-entries)
+endif()
+
+# Both kinds of hardening, PRIVATE, on one of our own targets: snmpio here, the test binaries in
+# tests/. One call per target, so a new target cannot take one kind and miss the other. fuzz/'s
+# instrumented copy sets the standard-library macros itself, beside its sanitizer's, and refuses
+# SNMPIO_HARDENING by way of the sanitizer check above.
+function(snmpio_harden target)
+  target_compile_definitions(${target} PRIVATE ${SNMPIO_STDLIB_HARDENING})
+  target_compile_options(${target} PRIVATE ${SNMPIO_HARDENING_COMPILE_OPTIONS})
+  target_link_options(${target} PRIVATE ${SNMPIO_HARDENING_LINK_OPTIONS})
+endfunction()
+snmpio_harden(snmpio)
+
+# Both lists as they reach a command line, one flag per line, for CI to check against: that every
+# flag reached each of our compile and link lines (.github/scripts/hardening-reached.sh), and that
+# none reached a consumer (hardening-stays-ours.sh). CI reads them rather than naming the flags
+# itself, so this file is the only place the set is written down. The link options are written in
+# GCC's -Wl, spelling; CMake gives Clang -Xlinker instead, and the scripts read both. Only with the
+# option on, and removed with it off, so a build reconfigured without it has no stale lists.
+if(SNMPIO_HARDENING)
+  list(TRANSFORM SNMPIO_STDLIB_HARDENING PREPEND "-D" OUTPUT_VARIABLE SNMPIO_COMPILE_FLAG_LIST)
+  list(APPEND SNMPIO_COMPILE_FLAG_LIST ${SNMPIO_HARDENING_COMPILE_OPTIONS})
+  list(JOIN SNMPIO_COMPILE_FLAG_LIST "\n" SNMPIO_COMPILE_FLAG_LINES)
+  file(WRITE "${PROJECT_BINARY_DIR}/hardening/compile-flags.txt" "${SNMPIO_COMPILE_FLAG_LINES}\n")
+  list(TRANSFORM SNMPIO_HARDENING_LINK_OPTIONS REPLACE "^LINKER:" "-Wl,"
+    OUTPUT_VARIABLE SNMPIO_LINK_FLAG_LIST)
+  list(JOIN SNMPIO_LINK_FLAG_LIST "\n" SNMPIO_LINK_FLAG_LINES)
+  file(WRITE "${PROJECT_BINARY_DIR}/hardening/link-flags.txt" "${SNMPIO_LINK_FLAG_LINES}\n")
+else()
+  file(REMOVE_RECURSE "${PROJECT_BINARY_DIR}/hardening")
+endif()
 
 # Asio hands freed handler and coroutine-frame memory to a thread-local cache and reuses it, so a
 # use-after-free in a sanitizer build touches a live recycled block and goes unreported. None of

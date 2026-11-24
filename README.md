@@ -473,19 +473,17 @@ clang-tidy -p build/fuzz fuzz/*.cpp
 ```
 
 These are the commands CI's `style` job runs. Configuring writes `compile_commands.json` and builds
-nothing, so the `tidy` preset's own clang-tidy pass, which runs only during a build, stays out of
-the way.
+nothing. The `tidy` preset also sets `SNMPIO_CLANG_TIDY`, which finds clang-tidy at configure time
+and runs it on every compile, so `cmake --build --preset tidy` folds the same pass into the build.
+That preset builds no fuzzers, so `fuzz/` needs the flag on its own configure:
+`cmake --preset fuzz -DSNMPIO_CLANG_TIDY=ON`. `tests/` and `fuzz/` carry an overlay relaxing what
+only applies to library code (GoogleTest's do-while macros, fixture tables,
+`*Oid::parse("1.3.6.1")` on a literal).
 
 Both clang tools are whatever Arch's `clang` package ships; CI runs them in an `archlinux:latest`
 container, so they follow Arch rather than a pin. Their output changes between major versions, so a
 major LLVM bump gets its own commit. On another distro, expect disagreements with CI whenever your
 LLVM major differs from Arch's.
-
-Or fold it into the build with `-DSNMPIO_CLANG_TIDY=ON`, which is what the `tidy` preset does. That
-preset builds no fuzzers, so `fuzz/` needs the flag on its own configure:
-`cmake --preset fuzz -DSNMPIO_CLANG_TIDY=ON`. `tests/` and `fuzz/` carry an overlay
-relaxing what only applies to library code (GoogleTest's do-while macros, fixture tables,
-`*Oid::parse("1.3.6.1")` on a literal).
 
 Each `NOLINT` carries its reason at the site: `make_error_code`, whose spelling is fixed by the
 standard because both `error_code` types call it unqualified through ADL; the
